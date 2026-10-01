@@ -46,7 +46,7 @@ struct PlaceSearchView: View {
                         .autocorrectionDisabled()
                         .focused($searchFocused)
                         .submitLabel(.search)
-                        .onSubmit { searchAttempt += 1 }
+                        .onSubmit { searchFocused = false; searchAttempt += 1 }
                         .accessibilityIdentifier("address_search")
                 }
                 if searching { ProgressView("Ricerca…").accessibilityIdentifier("address_searching") }

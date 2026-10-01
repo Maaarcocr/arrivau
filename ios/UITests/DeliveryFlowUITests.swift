@@ -203,6 +203,13 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         replace(search, with: "Pizzeria")
         waitForLabelContaining(app.buttons["address_result_0"], shopName)
+        // Submit the search to dismiss the system keyboard, including its first-use tutorial.
+        // System keyboard language belongs to the simulator, not the app localization.
+        search.typeText("\n")
+        waitUntilAbsent(app.keyboards.firstMatch)
+        waitUntilAbsent(app.buttons["Continue"])
+        waitUntilAbsent(app.buttons["Continua"])
+        waitForLabelContaining(app.buttons["address_result_0"], shopName)
         captureScreen("06-address-search", showing: app.buttons["address_result_0"])
         // A short/empty query must remove previously valid results, even after debounce.
         replace(search, with: "xx")

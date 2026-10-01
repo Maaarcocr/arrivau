@@ -489,7 +489,16 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(element.exists || element.waitForExistence(timeout: timeout))
         waitUntilEnabled(element, timeout: timeout)
         XCTAssertTrue(element.isHittable)
-        element.tap()
+        // SwiftUI List can report a disclosure button's bounds as the entire expanded
+        // cell. Its center may be inside the interactive map. Tap the visible heading
+        // instead, just as a user does, while retaining all expand/collapse assertions.
+        let value = element.value as? String
+        let heading = element.staticTexts.firstMatch
+        if (value == "Espanso" || value == "Compresso") && heading.exists && heading.isHittable {
+            heading.tap()
+        } else {
+            element.tap()
+        }
     }
 
     private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval = 10) {

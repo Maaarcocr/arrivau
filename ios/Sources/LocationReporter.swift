@@ -5,7 +5,7 @@ import Combine
 /// This is standard location tracking, not force-quit/reboot recovery.
 @MainActor
 final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDelegate {
-    @Published private(set) var message = "Location sharing is off"
+    @Published private(set) var message = "Condivisione della posizione disattivata"
     @Published private(set) var permissionDenied = false
     var onCoordinate: ((Coordinate) -> Void)?
     private let manager = CLLocationManager()
@@ -35,7 +35,7 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         guard foreground || (running && allowBackground) else {
             manager.stopUpdatingLocation()
             running = false
-            message = "Location paused until the app is open"
+            message = "Posizione in pausa finché non apri l’app"
             return
         }
         manager.allowsBackgroundLocationUpdates = allowBackground
@@ -43,7 +43,7 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         if deterministic {
             if !running {
                 running = true
-                message = "UI test location: Pachino (simulated)"
+                message = "Posizione di test: Pachino (simulata)"
                 onCoordinate?(.pachino)
             }
             return
@@ -51,20 +51,20 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         switch manager.authorizationStatus {
         case .notDetermined:
             permissionDenied = false
-            message = "Allow location to share your position during this shift"
+            message = "Consenti l’accesso alla posizione per condividerla durante il turno"
             if foreground { manager.requestWhenInUseAuthorization() }
         case .authorizedAlways, .authorizedWhenInUse:
             permissionDenied = false
             if !running { manager.startUpdatingLocation(); running = true }
             message = allowBackground
-                ? "Sharing on shift, including with the screen locked (iOS indicator enabled)"
-                : "Sharing only while the app is open"
+                ? "Condivisione durante il turno, anche con lo schermo bloccato (indicatore iOS attivo)"
+                : "Condivisione solo mentre l’app è aperta"
         case .denied, .restricted:
             permissionDenied = true
             manager.stopUpdatingLocation()
             running = false
-            message = "Location access is off. Open Settings to allow it."
-        @unknown default: message = "Location permission is unavailable"
+            message = "Accesso alla posizione disattivato. Apri Impostazioni per consentirlo."
+        @unknown default: message = "Autorizzazione alla posizione non disponibile"
         }
     }
 
@@ -75,7 +75,7 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         manager.stopUpdatingLocation()
         manager.allowsBackgroundLocationUpdates = false
         manager.showsBackgroundLocationIndicator = false
-        message = "Location sharing is off"
+        message = "Condivisione della posizione disattivata"
     }
 
     // CLLocationManagerDelegate requirements are nonisolated. Copy sendable values and
@@ -107,10 +107,9 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         }
     }
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        let detail = error.localizedDescription
         Task { @MainActor [weak self] in
             guard let self, self.requested else { return }
-            self.message = "Location unavailable: \(detail)"
+            self.message = "Posizione non disponibile. Controlla le autorizzazioni e riprova."
         }
     }
 }

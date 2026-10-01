@@ -9,6 +9,7 @@ struct ArrivauApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(store)
+                .environment(\.locale, Locale(identifier: "it_IT"))
                 .tint(.orange)
                 .task { store.setForeground(scenePhase == .active) }
                 .onChange(of: scenePhase) { _, phase in store.setForeground(phase == .active) }
@@ -29,7 +30,7 @@ struct RootView: View {
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
                             Button { store.logout() } label: {
-                                Label("Switch role", systemImage: "person.crop.circle")
+                                Label("Cambia ruolo", systemImage: "person.crop.circle")
                             }
                                 .accessibilityIdentifier("switch_role")
                                 .disabled(store.isMutating)
@@ -38,12 +39,12 @@ struct RootView: View {
                 }
             } else { LoginView() }
         }
-        .alert("Couldn’t complete that", isPresented: Binding(
+        .alert("Operazione non riuscita", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
         )) {
             Button("OK", role: .cancel) { store.errorMessage = nil }
-        } message: { Text(store.errorMessage ?? "Please try again.") }
+        } message: { Text(store.errorMessage ?? "Riprova.") }
     }
 }
 
@@ -56,11 +57,11 @@ struct LoginView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Label("Arrivau", systemImage: "bicycle.circle.fill")
                             .font(.largeTitle.bold()).foregroundStyle(.orange)
-                        Text("Deliveries, one step at a time.").font(.title3)
-                        Text("Local demo").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        Text("Consegne, un passo alla volta.").font(.title3)
+                        Text("Demo locale").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     }.padding(.vertical, 16)
                 }
-                Section("What are you doing today?") {
+                Section("Cosa fai oggi?") {
                     ForEach(DemoRole.allCases) { role in
                         Button {
                             Task { await store.login(as: role) }
@@ -69,9 +70,9 @@ struct LoginView: View {
                                 Image(systemName: role == .dispatcher ? "list.clipboard" : "bicycle")
                                     .font(.title2).frame(width: 30)
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(role == .dispatcher ? "Dispatch deliveries" : "Deliver as \(role.title)")
+                                    Text(role == .dispatcher ? "Gestisci le consegne" : "Consegna come \(role.title)")
                                         .font(.headline)
-                                    Text(role == .dispatcher ? "Create deliveries and assign a driver" : "See your next stop and get moving")
+                                    Text(role == .dispatcher ? "Crea le consegne e scegli un corriere" : "Vedi la prossima tappa e parti")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 0)
@@ -81,24 +82,24 @@ struct LoginView: View {
                         .accessibilityIdentifier("login_\(role.rawValue)")
                         .disabled(store.isMutating)
                     }
-                    if store.isMutating { ProgressView("Connecting…") }
+                    if store.isMutating { ProgressView("Connessione…") }
                 }
                 Section {
-                    ExpandableDetails("Demo setup & limitations", identifier: "demo_settings") {
-                        TextField("API URL", text: $store.apiURL)
+                    ExpandableDetails("Impostazioni e limiti della demo", identifier: "demo_settings") {
+                        TextField("Indirizzo API", text: $store.apiURL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .keyboardType(.URL)
                             .accessibilityIdentifier("api_url")
                             .disabled(store.isMutating)
-                        Text("Use the iOS Simulator on the Mac running the Rust API with ARRIVAU_DEMO=1. HTTP is restricted to loopback in Debug builds.")
+                        Text("Usa il simulatore iOS sul Mac che esegue l’API Rust con ARRIVAU_DEMO=1. Nelle build Debug, HTTP è limitato agli indirizzi locali (loopback).")
                             .font(.caption).foregroundStyle(.secondary)
-                        Text("Public demo identities only. No production authentication, payments, customer contact details, push notifications or force-quit recovery. Background location is a separate opt-in and needs device validation.")
+                        Text("Solo identità demo pubbliche. Non sono disponibili autenticazione per l’uso reale, pagamenti, contatti dei clienti, notifiche push o ripristino dopo la chiusura forzata. La posizione in background richiede un consenso separato e verifiche su un dispositivo reale.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
-            .navigationTitle("Welcome")
+            .navigationTitle("Benvenuto")
             .navigationBarTitleDisplayMode(.inline)
         }
     }

@@ -53,9 +53,9 @@ class ScreenshotExportTests(unittest.TestCase):
             self.add(name, f"0~fixture{index}")
         self.add("Unrelated screenshot", "0~unrelated")
         manifest = exporter.export(self.result, self.root / "screens", True)
-        self.assertEqual(len(manifest["screenshots"]), 4)
+        self.assertEqual(len(manifest["screenshots"]), len(exporter.NAMES))
         self.assertEqual(manifest["missing"], [])
-        self.assertEqual(len(list((self.root / "screens").glob("*.png"))), 4)
+        self.assertEqual(len(list((self.root / "screens").glob("*.png"))), len(exporter.NAMES))
 
     def test_missing_expected_screen_fails_visibly(self):
         self.add(exporter.NAMES[0])
@@ -65,7 +65,7 @@ class ScreenshotExportTests(unittest.TestCase):
     def test_compact_result_without_materialized_sqlite_index(self):
         self.make_compact_result()
         manifest = exporter.export(self.result, self.root / "screens", True)
-        self.assertEqual(len(manifest["screenshots"]), 4)
+        self.assertEqual(len(manifest["screenshots"]), len(exporter.NAMES))
 
     @unittest.skipIf(zstandard is None, "zstandard is installed by the native screenshot workflow")
     def test_compact_discovery_skips_unrelated_truncated_compressed_record(self):
@@ -75,7 +75,7 @@ class ScreenshotExportTests(unittest.TestCase):
             manifest = exporter.export(self.result, self.root / "screens", True)
         self.assertEqual([item["name"] for item in manifest["screenshots"]], list(exporter.NAMES))
         self.assertEqual(manifest["missing"], [])
-        self.assertEqual(len(list((self.root / "screens").glob("*.png"))), 4)
+        self.assertEqual(len(list((self.root / "screens").glob("*.png"))), len(exporter.NAMES))
 
     def test_compact_discovery_skips_unrelated_unreadable_file(self):
         self.make_compact_result()
@@ -91,7 +91,7 @@ class ScreenshotExportTests(unittest.TestCase):
         with mock.patch.object(pathlib.Path, "read_bytes", read):
             with self.assertWarnsRegex(RuntimeWarning, "Skipped 1 unreadable"):
                 manifest = exporter.export(self.result, self.root / "screens", True)
-        self.assertEqual(len(manifest["screenshots"]), 4)
+        self.assertEqual(len(manifest["screenshots"]), len(exporter.NAMES))
 
     @unittest.skipIf(zstandard is None, "zstandard is installed by the native screenshot workflow")
     def test_corrupt_requested_payload_still_fails_loudly(self):
@@ -100,14 +100,14 @@ class ScreenshotExportTests(unittest.TestCase):
         for require_all in (False, True):
             with self.subTest(require_all=require_all):
                 with self.assertWarnsRegex(RuntimeWarning, "Skipped 1 unreadable"):
-                    with self.assertRaisesRegex(ValueError, "Cannot read snapshot 01-dispatcher-jobs"):
+                    with self.assertRaisesRegex(ValueError, "Cannot read snapshot 00-login"):
                         exporter.export(self.result, self.root / "screens", require_all)
-                self.assertFalse((self.root / "screens" / "01-dispatcher-jobs.png").exists())
+                self.assertFalse((self.root / "screens" / "00-login.png").exists())
 
     def test_missing_requested_payload_still_fails_loudly(self):
         self.make_compact_result()
         (self.result / "Data" / "data.0~compact0").unlink()
-        with self.assertRaisesRegex(ValueError, "Cannot read snapshot 01-dispatcher-jobs"):
+        with self.assertRaisesRegex(ValueError, "Cannot read snapshot 00-login"):
             exporter.export(self.result, self.root / "screens", True)
 
     @unittest.skipIf(zstandard is None, "zstandard is installed by the native screenshot workflow")

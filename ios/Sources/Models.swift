@@ -13,7 +13,7 @@ enum DemoRole: String, CaseIterable, Identifiable {
     case dispatcher, driver1, driver2
     var id: String { rawValue }
     var title: String {
-        switch self { case .dispatcher: "Dispatcher"; case .driver1: "Driver 1"; case .driver2: "Driver 2" }
+        switch self { case .dispatcher: "Centrale"; case .driver1: "Corriere 1"; case .driver2: "Corriere 2" }
     }
     var token: String {
         switch self { case .dispatcher: "demo-dispatcher"; case .driver1: "demo-driver-1"; case .driver2: "demo-driver-2" }
@@ -23,7 +23,15 @@ enum DemoRole: String, CaseIterable, Identifiable {
     }
 }
 
-struct Principal: Decodable, Equatable { let id: String; let name: String; let role: String }
+struct Principal: Decodable, Equatable {
+    let id: String
+    let name: String
+    let role: String
+    var displayName: String { ItalianPresentation.demoName(id: id, name: name) }
+    var roleTitle: String {
+        switch role { case "dispatcher": "Centrale"; case "driver": "Corriere"; default: "Ruolo non riconosciuto" }
+    }
+}
 struct Driver: Codable, Identifiable, Equatable {
     let id: String
     let name: String
@@ -31,12 +39,13 @@ struct Driver: Codable, Identifiable, Equatable {
     let capacity: Int
     let location: Coordinate?
     let locationUpdatedAt: Int?
+    var displayName: String { ItalianPresentation.demoName(id: id, name: name) }
 }
 
 enum DeliveryStatus: String, Codable, CaseIterable {
     case pending, assigned, pickedUp = "picked_up", delivered
     var title: String {
-        switch self { case .pending: "Pending"; case .assigned: "Assigned"; case .pickedUp: "On board"; case .delivered: "Delivered" }
+        switch self { case .pending: "Da assegnare"; case .assigned: "Assegnata"; case .pickedUp: "In consegna"; case .delivered: "Consegnata" }
     }
 }
 
@@ -58,7 +67,10 @@ struct Delivery: Codable, Identifiable, Equatable {
     let deliveredAt: Int?
 }
 
-enum StopKind: String, Codable { case pickup, dropoff }
+enum StopKind: String, Codable {
+    case pickup, dropoff
+    var title: String { self == .pickup ? "Ritiro" : "Consegna" }
+}
 struct RouteStop: Codable, Identifiable, Equatable {
     let deliveryId: String
     let kind: StopKind
@@ -67,7 +79,7 @@ struct RouteStop: Codable, Identifiable, Equatable {
     let arrivalAt: Int
     let departureAt: Int
     var id: String { "\(deliveryId)-\(kind.rawValue)" }
-    var title: String { kind == .pickup ? "Pick up" : "Drop off" }
+    var title: String { kind.title }
 }
 struct DriverRoute: Codable, Equatable {
     let driverId: String
@@ -76,6 +88,7 @@ struct DriverRoute: Codable, Equatable {
     let finishAt: Int
     let feasible: Bool
     let warnings: [String]
+    var localizedWarnings: [String] { warnings.map(ItalianPresentation.routeWarning) }
 }
 struct Suggestion: Codable, Identifiable, Equatable {
     let driverId: String
@@ -96,12 +109,12 @@ struct NewDelivery: Codable, Equatable {
 
     var validationError: String? {
         if [shopName, pickupAddress, dropoffAddress].contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-            return "Enter the shop name and both addresses."
+            return "Inserisci il nome del negozio ed entrambi gli indirizzi."
         }
-        if !pickup.isValid || !dropoff.isValid { return "Enter valid latitude and longitude values." }
-        if deadlineAt < readyAt { return "The deadline must be after the ready time." }
-        if !(1...8).contains(loadUnits) { return "Load must be between 1 and 8 units." }
-        if !(60...7200).contains(maxRideSeconds) { return "Maximum ride must be between 1 and 120 minutes." }
+        if !pickup.isValid || !dropoff.isValid { return "Inserisci valori validi di latitudine e longitudine." }
+        if deadlineAt < readyAt { return "Il termine di consegna non può precedere l’orario di disponibilità." }
+        if !(1...8).contains(loadUnits) { return "Il carico deve essere compreso tra 1 e 8 unità." }
+        if !(60...7200).contains(maxRideSeconds) { return "Il tempo massimo di trasporto deve essere compreso tra 1 e 120 minuti." }
         return nil
     }
 }
@@ -122,3 +135,4 @@ enum DeliveryAction {
 extension Int {
     var epochDate: Date { Date(timeIntervalSince1970: TimeInterval(self)) }
 }
+

@@ -41,7 +41,7 @@ struct PlaceSearchView: View {
         NavigationStack {
             List {
                 Section {
-                    TextField("Street, number or business", text: $query)
+                    TextField("Via, numero civico o attività", text: $query)
                         .textInputAutocapitalization(.words)
                         .autocorrectionDisabled()
                         .focused($searchFocused)
@@ -49,7 +49,7 @@ struct PlaceSearchView: View {
                         .onSubmit { searchAttempt += 1 }
                         .accessibilityIdentifier("address_search")
                 }
-                if searching { ProgressView("Searching…").accessibilityIdentifier("address_searching") }
+                if searching { ProgressView("Ricerca…").accessibilityIdentifier("address_searching") }
                 ForEach(results) { place in
                     Button {
                         onSelect(place)
@@ -63,12 +63,12 @@ struct PlaceSearchView: View {
                 }
                 if let error {
                     Text(error).font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("address_error")
-                    Button("Try again") { searchAttempt += 1 }.accessibilityIdentifier("retry_address")
+                    Button("Riprova") { searchAttempt += 1 }.accessibilityIdentifier("retry_address")
                 } else if query.trimmingCharacters(in: .whitespacesAndNewlines).count < 3 {
-                    Text("Search near Pachino. Include the town for another area.")
+                    Text("Cerca vicino a Pachino. Per un’altra zona, indica anche il comune.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 } else if !searching && results.isEmpty {
-                    Text("No addresses found. Try the street number and town.")
+                    Text("Nessun indirizzo trovato. Prova con numero civico e comune.")
                         .font(.subheadline).foregroundStyle(.secondary)
                         .accessibilityIdentifier("address_empty")
                 }
@@ -77,7 +77,7 @@ struct PlaceSearchView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.accessibilityIdentifier("cancel_address")
+                    Button("Annulla") { dismiss() }.accessibilityIdentifier("cancel_address")
                 }
             }
             .task { searchFocused = true }
@@ -114,7 +114,7 @@ struct PlaceSearchView: View {
         catch {
             guard !Task.isCancelled else { return }
             searching = false
-            self.error = "Couldn’t search Maps. Check your connection and try the address again."
+            self.error = "Ricerca su Mappe non riuscita. Controlla la connessione e riprova con l’indirizzo."
         }
     }
 

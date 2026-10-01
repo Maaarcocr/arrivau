@@ -52,7 +52,7 @@ final class DeliveryStore: ObservableObject {
             let user = try await api.me()
             guard user.role == (selectedRole == .dispatcher ? "dispatcher" : "driver"),
                   selectedRole.driverId == nil || user.id == selectedRole.driverId else {
-                throw APIError(message: "The API returned an unexpected demo identity.")
+                throw APIError(message: "L’API ha restituito un’identità demo inattesa.")
             }
             sessionId = UUID()
             client = api
@@ -64,7 +64,7 @@ final class DeliveryStore: ObservableObject {
             backgroundLocationSharing = false
             await refresh(force: true)
             startPolling()
-        } catch { errorMessage = error.localizedDescription }
+        } catch { errorMessage = ItalianPresentation.errorMessage(error) }
     }
 
     /// Switching roles does not silently end the server-side shift or cancel work.
@@ -131,7 +131,7 @@ final class DeliveryStore: ObservableObject {
         } catch is CancellationError { }
         catch {
             guard session == sessionId, refreshId == requestId, !Task.isCancelled else { return }
-            syncErrorMessage = error.localizedDescription
+            syncErrorMessage = ItalianPresentation.errorMessage(error)
         }
     }
 
@@ -141,9 +141,9 @@ final class DeliveryStore: ObservableObject {
         createOutcomeUncertain = false
         return await mutate({ try await $0.create(delivery) }, onFailure: { error in
             // The server may have created the delivery even if its response never reached us.
-            if error is URLError || error.localizedDescription.contains("response did not match") || error.localizedDescription.contains("invalid response") {
+            if error is URLError || (error as? APIError)?.mutationOutcomeUncertain == true {
                 self.createOutcomeUncertain = true
-                self.errorMessage = "Couldn’t confirm creation. Check the delivery list before trying again."
+                self.errorMessage = "Impossibile confermare la creazione. Controlla l’elenco delle consegne prima di riprovare."
             }
         }, apply: applyConfirmedDelivery)
     }
@@ -160,7 +160,7 @@ final class DeliveryStore: ObservableObject {
               let current = deliveries.first(where: { $0.id == delivery.id }),
               current.status == delivery.status else { return }
         guard let next = DeliveryAction.nextStatus(delivery: current, route: route, now: Int(Date().timeIntervalSince1970)) else {
-            errorMessage = "Follow the first route stop and wait until the pickup is ready."
+            errorMessage = "Segui la prima tappa del percorso e attendi che la consegna sia pronta per il ritiro."
             return
         }
         let _: Delivery? = await mutate({ try await $0.status(deliveryId: current.id, status: next) }) { result in
@@ -205,7 +205,7 @@ final class DeliveryStore: ObservableObject {
             let failure = error as NSError
             guard !(error is CancellationError), !Task.isCancelled,
                   !(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled) else { return nil }
-            if session == sessionId { errorMessage = error.localizedDescription }
+            if session == sessionId { errorMessage = ItalianPresentation.errorMessage(error) }
             return nil
         }
     }
@@ -242,7 +242,7 @@ final class DeliveryStore: ObservableObject {
             } catch is CancellationError { }
             catch {
                 guard let self, session == self.sessionId, self.mayShareLocation, !Task.isCancelled else { return }
-                self.locationErrorMessage = "Location could not be sent: \(error.localizedDescription)"
+                self.locationErrorMessage = "Invio della posizione non riuscito: \(ItalianPresentation.errorMessage(error))"
             }
         }
     }
@@ -263,7 +263,7 @@ final class DeliveryStore: ObservableObject {
             return session == sessionId ? value : nil
         } catch {
             guard session == sessionId else { return nil }
-            errorMessage = error.localizedDescription
+            errorMessage = ItalianPresentation.errorMessage(error)
             onFailure(error)
             // A response can be lost after a committed write; reconcile before another action.
             await refresh(force: true)

@@ -3,7 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
-	<string>en</string>
+	<string>it</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>it</string>
+	</array>
 	<key>CFBundleDisplayName</key>
 	<string>Arrivau</string>
 	<key>CFBundleExecutable</key>
@@ -31,10 +35,11 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>With your opt-in, share this driver device’s location with the local delivery dispatcher while on shift. The separate screen-lock option continues a started session in the background.</string>
+	<string>Con il tuo consenso, condividi la posizione di questo dispositivo con la centrale delle consegne durante il turno. L’opzione separata per lo schermo bloccato consente di continuare in background una sessione già avviata.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
 	</array>
 </dict>
 </plist>
+

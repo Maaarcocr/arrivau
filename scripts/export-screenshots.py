@@ -4,7 +4,7 @@
 Xcode 16.4's `export attachments --only-failures` can omit XCTest attachments.
 This narrow read-only extractor uses its observed SQLite attachment index or
 compact v3 attachment records and Zstandard/raw payloads; it fails visibly if the result format changes. It never
-modifies the .xcresult and exports only the four intentional demo snapshots.
+modifies the .xcresult and exports only the intentional demo snapshots.
 Requires zstandard==0.25.0 for compressed payloads.
 """
 import argparse
@@ -15,7 +15,8 @@ import sqlite3
 import warnings
 
 NAMES = (
-    "01-dispatcher-jobs", "02-new-delivery", "03-driver-route", "04-driver-shift",
+    "00-login", "01-dispatcher-jobs", "02-new-delivery", "03-driver-route",
+    "04-driver-shift", "05-driver-assignment", "06-address-search", "07-delivery-timing",
 )
 PNG = b"\x89PNG\r\n\x1a\n"
 ZSTD = b"\x28\xb5\x2f\xfd"

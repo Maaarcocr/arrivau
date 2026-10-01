@@ -13,10 +13,10 @@ struct DispatcherView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(openDeliveries.isEmpty ? "Ready for the next delivery" : "\(openDeliveries.count) \(openDeliveries.count == 1 ? "delivery" : "deliveries") in progress")
+                    Text(openDeliveries.isEmpty ? "Tutto pronto per la prossima consegna" : "\(openDeliveries.count) \(openDeliveries.count == 1 ? "consegna in corso" : "consegne in corso")")
                         .font(.title2.bold())
                     Button { showingCreate = true } label: {
-                        Label("New delivery", systemImage: "plus")
+                        Label("Nuova consegna", systemImage: "plus")
                             .frame(maxWidth: .infinity).padding(.vertical, 5)
                     }
                     .buttonStyle(.borderedProminent)
@@ -24,7 +24,7 @@ struct DispatcherView: View {
                 }.padding(.vertical, 6)
             }
             if !openDeliveries.isEmpty {
-                Section("In progress") {
+                Section("In corso") {
                     ForEach(openDeliveries) { delivery in
                         NavigationLink { DeliveryDetailView(deliveryId: delivery.id) } label: {
                             DeliveryRow(delivery: delivery)
@@ -33,18 +33,18 @@ struct DispatcherView: View {
                 }
             }
             Section {
-                ExpandableDetails("Drivers · \(store.drivers.filter(\.active).count) on shift", identifier: "drivers_details") {
+                ExpandableDetails("Corrieri · \(store.drivers.filter(\.active).count) in turno", identifier: "drivers_details") {
                     ForEach(store.drivers) { driver in
                         HStack {
-                            Label(driver.name, systemImage: "bicycle")
+                            Label(driver.displayName, systemImage: "bicycle")
                             Spacer()
-                            Text(driver.active ? "On shift" : "Off shift")
+                            Text(driver.active ? "In turno" : "Fuori turno")
                                 .font(.subheadline).foregroundStyle(driver.active ? .green : .secondary)
                         }.accessibilityIdentifier("driver_\(driver.id)")
                     }
                 }
                 if store.deliveries.contains(where: { $0.status == .delivered }) {
-                    ExpandableDetails("Completed", identifier: "completed_deliveries") {
+                    ExpandableDetails("Completate", identifier: "completed_deliveries") {
                         ForEach(store.deliveries.filter { $0.status == .delivered }.sorted { $0.createdAt > $1.createdAt }) { delivery in
                             NavigationLink { DeliveryDetailView(deliveryId: delivery.id) } label: {
                                 DeliveryRow(delivery: delivery)
@@ -55,7 +55,7 @@ struct DispatcherView: View {
             }
             SyncFooter()
         }
-        .navigationTitle("Deliveries")
+        .navigationTitle("Consegne")
         .accessibilityIdentifier("dispatcher_screen")
         .refreshable { await store.refresh(force: true) }
         .sheet(isPresented: $showingCreate) { NewDeliveryView() }
@@ -80,41 +80,41 @@ struct DeliveryDetailView: View {
                         HStack {
                             Text(delivery.shopName).font(.title2.bold())
                             Spacer()
-                            Text(delivery.status == .pending ? "Needs driver" : delivery.status.title)
+                            Text(delivery.status == .pending ? "Da assegnare" : delivery.status.title)
                                 .font(.subheadline).foregroundStyle(.secondary)
                                 .accessibilityIdentifier("delivery_status")
                         }
                         DeliveryFacts(delivery: delivery)
                     }
                     if needsAssignment {
-                        Section("Choose a driver") {
-                            if suggesting { ProgressView("Finding a driver…") }
+                        Section("Scegli un corriere") {
+                            if suggesting { ProgressView("Ricerca di un corriere…") }
                             else if let suggestions {
                                 if let recommended = suggestions.first {
                                     assignment(recommended, recommended: true)
                                     if suggestions.count > 1 {
-                                        ExpandableDetails("Other drivers", identifier: "other_drivers") {
+                                        ExpandableDetails("Altri corrieri", identifier: "other_drivers") {
                                             ForEach(Array(suggestions.dropFirst())) { assignment($0, recommended: false) }
                                         }
                                     }
                                 } else {
-                                    Label("No driver available yet", systemImage: "bicycle")
+                                    Label("Nessun corriere disponibile", systemImage: "bicycle")
                                         .accessibilityIdentifier("no_suggestions")
-                                    Text("Ask a driver to start their shift and share their location, then try again.")
+                                    Text("Chiedi a un corriere di iniziare il turno e condividere la posizione, poi riprova.")
                                         .font(.subheadline).foregroundStyle(.secondary)
-                                    Button("Try again") { Task { await loadSuggestions() } }
+                                    Button("Riprova") { Task { await loadSuggestions() } }
                                         .accessibilityIdentifier("retry_suggestions")
                                 }
                             } else {
-                                Button("Try finding a driver again") { Task { await loadSuggestions() } }
+                                Button("Cerca di nuovo un corriere") { Task { await loadSuggestions() } }
                                     .accessibilityIdentifier("retry_suggestions")
                             }
                         }
                     } else if let driverId = delivery.driverId {
                         Section {
-                            Label(store.drivers.first { $0.id == driverId }?.name ?? "Assigned driver", systemImage: "bicycle")
+                            Label(store.drivers.first { $0.id == driverId }?.displayName ?? "Corriere assegnato", systemImage: "bicycle")
                             if delivery.status == .assigned {
-                                Button("Change driver") { changingDriver = true }
+                                Button("Cambia corriere") { changingDriver = true }
                                     .accessibilityIdentifier("change_driver")
                             }
                         }
@@ -122,9 +122,9 @@ struct DeliveryDetailView: View {
                     SyncFooter()
                 }
                 .task(id: needsAssignment) { if needsAssignment { await loadSuggestions() } }
-            } else { ContentUnavailableView("Delivery unavailable", systemImage: "shippingbox") }
+            } else { ContentUnavailableView("Consegna non disponibile", systemImage: "shippingbox") }
         }
-        .navigationTitle("Delivery")
+        .navigationTitle("Consegna")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable {
             await store.refresh(force: true)
@@ -133,16 +133,16 @@ struct DeliveryDetailView: View {
     }
 
     private func assignment(_ suggestion: Suggestion, recommended: Bool) -> some View {
-        let name = store.drivers.first { $0.id == suggestion.driverId }?.name ?? "Driver"
+        let name = store.drivers.first { $0.id == suggestion.driverId }?.displayName ?? "Corriere"
         let dropoff = suggestion.route.stops.first { $0.deliveryId == deliveryId && $0.kind == .dropoff }
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label(name, systemImage: "bicycle").font(.headline)
                 Spacer()
-                if recommended { Text("Suggested").font(.caption).foregroundStyle(.secondary) }
+                if recommended { Text("Consigliato").font(.caption).foregroundStyle(.secondary) }
             }
             if let dropoff {
-                Text("Estimated delivery \(dropoff.arrivalAt.epochDate.formatted(date: .omitted, time: .shortened))")
+                Text("Consegna prevista alle \(dropoff.arrivalAt.epochDate.italianTime)")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             Button {
@@ -156,7 +156,7 @@ struct DeliveryDetailView: View {
                     }
                 }
             } label: {
-                Text("Assign to \(name)").frame(maxWidth: .infinity).padding(.vertical, 5)
+                Text("Assegna a \(name)").frame(maxWidth: .infinity).padding(.vertical, 5)
             }
             .buttonStyle(.borderedProminent)
             .disabled(store.isMutating || suggesting)
@@ -195,14 +195,14 @@ struct NewDeliveryView: View {
                 } else {
                     Form {
                         Section {
-                            placeButton(title: "Pickup", place: pickup, icon: "storefront", identifier: "choose_pickup") { selectingPickup = true }
-                            placeButton(title: "Deliver to", place: dropoff, icon: "mappin.and.ellipse", identifier: "choose_dropoff") { selectingDropoff = true }
+                            placeButton(title: "Ritiro", place: pickup, icon: "storefront", identifier: "choose_pickup") { selectingPickup = true }
+                            placeButton(title: "Destinazione", place: dropoff, icon: "mappin.and.ellipse", identifier: "choose_dropoff") { selectingDropoff = true }
                         }
                         Section {
-                            ExpandableDetails(customTiming ? "Ready \(readyAt.formatted(date: .omitted, time: .shortened)) · due \(deadlineAt.formatted(date: .omitted, time: .shortened))" : "Ready now · deliver within an hour", systemImage: "clock", identifier: "delivery_timing") {
-                                DatePicker("Ready at", selection: $readyAt).accessibilityIdentifier("ready_at")
+                            ExpandableDetails(customTiming ? "Pronta alle \(readyAt.italianTime) · entro le \(deadlineAt.italianTime)" : "Pronta ora · consegna entro un’ora", systemImage: "clock", identifier: "delivery_timing") {
+                                DatePicker("Pronta alle", selection: $readyAt).accessibilityIdentifier("ready_at")
                                     .onChange(of: readyAt) { _, _ in customTiming = true }
-                                DatePicker("Deliver by", selection: $deadlineAt).accessibilityIdentifier("deadline_at")
+                                DatePicker("Da consegnare entro", selection: $deadlineAt).accessibilityIdentifier("deadline_at")
                                     .onChange(of: deadlineAt) { _, _ in customTiming = true }
                             }
                         }
@@ -210,7 +210,7 @@ struct NewDeliveryView: View {
                             Section { Text(validationError).foregroundStyle(.red).accessibilityIdentifier("form_error") }
                         }
                     }
-                    .navigationTitle("New delivery")
+                    .navigationTitle("Nuova consegna")
                     .safeAreaInset(edge: .bottom) {
                         VStack(spacing: 8) {
                             Button {
@@ -219,13 +219,13 @@ struct NewDeliveryView: View {
                             } label: {
                                 HStack {
                                     if submitting { ProgressView().tint(.white) }
-                                    Text(creationUncertain ? "Check deliveries" : (submitting ? "Creating…" : "Continue to driver"))
+                                    Text(creationUncertain ? "Controlla le consegne" : (submitting ? "Creazione…" : "Scegli il corriere"))
                                 }.frame(maxWidth: .infinity).padding(.vertical, 8)
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(pickup == nil || dropoff == nil || submitting || store.isMutating)
                             .accessibilityIdentifier("submit_delivery")
-                            Text(creationUncertain ? "Check whether this delivery was saved before trying again" : "Creates the delivery, then suggests a driver")
+                            Text(creationUncertain ? "Prima di riprovare, controlla se la consegna è stata salvata" : "Crea la consegna e suggerisce un corriere")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding().background(.regularMaterial)
                     }
@@ -233,16 +233,16 @@ struct NewDeliveryView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(createdId == nil ? "Cancel" : "Done") { dismiss() }
+                    Button(createdId == nil ? "Annulla" : "Fine") { dismiss() }
                         .disabled(submitting || store.isMutating)
                         .accessibilityIdentifier(createdId == nil ? "cancel_delivery" : "done_delivery")
                 }
             }
             .sheet(isPresented: $selectingPickup) {
-                PlaceSearchView(title: "Pickup", isUITesting: store.isUITesting) { pickup = $0 }
+                PlaceSearchView(title: "Ritiro", isUITesting: store.isUITesting) { pickup = $0 }
             }
             .sheet(isPresented: $selectingDropoff) {
-                PlaceSearchView(title: "Deliver to", isUITesting: store.isUITesting) { dropoff = $0 }
+                PlaceSearchView(title: "Destinazione", isUITesting: store.isUITesting) { dropoff = $0 }
             }
         }.interactiveDismissDisabled(submitting || store.isMutating)
     }
@@ -253,7 +253,7 @@ struct NewDeliveryView: View {
                 Image(systemName: icon).foregroundStyle(.orange).frame(width: 24)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(title).font(.caption).foregroundStyle(.secondary)
-                    Text(place?.name ?? "Choose an address").font(.headline).foregroundStyle(Color.primary)
+                    Text(place?.name ?? "Scegli un indirizzo").font(.headline).foregroundStyle(Color.primary)
                     if let place { Text(place.address).font(.subheadline).foregroundStyle(Color.secondary) }
                 }
                 Spacer()

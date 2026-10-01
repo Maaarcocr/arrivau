@@ -10,7 +10,7 @@ final class DeliveryFlowUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["--uitesting"]
+        app.launchArguments = ["--uitesting", "-AppleLanguages", "(it)", "-AppleLocale", "it_IT"]
         let configured = ProcessInfo.processInfo.environment["ARRIVAU_API_URL"] ?? ""
         let baseURL = configured.hasPrefix("http") ? configured : "http://localhost:8080"
         app.launchEnvironment["ARRIVAU_API_URL"] = baseURL
@@ -37,14 +37,15 @@ final class DeliveryFlowUITests: XCTestCase {
 
     @MainActor
     func testDispatcherToDriverLifecycle() throws {
+        captureScreen("00-login", showing: app.buttons["login_driver1"])
         login("driver1")
         let start = app.buttons["toggle_shift"]
-        XCTAssertEqual(start.label, "Start shift & share location", "Run against a fresh demo database")
-        waitForLabelContaining(app.buttons["shift_settings"], "Off shift")
+        XCTAssertEqual(start.label, "Avvia turno e condividi posizione", "Run against a fresh demo database")
+        waitForLabelContaining(app.buttons["shift_settings"], "Fuori turno")
         assertRoutineDriverHome()
         let startAt = Int(Date().timeIntervalSince1970)
         tap(start)
-        waitForLabelContaining(app.buttons["shift_settings"], "On shift")
+        waitForLabelContaining(app.buttons["shift_settings"], "In turno")
         try waitForServerLocation(since: startAt)
         XCTAssertFalse(app.buttons["toggle_shift"].exists, "End shift belongs in shift settings")
         tap(app.buttons["shift_settings"])
@@ -62,13 +63,25 @@ final class DeliveryFlowUITests: XCTestCase {
         waitUntilEnabled(app.buttons["submit_delivery"])
         XCTAssertTrue(app.buttons["choose_pickup"].label.contains("Via Roma 1"))
         XCTAssertTrue(app.buttons["choose_dropoff"].label.contains("Via Garibaldi 8"))
+        // Expanding timing repeatedly must not change the selected addresses or submit state.
+        for iteration in 0..<2 {
+            tap(app.buttons["delivery_timing"])
+            XCTAssertTrue(element("ready_at").waitForExistence(timeout: 5))
+            XCTAssertTrue(element("deadline_at").exists)
+            if iteration == 0 { captureScreen("07-delivery-timing", showing: element("ready_at")) }
+            tap(app.buttons["delivery_timing"])
+            waitUntilAbsent(element("ready_at"))
+            waitUntilAbsent(element("deadline_at"))
+            XCTAssertTrue(app.buttons["submit_delivery"].isEnabled)
+        }
         captureScreen("02-new-delivery", showing: app.buttons["choose_pickup"])
         tap(app.buttons["submit_delivery"])
-        waitForLabel(app.staticTexts["delivery_status"], "Needs driver")
+        waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
         XCTAssertFalse(app.buttons["submit_delivery"].exists, "The created delivery must replace its form")
         XCTAssertFalse(app.buttons["suggest_drivers"].exists, "Suggestions must load without another action")
         XCTAssertTrue(app.buttons["done_delivery"].exists)
         XCTAssertTrue(app.buttons["assign_driver-1"].waitForExistence(timeout: 15))
+        captureScreen("05-driver-assignment", showing: app.buttons["assign_driver-1"])
         let created = try readDeliveriesFromServer()
         XCTAssertEqual(created.count, 1, "The happy path creates exactly one delivery")
         let delivery = try XCTUnwrap(created.first)
@@ -78,17 +91,17 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["assign_driver-1"])
         waitUntilAbsent(app.buttons["done_delivery"])
         let deliveryRow = app.buttons["delivery_\(delivery.id)"]
-        waitForLabelContaining(deliveryRow, "Assigned")
+        waitForLabelContaining(deliveryRow, "Assegnata")
         captureScreen("01-dispatcher-jobs", showing: deliveryRow)
         // Existing jobs remain inspectable, without a redundant suggestion step.
         tap(deliveryRow)
-        waitForLabel(app.staticTexts["delivery_status"], "Assigned")
+        waitForLabel(app.staticTexts["delivery_status"], "Assegnata")
         XCTAssertFalse(app.buttons["assign_driver-1"].exists)
         backToDeliveries()
         switchRole()
 
         login("driver1")
-        waitForLabelContaining(app.buttons["shift_settings"], "On shift")
+        waitForLabelContaining(app.buttons["shift_settings"], "In turno")
         assertRoutineDriverHome()
         XCTAssertTrue(app.buttons["resume_location"].waitForExistence(timeout: 10), "Role switching must stop location sharing")
         let resumedAt = Int(Date().timeIntervalSince1970)
@@ -99,13 +112,15 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists, "Show only the next stop's completion action")
         XCTAssertFalse(element("route_map").exists, "The map should start collapsed")
         captureScreen("03-driver-route", showing: app.staticTexts["next_stop_title"])
-        tap(app.buttons["route_details"])
-        let firstStop = element("route_stop_0")
-        reveal(firstStop)
-        XCTAssertTrue(firstStop.exists)
-        XCTAssertTrue(element("route_map").exists)
-        tap(app.buttons["route_details"])
-        waitUntilAbsent(element("route_map"))
+        for _ in 0..<2 {
+            tap(app.buttons["route_details"])
+            let firstStop = element("route_stop_0")
+            reveal(firstStop)
+            XCTAssertTrue(firstStop.exists)
+            XCTAssertTrue(element("route_map").exists)
+            tap(app.buttons["route_details"])
+            waitUntilAbsent(element("route_map"))
+        }
 
         tap(app.buttons["shift_settings"])
         assertSwitch(app.switches["share_location"], value: "1")
@@ -115,13 +130,23 @@ final class DeliveryFlowUITests: XCTestCase {
         setSwitch(app.switches["share_location"], to: false)
         assertSwitch(app.switches["background_location"], value: "0")
         tap(app.buttons["close_shift_settings"])
-        waitForLabelContaining(app.buttons["shift_settings"], "On shift")
+        waitForLabelContaining(app.buttons["shift_settings"], "In turno")
         tap(app.buttons["resume_location"])
         waitUntilAbsent(app.buttons["resume_location"])
         tap(app.buttons["shift_settings"])
         assertSwitch(app.switches["share_location"], value: "1")
         tap(app.buttons["close_shift_settings"])
         assertRoutineDriverHome()
+
+        // Returning from another app must preserve the current stop and foreground opt-in.
+        let returnedAt = Int(Date().timeIntervalSince1970)
+        interruptAndResume()
+        waitForLabelContaining(app.buttons["shift_settings"], "In turno")
+        XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["confirm_dropoff"].exists)
+        XCTAssertFalse(app.buttons["resume_location"].exists)
+        try waitForServerLocation(since: returnedAt)
+        try assertServerStatus(delivery.id, "assigned")
 
         tap(app.buttons["confirm_pickup"], timeout: 15)
         XCTAssertTrue(app.buttons["confirm_dropoff"].waitForExistence(timeout: 15))
@@ -134,17 +159,19 @@ final class DeliveryFlowUITests: XCTestCase {
         try assertServerStatus(delivery.id, "delivered")
         let completed = element("own_delivery_\(delivery.id)")
         XCTAssertFalse(completed.exists, "Completed deliveries should start collapsed")
-        tap(app.buttons["delivery_history"])
-        reveal(completed)
-        XCTAssertTrue(completed.exists)
-        XCTAssertTrue(completed.label.contains("Delivered"))
-        tap(app.buttons["delivery_history"])
-        waitUntilAbsent(completed)
+        for _ in 0..<2 {
+            tap(app.buttons["delivery_history"])
+            reveal(completed)
+            XCTAssertTrue(completed.exists)
+            XCTAssertTrue(completed.label.contains("Consegnata"))
+            tap(app.buttons["delivery_history"])
+            waitUntilAbsent(completed)
+        }
 
         tap(app.buttons["shift_settings"])
         tap(app.buttons["toggle_shift"])
         waitUntilAbsent(app.buttons["close_shift_settings"])
-        waitForLabelContaining(app.buttons["shift_settings"], "Off shift")
+        waitForLabelContaining(app.buttons["shift_settings"], "Fuori turno")
         XCTAssertTrue(app.buttons["toggle_shift"].exists)
         tap(app.buttons["shift_settings"])
         assertSwitch(app.switches["share_location"], value: "0")
@@ -159,7 +186,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["delivery_\(delivery.id)"].exists, "Completed jobs should start collapsed")
         tap(app.buttons["completed_deliveries"])
         tap(app.buttons["delivery_\(delivery.id)"])
-        waitForLabel(app.staticTexts["delivery_status"], "Delivered")
+        waitForLabel(app.staticTexts["delivery_status"], "Consegnata")
         XCTAssertFalse(app.buttons["suggest_drivers"].exists)
         XCTAssertFalse(app.buttons["assign_driver-1"].exists)
         XCTAssertFalse(app.buttons["change_driver"].exists)
@@ -176,6 +203,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         replace(search, with: "Pizzeria")
         waitForLabelContaining(app.buttons["address_result_0"], shopName)
+        captureScreen("06-address-search", showing: app.buttons["address_result_0"])
         // A short/empty query must remove previously valid results, even after debounce.
         replace(search, with: "xx")
         waitUntilAbsent(app.buttons["address_result_0"])
@@ -197,7 +225,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["submit_delivery"].isEnabled)
 
         tap(app.buttons["choose_dropoff"])
-        replace(app.textFields["address_search"], with: "No matching address")
+        replace(app.textFields["address_search"], with: "Indirizzo inesistente")
         XCTAssertTrue(app.staticTexts["address_empty"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["address_result_0"].exists)
         tap(app.buttons["cancel_address"])
@@ -207,6 +235,11 @@ final class DeliveryFlowUITests: XCTestCase {
         let selectedDropoff = app.buttons["choose_dropoff"].label
         tap(app.buttons["choose_dropoff"])
         tap(app.buttons["cancel_address"])
+        XCTAssertEqual(app.buttons["choose_dropoff"].label, selectedDropoff)
+        XCTAssertTrue(app.buttons["submit_delivery"].isEnabled)
+        interruptAndResume()
+        XCTAssertTrue(app.buttons["cancel_delivery"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["choose_pickup"].label, selectedPickup)
         XCTAssertEqual(app.buttons["choose_dropoff"].label, selectedDropoff)
         XCTAssertTrue(app.buttons["submit_delivery"].isEnabled)
         tap(app.buttons["cancel_delivery"])
@@ -232,7 +265,7 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["demo_settings"])
         replace(app.textFields["api_url"], with: "http://example.com")
         tap(app.buttons["login_dispatcher"])
-        XCTAssertTrue(app.alerts["Couldn’t complete that"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.alerts["Operazione non riuscita"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.alerts.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "loopback")).firstMatch.exists)
         app.alerts.buttons["OK"].tap()
         XCTAssertTrue(app.buttons["login_dispatcher"].exists)
@@ -250,7 +283,7 @@ final class DeliveryFlowUITests: XCTestCase {
         waitUntilEnabled(submit)
         // Repeated creation taps must not create two jobs while the sheet advances.
         submit.doubleTap()
-        waitForLabel(app.staticTexts["delivery_status"], "Needs driver")
+        waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
         XCTAssertTrue(element("no_suggestions").waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["submit_delivery"].exists)
         XCTAssertFalse(app.buttons["cancel_delivery"].exists)
@@ -263,7 +296,7 @@ final class DeliveryFlowUITests: XCTestCase {
         waitUntilAbsent(app.buttons["done_delivery"])
         for _ in 0..<2 {
             tap(app.buttons["delivery_\(pending.id)"])
-            waitForLabel(app.staticTexts["delivery_status"], "Needs driver")
+            waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
             XCTAssertTrue(element("no_suggestions").waitForExistence(timeout: 15))
             XCTAssertFalse(app.buttons["submit_delivery"].exists)
             XCTAssertFalse(app.buttons["suggest_drivers"].exists)
@@ -275,8 +308,8 @@ final class DeliveryFlowUITests: XCTestCase {
 
     private func assertEmptyDeliveryForm() {
         XCTAssertTrue(app.buttons["choose_pickup"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["choose_pickup"].label.contains("Choose an address"))
-        XCTAssertTrue(app.buttons["choose_dropoff"].label.contains("Choose an address"))
+        XCTAssertTrue(app.buttons["choose_pickup"].label.contains("Scegli un indirizzo"))
+        XCTAssertTrue(app.buttons["choose_dropoff"].label.contains("Scegli un indirizzo"))
         XCTAssertFalse(app.buttons["submit_delivery"].isEnabled)
         XCTAssertEqual(app.textFields.count, 0, "Routine creation should use address selections, not raw text or coordinates")
         XCTAssertEqual(app.steppers.count, 0, "Capacity and load tuning should not be routine form controls")
@@ -419,6 +452,13 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["login_\(role)"])
         let destination = role == "dispatcher" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
         XCTAssertTrue(destination.waitForExistence(timeout: 20), "Check the running Rust API and fresh database")
+    }
+
+    private func interruptAndResume() {
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5) || app.state == .runningBackgroundSuspended)
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
     }
 
     private func switchRole() {

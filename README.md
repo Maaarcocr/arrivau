@@ -46,14 +46,14 @@ See `ios/README.md` for app details and test launch options.
 
 ## Try a delivery
 
-1. Open Driver 1 and tap **Start shift & share location** (simulate a location near Pachino in Xcode)
-2. Switch to Dispatcher, tap **New delivery**, and choose the pickup and destination from native Maps search
-3. Tap **Continue to driver**. The job is created and a suggested driver appears immediately; tap **Assign to Driver 1**
-4. Switch to Driver 1 and resume sharing. The next stop is at the top, with directions and one completion action
+1. Open Corriere 1 and tap **Avvia turno e condividi posizione** (simulate a location near Pachino in Xcode)
+2. Switch to Gestisci le consegne, tap **Nuova consegna**, and choose the pickup and destination from native Maps search
+3. Tap **Scegli il corriere**. The job is created and a suggested driver appears immediately; tap **Assegna a Corriere 1**
+4. Switch to Corriere 1 and resume sharing. The next stop is at the top, with directions and one completion action
 5. At the ready time, mark the pickup, then the drop-off. The next action updates automatically
 6. Open shift controls to end the shift once work is complete; location reporting stops
 
-On a fresh database the drivers are off shift. The backend will not suggest an off-shift driver or one without a location reported in the last five minutes. Dispatchers cannot update driver statuses on their behalf. Driver 2 cannot read or update Driver 1's jobs.
+On a fresh database the drivers are off shift. The backend will not suggest an off-shift driver or one without a location reported in the last five minutes. Dispatchers cannot update driver statuses on their behalf. Corriere 2 cannot read or update Corriere 1's jobs.
 
 ## Verify
 
@@ -71,7 +71,7 @@ ARRIVAU_DB_PATH=/tmp/arrivau-smoke.sqlite3 ./scripts/api-dev.sh
 python3 scripts/e2e.py
 ```
 
-Use a fresh database for the smoke test, because it assumes Driver 1 has no earlier active work. It writes and completes one clearly labeled fixture delivery. Unit/HTTP integration tests create isolated temporary databases and ephemeral TCP ports.
+Use a fresh database for the smoke test, because it assumes Corriere 1 has no earlier active work. It writes and completes one clearly labeled fixture delivery. Unit/HTTP integration tests create isolated temporary databases and ephemeral TCP ports.
 
 On macOS, the combined native app → HTTP API workflow is:
 
@@ -81,7 +81,7 @@ On macOS, the combined native app → HTTP API workflow is:
 
 This generates the project, builds the API, starts a disposable database/server, chooses an available iPhone simulator, and runs the app's unit and UI tests. Pass `SIMULATOR_UDID` to select a particular installed simulator. The UI test uses deterministic location and address-search fixtures and drives the real API; normal app use requires a selected Maps result and does not silently use fixture coordinates.
 
-The macOS job also captures four populated main screens and publishes an `arrivau-ios-screenshots` artifact. On GitHub, open Actions → Verify API and iOS → the run → Artifacts. The same command writes PNGs under `ios/build/screenshots/` locally. Captures use fixture deliveries and simulated Pachino location, while state changes still use the real API.
+The macOS job also captures eight Italian screens and details and publishes an `arrivau-ios-screenshots` artifact. On GitHub, open Actions → Verify API and iOS → the run → Artifacts. The same command writes PNGs under `ios/build/screenshots/` locally. Captures use fixture deliveries and simulated Pachino location, while state changes still use the real API.
 
 See [verification notes](docs/verification.md) for exactly which checks were run when this starter was created. A configured CI job is not evidence that it has passed.
 
@@ -95,7 +95,7 @@ See [verification notes](docs/verification.md) for exactly which checks were run
 - Time and location changes can invalidate an earlier plan; drivers and dispatchers must review warnings. Real-world safety, food handling and driving decisions remain with people
 - The app polls while foregrounded. Push notifications, reliable background delivery notifications and offline queues need separate implementation. Background Core Location has an explicit opt-in/code path, but must be verified on a signed physical device
 - Addresses and coordinates are selected together through native Apple Maps search. Search needs a network connection and sends the entered query to Apple. No paid geocoding service, customer marketplace, payment flow or production deployment is added
-- The **Start shift & share location** action is an explicit foreground-location opt-in; background sharing can be enabled separately and explicitly for phone locking/Maps use. Ending a shift/signing out stops app location reporting. The most recent point stays in the local database; there is no location history feed
+- The **Avvia turno e condividi posizione** action is an explicit foreground-location opt-in; background sharing can be enabled separately and explicitly for phone locking/Maps use. Ending a shift/signing out stops app location reporting. The most recent point stays in the local database; there is no location history feed
 - Maps opens only when the user taps directions and then shares that stop's coordinates with Apple Maps
 
 ## Next practical iteration

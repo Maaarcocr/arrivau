@@ -12,6 +12,7 @@ final class APIClientTests: XCTestCase {
     override func tearDown() {
         session.invalidateAndCancel()
         StubURLProtocol.handler = nil
+        StubURLProtocol.responseOverride = nil
         super.tearDown()
     }
     private var client: APIClient {
@@ -52,7 +53,8 @@ final class APIClientTests: XCTestCase {
             _ = try await client.status(deliveryId: "delivery-1", status: .pickedUp)
             XCTFail("Expected a conflict")
         } catch {
-            XCTAssertEqual(error.localizedDescription, "Pickup is not the next route stop")
+            XCTAssertEqual(error.localizedDescription, "Il ritiro non è la prossima tappa del percorso.")
+            XCTAssertFalse(try XCTUnwrap(error as? APIError).mutationOutcomeUncertain)
         }
         XCTAssertEqual(count, 1)
     }
@@ -60,6 +62,65 @@ final class APIClientTests: XCTestCase {
         StubURLProtocol.handler = { _ in (503, Data("Unavailable".utf8)) }
         do { _ = try await client.me(); XCTFail("Expected API error") }
         catch { XCTAssertTrue(error.localizedDescription.contains("503")) }
+    }
+    func testUnknownServerMessageUsesItalianFallbackWithoutEchoingDetails() async throws {
+        StubURLProtocol.handler = { _ in (418, Data(#"{"error":"New English server message with private details"}"#.utf8)) }
+        do { _ = try await client.me(); XCTFail("Expected API error") }
+        catch {
+            XCTAssertEqual(error.localizedDescription, "La richiesta al server non è riuscita (HTTP 418). Riprova.")
+            XCTAssertFalse(try XCTUnwrap(error as? APIError).mutationOutcomeUncertain)
+        }
+    }
+    func testUnreadableMutationResponseHasTypedUncertaintyFlag() async throws {
+        StubURLProtocol.handler = { _ in (201, Data(#"{"unexpected":"English decoding detail"}"#.utf8)) }
+        do { _ = try await client.create(Fixtures.newDelivery); XCTFail("Expected decoding error") }
+        catch {
+            let error = try XCTUnwrap(error as? APIError)
+            XCTAssertTrue(error.mutationOutcomeUncertain)
+            XCTAssertEqual(error.localizedDescription, "La risposta del server contiene dati non validi o non compatibili con questa demo.")
+        }
+    }
+    func testUnreadableReadResponseDoesNotMarkMutationUncertain() async throws {
+        StubURLProtocol.handler = { _ in (200, Data("invalid json".utf8)) }
+        do { _ = try await client.me(); XCTFail("Expected decoding error") }
+        catch { XCTAssertFalse(try XCTUnwrap(error as? APIError).mutationOutcomeUncertain) }
+    }
+    func testInvalidMutationResponseHasTypedUncertaintyFlag() async throws {
+        StubURLProtocol.handler = { _ in (201, Fixtures.delivery) }
+        StubURLProtocol.responseOverride = URLResponse(url: URL(string: "http://localhost:8080")!, mimeType: "application/json", expectedContentLength: Fixtures.delivery.count, textEncodingName: nil)
+        do { _ = try await client.create(Fixtures.newDelivery); XCTFail("Expected invalid response") }
+        catch {
+            let error = try XCTUnwrap(error as? APIError)
+            XCTAssertTrue(error.mutationOutcomeUncertain)
+            XCTAssertEqual(error.localizedDescription, "Il server ha restituito una risposta non valida.")
+        }
+    }
+    func testTransportErrorRetainsTypeForCreateReconciliationAndHasItalianPresentation() async throws {
+        StubURLProtocol.handler = { _ in throw URLError(.networkConnectionLost, userInfo: [NSLocalizedDescriptionKey: "Raw English network failure"]) }
+        do { _ = try await client.create(Fixtures.newDelivery); XCTFail("Expected network error") }
+        catch {
+            XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost)
+            XCTAssertEqual(ItalianPresentation.errorMessage(error), "La connessione al server si è interrotta. Controlla la rete e riprova.")
+            XCTAssertTrue(error is URLError || (error as? APIError)?.mutationOutcomeUncertain == true)
+        }
+    }
+    func testFailedEncodingIsLocalizedAndCannotHaveCommitted() async throws {
+        let invalid = NewDelivery(shopName: "Pizzeria", pickupAddress: "A", pickup: Coordinate(lat: .nan, lng: 0), dropoffAddress: "B", dropoff: .pachino, readyAt: 1, deadlineAt: 2, loadUnits: 1, maxRideSeconds: 60)
+        StubURLProtocol.handler = { _ in XCTFail("Invalid values must not reach the API"); return (201, Fixtures.delivery) }
+        do { _ = try await client.create(invalid); XCTFail("Expected encoding error") }
+        catch {
+            let error = try XCTUnwrap(error as? APIError)
+            XCTAssertFalse(error.mutationOutcomeUncertain)
+            XCTAssertEqual(error.localizedDescription, "Impossibile preparare i dati da inviare. Controlla i valori inseriti.")
+        }
+    }
+    func testLocalizedTitlesDoNotChangeStatusPayload() async throws {
+        StubURLProtocol.handler = { request in
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any])
+            XCTAssertEqual(payload["status"] as? String, "picked_up")
+            return (200, Fixtures.delivery)
+        }
+        _ = try await client.status(deliveryId: "delivery-1", status: .pickedUp)
     }
     private static func body(of request: URLRequest) throws -> Data {
         if let data = request.httpBody { return data }
@@ -79,13 +140,14 @@ final class APIClientTests: XCTestCase {
 
 final class StubURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, Data))?
+    static var responseOverride: URLResponse?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
             guard let handler = Self.handler else { throw APIError(message: "Missing test handler") }
             let (status, body) = try handler(request)
-            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            let response = Self.responseOverride ?? HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: body)
             client?.urlProtocolDidFinishLoading(self)
@@ -93,3 +155,4 @@ final class StubURLProtocol: URLProtocol {
     }
     override func stopLoading() { }
 }
+

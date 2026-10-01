@@ -2,6 +2,15 @@ import Foundation
 
 struct APIError: Error, LocalizedError {
     let message: String
+    /// A mutation may have committed even though its response could not be read.
+    /// Keep this independent of the user-facing wording and locale.
+    let mutationOutcomeUncertain: Bool
+
+    init(message: String, mutationOutcomeUncertain: Bool = false) {
+        self.message = message
+        self.mutationOutcomeUncertain = mutationOutcomeUncertain
+    }
+
     var errorDescription: String? { message }
 }
 
@@ -14,10 +23,10 @@ enum APIConfiguration {
               url.scheme == "http" || url.scheme == "https",
               url.user == nil, url.password == nil, url.query == nil, url.fragment == nil,
               url.path.isEmpty || url.path == "/" else {
-            throw APIError(message: "This demo accepts only a loopback API URL, for example http://localhost:8080. Use the iOS Simulator on the Mac running the API.")
+            throw APIError(message: "Questa demo accetta solo un indirizzo API locale (loopback), ad esempio http://localhost:8080. Usa il simulatore iOS sul Mac che esegue il server API.")
         }
         #if !DEBUG
-        guard url.scheme == "https" else { throw APIError(message: "Plain HTTP is available in Debug builds only.") }
+        guard url.scheme == "https" else { throw APIError(message: "Le connessioni HTTP non protette sono disponibili solo nelle build di debug.") }
         #endif
         return url
     }
@@ -62,7 +71,10 @@ struct APIClient {
 
     private func get<T: Decodable>(_ path: String) async throws -> T { try await request(path, method: "GET", body: nil) }
     private func post<T: Decodable, B: Encodable>(_ path: String, body: B) async throws -> T {
-        try await request(path, method: "POST", body: Self.encoder().encode(body))
+        let data: Data
+        do { data = try Self.encoder().encode(body) }
+        catch { throw APIError(message: "Impossibile preparare i dati da inviare. Controlla i valori inseriti.") }
+        return try await request(path, method: "POST", body: data)
     }
     private func request<T: Decodable>(_ path: String, method: String, body: Data?) async throws -> T {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
@@ -72,13 +84,28 @@ struct APIClient {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw APIError(message: "The API returned an invalid response.") }
+        // Preserve URLError and cancellation types for reconciliation/cancellation guards.
+        // Present these through ItalianPresentation.errorMessage rather than system text.
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await session.data(for: request) }
+        catch let error as URLError { throw error }
+        catch is CancellationError { throw CancellationError() }
+        catch {
+            throw APIError(message: ItalianPresentation.unknownError, mutationOutcomeUncertain: method != "GET")
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError(message: "Il server ha restituito una risposta non valida.", mutationOutcomeUncertain: method != "GET")
+        }
         guard (200..<300).contains(http.statusCode) else {
             let detail = (try? Self.decoder().decode(ErrorBody.self, from: data))?.error
-            throw APIError(message: detail ?? "API request failed (HTTP \(http.statusCode)).")
+            throw APIError(message: ItalianPresentation.serverError(detail, statusCode: http.statusCode))
         }
         do { return try Self.decoder().decode(T.self, from: data) }
-        catch { throw APIError(message: "The API response did not match the demo contract: \(error.localizedDescription)") }
+        catch {
+            throw APIError(message: "La risposta del server contiene dati non validi o non compatibili con questa demo.",
+                           mutationOutcomeUncertain: method != "GET")
+        }
     }
 }
+

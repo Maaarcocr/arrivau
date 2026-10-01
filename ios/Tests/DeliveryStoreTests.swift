@@ -135,7 +135,7 @@ final class DeliveryStoreTests: XCTestCase {
         XCTAssertNil(created)
         XCTAssertTrue(store.createOutcomeUncertain)
         XCTAssertEqual(store.deliveries.count, 1, "The follow-up read recovers the committed delivery")
-        XCTAssertEqual(store.errorMessage, "Couldn’t confirm creation. Check the delivery list before trying again.")
+        XCTAssertEqual(store.errorMessage, "Impossibile confermare la creazione. Controlla l’elenco delle consegne prima di riprovare.")
     }
 
     func testConfirmedAssignmentCannotBeRepeatedAfterFailedRefresh() async {

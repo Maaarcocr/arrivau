@@ -9,8 +9,8 @@ Requirements: Xcode 16+ with an iOS 17+ simulator runtime, XcodeGen, Rust/Cargo 
 1. Start the API from the repository root using its README instructions, with `ARRIVAU_DEMO=1` and a local database.
 2. `cd ios && xcodegen generate`
 3. Open `Arrivau.xcodeproj` and run the `Arrivau` scheme on an iPhone simulator in Debug.
-4. The login screen defaults to `http://localhost:8080`, connecting to the Mac's loopback API. Choose Driver 1, start a shift and explicitly enable location sharing. For manual simulator use choose a custom Pachino location (latitude `36.7163`, longitude `15.0908`) under Simulator → Features → Location → Custom Location. Alternatively add `--uitesting` to Debug launch arguments for deterministic Pachino samples; the UI clearly labels simulated location.
-5. Switch to Dispatcher, create a delivery, open it, suggest drivers, then assign Driver 1. Switch back to Driver 1 to work the ordered pickup and drop-off stops. Role switches stop local tracking but do not end server-side shifts or discard assigned work.
+4. The login screen defaults to `http://localhost:8080`, connecting to the Mac's loopback API. Choose Driver 1 and tap **Start shift & share location**. This button explicitly opts into foreground location sharing. For manual simulator use choose a custom Pachino location (latitude `36.7163`, longitude `15.0908`) under Simulator → Features → Location → Custom Location. Alternatively add `--uitesting` to Debug launch arguments for deterministic Pachino samples; the UI clearly labels simulated location.
+5. Switch to Dispatcher, tap **New delivery**, choose pickup and destination from Maps search, then **Continue to driver**. Driver suggestions load automatically in the same flow; tap **Assign to Driver 1**. Switch back to Driver 1 to work the ordered pickup and drop-off stops. Role switches stop local tracking but do not end server-side shifts or discard assigned work.
 
 No remote API host is permitted by this demo. A physical device cannot reach the Mac using `localhost`; a secure authenticated deployment and a reviewed configuration change are prerequisites for real-device end-to-end use. Release builds have no HTTP ATS exception. Demo tokens are public fixture strings, never production secrets; no token storage or production login is supplied.
 
@@ -29,13 +29,13 @@ Use an installed simulator name. The UI suite requires a running API on `localho
 
 - `ArrivauTests`: snake_case/Unix-second contract decoding and encoding, coordinates/form validation, next-stop/state/ready-time guards, loopback URL policy, bearer/HTTP/error handling using URLProtocol
 - `ArrivauUITests`: real API dispatcher-to-driver lifecycle and persisted completion, plus cancelled creation and invalid remote-host rejection
-- `--uitesting` replaces only location sensor input in Debug; all API requests and writes remain real
+- `--uitesting` replaces location sensor input and address-search results in Debug; all API requests and writes remain real
 
-The Linux authoring environment has no Apple SDK, so native execution runs in GitHub Actions on macOS. Xcode 16.4 compiled the app and passed all 11 unit tests and both UI tests; see `docs/verification.md` and the current Actions run for exact results. Real-device background behavior remains unverified.
+The Linux authoring environment has no Apple SDK, so native execution runs in GitHub Actions on macOS. The baseline build was verified with Xcode 16.4; see `docs/verification.md` for that baseline and the Actions run for the exact current commit for updated results. The current suite also covers confirmed-state recovery and address selection. Real-device background behavior remains unverified.
 
 ## Location and lifecycle
 
-Two distinct opt-ins: “Share location while on shift” starts standard location updates after a successful shift start and When In Use permission. “Continue with screen locked” allows that started session to continue while locked or using Maps. `UIBackgroundModes: location`, `allowsBackgroundLocationUpdates` and the visible iOS location indicator implement this capability. New tracking sessions and permission requests start only in the foreground. Polling deliveries and routes stays foreground-only at five seconds.
+Two distinct opt-ins: **Start shift & share location** starts the shift and standard location updates after When In Use permission. Returning to an already active shift offers **Resume location sharing**. Existing sharing controls remain in the shift sheet. “Continue with screen locked” allows that started session to continue while locked or using Maps. `UIBackgroundModes: location`, `allowsBackgroundLocationUpdates` and the visible iOS location indicator implement this capability. New tracking sessions and permission requests start only in the foreground. Polling deliveries and routes stays foreground-only at five seconds.
 
 No Always permission is requested: Apple supports continued standard updates with When In Use authorization for a foreground-started session using background location capability. This does not guarantee recovery after force-quit, OS termination or reboot. It also does not provide push, background route polling, a durable offline upload queue or a proven delivery SLA. The last server position is retained when tracking stops and marked stale after five minutes. Server suggestions reject stale locations.
 
@@ -55,9 +55,19 @@ The real-backend lifecycle UI test saves these named PNG screenshot attachments 
 
 - `01-dispatcher-jobs`: populated dispatcher list after the demo delivery is assigned
 - `02-new-delivery`: filled delivery form before submission, with the keyboard dismissed
-- `03-driver-route`: the assigned driver's real ordered route and native map
+- `03-driver-route`: the assigned driver's next stop and immediate actions
 - `04-driver-shift`: on-shift controls and confirmed opt-in location reporting
 
-The fixture uses `Pizzeria Pachino Demo`, the sample Pachino pickup/drop-off, a ready time in the past and a deadline one hour ahead. Only sensor coordinates are simulated; delivery creation, assignment, location persistence, pickup and completion all use the running Rust API. Each capture first scrolls to and checks its visible screen anchor. Screenshot timestamps and map tiles can vary; this is UI capture, not pixel-diff testing.
+The fixture uses `Pizzeria Pachino Demo`, the sample Pachino pickup/drop-off, a ready time at submission and a deadline one hour ahead. Location sensor and Maps search inputs are deterministic fixtures; delivery creation, assignment, location persistence, pickup and completion all use the running Rust API. Each capture first scrolls to and checks its visible screen anchor. Screenshot timestamps and map tiles can vary; this is UI capture, not pixel-diff testing.
 
 The Xcode `.xcresult` artifact contains the attachments. GitHub Actions exports the named screenshots for separate download/sharing; the export step must include successful attachments, rather than only failures. Failure screenshots and an accessibility hierarchy remain separate diagnostics.
+
+
+## Minimal everyday flow
+
+- Driver home prioritizes the next stop, directions and pickup/drop-off completion. The ordered map, completed rows and shift/privacy controls are secondary. Capacity uses the driver's existing server setting; it is not a task required before every shift.
+- Dispatcher home puts pending work first. Creation needs only pickup and destination; the selected Maps result supplies its routing point and pickup name together. Nothing defaults silently to a sample address.
+- Timing defaults to ready now and due within one hour; expand Timing only to change it. The small-delivery defaults remain one load unit and a 30-minute maximum ride. Server route validation remains authoritative.
+- Creation leads directly to an automatically loaded suggestion. Assignment is still a deliberate tap, and a failed assignment retains the pending delivery rather than creating it again.
+- Raw coordinates, route scoring, capacity, sync timestamps and development configuration are absent from the everyday screens. Demo connection settings and limitations remain available from the role chooser.
+- Maps search sends the entered query to Apple and requires connectivity. Empty/error results stay editable; cancelling search keeps the previous selection. The app does not fall back to invented coordinates.

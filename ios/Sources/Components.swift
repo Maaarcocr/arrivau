@@ -19,11 +19,8 @@ struct DeliveryRow: View {
             HStack { Text(delivery.shopName).font(.headline); Spacer(); StatusPill(status: delivery.status) }
             Label(delivery.dropoffAddress, systemImage: "mappin.and.ellipse")
                 .font(.subheadline).foregroundStyle(.secondary)
-            HStack {
-                Text("Due \(delivery.deadlineAt.epochDate.formatted(date: .omitted, time: .shortened))")
-                Spacer()
-                Text("\(delivery.loadUnits) unit\(delivery.loadUnits == 1 ? "" : "s")")
-            }.font(.caption).foregroundStyle(.secondary)
+            Text(delivery.status == .pending ? "Choose a driver" : "Due \(delivery.deadlineAt.epochDate.formatted(date: .omitted, time: .shortened))")
+                .font(.caption).foregroundStyle(delivery.status == .pending ? .orange : .secondary)
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
@@ -32,16 +29,10 @@ struct DeliveryRow: View {
 struct SyncFooter: View {
     @EnvironmentObject private var store: DeliveryStore
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let error = store.syncErrorMessage {
-                Label("Refresh failed: \(error)", systemImage: "wifi.exclamationmark").foregroundStyle(.red)
-                    .accessibilityIdentifier("sync_error")
-            }
-            if let synced = store.lastSyncedAt {
-                Text("Updated \(synced.formatted(date: .omitted, time: .standard)) · refreshes every 5s in foreground")
-            } else { Text("Connecting to local API…") }
-            Text("Estimates use straight-line distances, a road multiplier and constant speed. No live traffic or road routing.")
-        }.font(.caption).foregroundStyle(.secondary)
+        if store.syncErrorMessage != nil {
+            Label("Couldn’t refresh. Pull down to try again.", systemImage: "wifi.exclamationmark")
+                .font(.caption).foregroundStyle(.orange).accessibilityIdentifier("sync_error")
+        }
     }
 }
 struct DeliveryFacts: View {
@@ -51,8 +42,6 @@ struct DeliveryFacts: View {
         LabeledContent("Drop-off", value: delivery.dropoffAddress)
         LabeledContent("Ready", value: delivery.readyAt.epochDate.formatted(date: .abbreviated, time: .shortened))
         LabeledContent("Deadline", value: delivery.deadlineAt.epochDate.formatted(date: .abbreviated, time: .shortened))
-        LabeledContent("Load", value: "\(delivery.loadUnits) units")
-        LabeledContent("Max ride", value: "\(delivery.maxRideSeconds / 60) minutes")
     }
 }
 struct RouteMap: View {
@@ -80,7 +69,7 @@ struct DirectionsButton: View {
             let destination = MKMapItem(placemark: MKPlacemark(coordinate: stop.coordinate.clCoordinate))
             destination.name = stop.address
             destination.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
-        } label: { Label("Directions in Apple Maps", systemImage: "arrow.triangle.turn.up.right.diamond") }
+        } label: { Label("Directions", systemImage: "arrow.triangle.turn.up.right.diamond") }
         .accessibilityIdentifier("open_directions")
     }
 }
@@ -97,3 +86,4 @@ struct LocationAgeLabel: View {
         }
     }
 }
+

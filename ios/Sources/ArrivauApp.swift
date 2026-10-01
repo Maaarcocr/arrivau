@@ -28,7 +28,9 @@ struct RootView: View {
                     }
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
-                            Button("Switch role") { store.logout() }
+                            Button { store.logout() } label: {
+                                Label("Switch role", systemImage: "person.crop.circle")
+                            }
                                 .accessibilityIdentifier("switch_role")
                                 .disabled(store.isMutating)
                         }
@@ -49,23 +51,32 @@ struct LoginView: View {
     @EnvironmentObject private var store: DeliveryStore
     var body: some View {
         NavigationStack {
-            Form {
+            List {
                 Section {
-                    Label("Arrivau", systemImage: "bicycle.circle.fill")
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(.orange)
-                    Text("A local dispatch & driver prototype")
-                        .font(.headline)
-                    Text("Public demo identities only. No production authentication, payments, customer contact details, push notifications or force-quit recovery. Background location is opt-in and needs device validation.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Arrivau", systemImage: "bicycle.circle.fill")
+                            .font(.largeTitle.bold()).foregroundStyle(.orange)
+                        Text("Deliveries, one step at a time.").font(.title3)
+                        Text("Local demo").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    }.padding(.vertical, 16)
                 }
-                Section("Choose a demo role") {
+                Section("What are you doing today?") {
                     ForEach(DemoRole.allCases) { role in
                         Button {
                             Task { await store.login(as: role) }
                         } label: {
-                            Label(role.title, systemImage: role == .dispatcher ? "list.clipboard" : "bicycle")
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            HStack(spacing: 14) {
+                                Image(systemName: role == .dispatcher ? "list.clipboard" : "bicycle")
+                                    .font(.title2).frame(width: 30)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(role == .dispatcher ? "Dispatch deliveries" : "Deliver as \(role.title)")
+                                        .font(.headline)
+                                    Text(role == .dispatcher ? "Create deliveries and assign a driver" : "See your next stop and get moving")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                            }.padding(.vertical, 10).contentShape(Rectangle())
                         }
                         .accessibilityIdentifier("login_\(role.rawValue)")
                         .disabled(store.isMutating)
@@ -73,16 +84,22 @@ struct LoginView: View {
                     if store.isMutating { ProgressView("Connecting…") }
                 }
                 Section {
-                    TextField("API URL", text: $store.apiURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                        .accessibilityIdentifier("api_url")
-                    Text("Use the iOS Simulator on the same Mac as the Rust API. HTTP is restricted to loopback in Debug builds. Start the API with ARRIVAU_DEMO=1.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } header: { Text("Local API") }
+                    DisclosureGroup("Demo setup & limitations") {
+                        TextField("API URL", text: $store.apiURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
+                            .accessibilityIdentifier("api_url")
+                            .disabled(store.isMutating)
+                        Text("Use the iOS Simulator on the Mac running the Rust API with ARRIVAU_DEMO=1. HTTP is restricted to loopback in Debug builds.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Public demo identities only. No production authentication, payments, customer contact details, push notifications or force-quit recovery. Background location is a separate opt-in and needs device validation.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.accessibilityIdentifier("demo_settings")
+                }
             }
-            .navigationTitle("Local demo")
+            .navigationTitle("Welcome")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 }

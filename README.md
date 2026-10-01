@@ -46,12 +46,12 @@ See `ios/README.md` for app details and test launch options.
 
 ## Try a delivery
 
-1. Open Driver 1, start a shift and opt into on-shift location sharing (simulate a location near Pachino in Xcode)
-2. Switch to Dispatcher and create a delivery; fixture addresses/coordinates are examples and are not geocoded
-3. Inspect suggested drivers, choose Driver 1 and assign the job
-4. Switch to Driver 1, refresh, and follow the ordered route
-5. At the ready time, mark the next pickup, then mark the next drop-off
-6. End the shift after all active jobs finish; the app stops location updates when off shift or signed out
+1. Open Driver 1 and tap **Start shift & share location** (simulate a location near Pachino in Xcode)
+2. Switch to Dispatcher, tap **New delivery**, and choose the pickup and destination from native Maps search
+3. Tap **Continue to driver**. The job is created and a suggested driver appears immediately; tap **Assign to Driver 1**
+4. Switch to Driver 1 and resume sharing. The next stop is at the top, with directions and one completion action
+5. At the ready time, mark the pickup, then the drop-off. The next action updates automatically
+6. Open shift controls to end the shift once work is complete; location reporting stops
 
 On a fresh database the drivers are off shift. The backend will not suggest an off-shift driver or one without a location reported in the last five minutes. Dispatchers cannot update driver statuses on their behalf. Driver 2 cannot read or update Driver 1's jobs.
 
@@ -79,7 +79,7 @@ On macOS, the combined native app → HTTP API workflow is:
 ./scripts/test-ios.sh
 ```
 
-This generates the project, builds the API, starts a disposable database/server, chooses an available iPhone simulator, and runs the app's unit and UI tests. Pass `SIMULATOR_UDID` to select a particular installed simulator. The UI test launches with deterministic fixture location and drives the real API; production UI does not silently send this fixture coordinate.
+This generates the project, builds the API, starts a disposable database/server, chooses an available iPhone simulator, and runs the app's unit and UI tests. Pass `SIMULATOR_UDID` to select a particular installed simulator. The UI test uses deterministic location and address-search fixtures and drives the real API; normal app use requires a selected Maps result and does not silently use fixture coordinates.
 
 The macOS job also captures four populated main screens and publishes an `arrivau-ios-screenshots` artifact. On GitHub, open Actions → Verify API and iOS → the run → Artifacts. The same command writes PNGs under `ios/build/screenshots/` locally. Captures use fixture deliveries and simulated Pachino location, while state changes still use the real API.
 
@@ -94,8 +94,8 @@ See [verification notes](docs/verification.md) for exactly which checks were run
 - Readiness, pickup-before-drop-off, load capacity, deadline and maximum in-vehicle time constrain proposed routes. Existing late routes remain visible with warnings
 - Time and location changes can invalidate an earlier plan; drivers and dispatchers must review warnings. Real-world safety, food handling and driving decisions remain with people
 - The app polls while foregrounded. Push notifications, reliable background delivery notifications and offline queues need separate implementation. Background Core Location has an explicit opt-in/code path, but must be verified on a signed physical device
-- Addresses are manually entered with coordinates. There is no geocoding vendor integration, customer marketplace, payment flow or production deployment
-- Location sharing is driver opt-in while on shift; background sharing can be enabled explicitly for phone locking/Maps use. Ending a shift/signing out stops app location reporting. The most recent point stays in the local database; there is no location history feed
+- Addresses and coordinates are selected together through native Apple Maps search. Search needs a network connection and sends the entered query to Apple. No paid geocoding service, customer marketplace, payment flow or production deployment is added
+- The **Start shift & share location** action is an explicit foreground-location opt-in; background sharing can be enabled separately and explicitly for phone locking/Maps use. Ending a shift/signing out stops app location reporting. The most recent point stays in the local database; there is no location history feed
 - Maps opens only when the user taps directions and then shares that stop's coordinates with Apple Maps
 
 ## Next practical iteration
@@ -106,3 +106,4 @@ See [verification notes](docs/verification.md) for exactly which checks were run
 4. Trial with a small fleet and compare suggested routes against actual pickup readiness, service time and travel time
 
 The JSON API is independent of SwiftUI, so a web dispatcher can be added without replacing the driver app.
+

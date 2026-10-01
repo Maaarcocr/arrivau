@@ -6,6 +6,7 @@ import Combine
 @MainActor
 final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDelegate {
     @Published private(set) var message = "Location sharing is off"
+    @Published private(set) var permissionDenied = false
     var onCoordinate: ((Coordinate) -> Void)?
     private let manager = CLLocationManager()
     private let deterministic: Bool
@@ -49,17 +50,20 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         }
         switch manager.authorizationStatus {
         case .notDetermined:
+            permissionDenied = false
             message = "Allow location to share your position during this shift"
             if foreground { manager.requestWhenInUseAuthorization() }
         case .authorizedAlways, .authorizedWhenInUse:
+            permissionDenied = false
             if !running { manager.startUpdatingLocation(); running = true }
             message = allowBackground
                 ? "Sharing on shift, including with the screen locked (iOS indicator enabled)"
                 : "Sharing only while the app is open"
         case .denied, .restricted:
+            permissionDenied = true
             manager.stopUpdatingLocation()
             running = false
-            message = "Location permission is off. Enable it in iOS Settings to receive assignments."
+            message = "Location access is off. Open Settings to allow it."
         @unknown default: message = "Location permission is unavailable"
         }
     }
@@ -116,3 +120,4 @@ private struct LocationSample: Sendable {
     let timestamp: Date
     let horizontalAccuracy: Double
 }
+

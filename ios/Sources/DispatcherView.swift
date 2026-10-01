@@ -137,16 +137,17 @@ struct NewDeliveryView: View {
     @State private var loadUnits = 1
     @State private var maxRideMinutes = 30
     @State private var validationError: String?
+    @FocusState private var focusedField: String?
     var body: some View {
         NavigationStack {
             Form {
                 Section("Pickup") {
-                    TextField("Shop name", text: $shopName).accessibilityIdentifier("shop_name")
-                    TextField("Pickup address", text: $pickupAddress).accessibilityIdentifier("pickup_address")
+                    TextField("Shop name", text: $shopName).focused($focusedField, equals: "shop_name").accessibilityIdentifier("shop_name")
+                    TextField("Pickup address", text: $pickupAddress).focused($focusedField, equals: "pickup_address").accessibilityIdentifier("pickup_address")
                     coordinateFields(lat: $pickupLat, lng: $pickupLng, prefix: "pickup")
                 }
                 Section("Drop-off") {
-                    TextField("Drop-off address", text: $dropoffAddress).accessibilityIdentifier("dropoff_address")
+                    TextField("Drop-off address", text: $dropoffAddress).focused($focusedField, equals: "dropoff_address").accessibilityIdentifier("dropoff_address")
                     coordinateFields(lat: $dropoffLat, lng: $dropoffLng, prefix: "dropoff")
                 }
                 Section("Timing & load") {
@@ -162,8 +163,13 @@ struct NewDeliveryView: View {
                     if let validationError { Text(validationError).foregroundStyle(.red).accessibilityIdentifier("form_error") }
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("New delivery")
             .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focusedField = nil }.accessibilityIdentifier("dismiss_keyboard")
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }.disabled(store.isMutating).accessibilityIdentifier("cancel_delivery")
                 }
@@ -175,8 +181,8 @@ struct NewDeliveryView: View {
         }.interactiveDismissDisabled(store.isMutating)
     }
     @ViewBuilder private func coordinateFields(lat: Binding<String>, lng: Binding<String>, prefix: String) -> some View {
-        TextField("Latitude", text: lat).keyboardType(.numbersAndPunctuation).accessibilityIdentifier("\(prefix)_lat")
-        TextField("Longitude", text: lng).keyboardType(.numbersAndPunctuation).accessibilityIdentifier("\(prefix)_lng")
+        TextField("Latitude", text: lat).keyboardType(.numbersAndPunctuation).focused($focusedField, equals: "\(prefix)_lat").accessibilityIdentifier("\(prefix)_lat")
+        TextField("Longitude", text: lng).keyboardType(.numbersAndPunctuation).focused($focusedField, equals: "\(prefix)_lng").accessibilityIdentifier("\(prefix)_lng")
     }
     private func create() async {
         guard let pLat = Double(pickupLat), let pLng = Double(pickupLng),

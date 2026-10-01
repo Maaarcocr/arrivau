@@ -48,3 +48,16 @@ Primary Apple references: [background location updates](https://developer.apple.
 ## Planning limits
 
 The native map shows stop pins. Apple Maps opens external turn-by-turn directions for the next stop only. The Rust planner uses approximate distances and constant speed, not a live road matrix or traffic. The server remains authoritative for feasibility, capacity, deadlines, maximum onboard time, pickup readiness and the next allowed action. Infeasible committed work remains visible with warnings.
+
+## Main-screen screenshots from GitHub Actions
+
+The real-backend lifecycle UI test saves these named PNG screenshot attachments with `keepAlways`, so they survive successful runs as well as failures:
+
+- `01-dispatcher-jobs`: populated dispatcher list after the demo delivery is assigned
+- `02-new-delivery`: filled delivery form before submission, with the keyboard dismissed
+- `03-driver-route`: the assigned driver's real ordered route and native map
+- `04-driver-shift`: on-shift controls and confirmed opt-in location reporting
+
+The fixture uses `Pizzeria Pachino Demo`, the sample Pachino pickup/drop-off, a ready time in the past and a deadline one hour ahead. Only sensor coordinates are simulated; delivery creation, assignment, location persistence, pickup and completion all use the running Rust API. Each capture first scrolls to and checks its visible screen anchor. Screenshot timestamps and map tiles can vary; this is UI capture, not pixel-diff testing.
+
+The Xcode `.xcresult` artifact contains the attachments. GitHub Actions exports the named screenshots for separate download/sharing; the export step must include successful attachments, rather than only failures. Failure screenshots and an accessibility hierarchy remain separate diagnostics.

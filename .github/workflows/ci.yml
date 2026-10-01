@@ -54,7 +54,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ios-test-results
-          path: |
-            ios/build/*.xcresult
-            ios/build/failure-attachments
+          path: ios/build/*.xcresult
+          if-no-files-found: warn
+      - name: Save main-screen screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arrivau-ios-screenshots
+          path: ios/build/screenshots
           if-no-files-found: warn

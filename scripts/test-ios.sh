@@ -23,6 +23,7 @@ cargo build --locked --manifest-path api/Cargo.toml
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 --manifest-path api/Cargo.toml | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/arrivau-ios.XXXXXX")"
 API_PID=""
+EXPORT_PYTHON=""
 cleanup() {
   local status=$?
   trap - EXIT
@@ -31,9 +32,8 @@ cleanup() {
     wait "$API_PID" 2>/dev/null || true
   fi
   if [[ $status -ne 0 ]]; then
-    if [[ -n "${RESULT:-}" && -d "$RESULT" ]]; then
-      xcrun xcresulttool export attachments --path "$RESULT" \
-        --output-path "$ROOT/ios/build/failure-attachments" --only-failures || true
+    if [[ -n "${RESULT:-}" && -d "$RESULT" && -n "$EXPORT_PYTHON" ]]; then
+      "$EXPORT_PYTHON" scripts/export-screenshots.py "$RESULT" "$ROOT/ios/build/screenshots" || true
     fi
     echo "API log (temporary test state retained at $TEMP_DIR):" >&2
     cat "$TEMP_DIR/api.log" >&2 || true
@@ -43,6 +43,9 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+python3 -m venv "$TEMP_DIR/screenshot-tools"
+EXPORT_PYTHON="$TEMP_DIR/screenshot-tools/bin/python"
+"$EXPORT_PYTHON" -m pip install --disable-pip-version-check --quiet zstandard==0.25.0
 ARRIVAU_DEMO=1 ARRIVAU_ADDR=127.0.0.1:8080 ARRIVAU_DB_PATH="$TEMP_DIR/arrivau.sqlite3" \
   "$TARGET_DIR/debug/arrivau-api" >"$TEMP_DIR/api.log" 2>&1 &
 API_PID=$!
@@ -98,4 +101,5 @@ xcodebuild test \
   -resultBundlePath "$RESULT" \
   -parallel-testing-enabled NO \
   CODE_SIGNING_ALLOWED=NO
+"$EXPORT_PYTHON" scripts/export-screenshots.py "$RESULT" "$ROOT/ios/build/screenshots" --require-all
 printf '\nNative tests passed; Xcode result: %s\n' "$RESULT"

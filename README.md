@@ -81,6 +81,8 @@ On macOS, the combined native app → HTTP API workflow is:
 
 This generates the project, builds the API, starts a disposable database/server, chooses an available iPhone simulator, and runs the app's unit and UI tests. Pass `SIMULATOR_UDID` to select a particular installed simulator. The UI test launches with deterministic fixture location and drives the real API; production UI does not silently send this fixture coordinate.
 
+The macOS job also captures four populated main screens and publishes an `arrivau-ios-screenshots` artifact. On GitHub, open Actions → Verify API and iOS → the run → Artifacts. The same command writes PNGs under `ios/build/screenshots/` locally. Captures use fixture deliveries and simulated Pachino location, while state changes still use the real API.
+
 See [verification notes](docs/verification.md) for exactly which checks were run when this starter was created. A configured CI job is not evidence that it has passed.
 
 ## Scope and safety

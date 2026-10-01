@@ -41,8 +41,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(beforeOptIn.active)
         XCTAssertNil(beforeOptIn.location, "Starting a shift must not transmit a location without opt-in")
         let optInAt = Int(Date().timeIntervalSince1970)
-        tap(app.switches["share_location"])
-        XCTAssertEqual(app.switches["share_location"].value as? String, "1")
+        setSwitch(app.switches["share_location"], to: true)
         try await waitForServerLocation(since: optInAt)
         let sentLabel = app.staticTexts["location_sent"]
         reveal(sentLabel)
@@ -51,10 +50,13 @@ final class DeliveryFlowUITests: XCTestCase {
 
         login("dispatcher")
         tap(app.buttons["create_delivery"])
-        let shopName = "UI test pizza \(UUID().uuidString.prefix(6))"
+        // A fresh database makes this fixed screenshot fixture deterministic.
+        let shopName = "Pizzeria Pachino Demo"
         let shop = app.textFields["shop_name"]
         XCTAssertTrue(shop.waitForExistence(timeout: 5))
         replace(shop, with: shopName)
+        tap(app.buttons["dismiss_keyboard"])
+        captureScreen("02-new-delivery", showing: shop)
         // Defaults are ready in the past, due one hour ahead, 1 unit, Pachino coordinates.
         tap(app.buttons["submit_delivery"])
         XCTAssertTrue(app.buttons["create_delivery"].waitForExistence(timeout: 15))
@@ -66,10 +68,14 @@ final class DeliveryFlowUITests: XCTestCase {
         waitForLabel(app.staticTexts["delivery_status"], "Assigned")
         // Detail navigation may hide the parent toolbar; return before switching identities.
         app.navigationBars.buttons.element(boundBy: 0).tap()
+        captureScreen("01-dispatcher-jobs", showing: deliveryRow)
         switchRole()
 
         login("driver1")
-        tap(app.switches["share_location"])
+        setSwitch(app.switches["share_location"], to: true)
+        captureScreen("04-driver-shift", showing: app.staticTexts["location_sent"])
+        let routeMap = app.descendants(matching: .any).matching(identifier: "route_map").firstMatch
+        captureScreen("03-driver-route", showing: routeMap)
         tap(app.buttons["confirm_pickup"], timeout: 15)
         tap(app.buttons["confirm_dropoff"], timeout: 15)
         reveal(app.staticTexts["empty_route"])
@@ -139,6 +145,17 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTFail("The app did not persist a fresh deterministic Pachino location to the real API after opt-in")
     }
 
+    /// Names are a stable export contract for GitHub Actions, including successful runs.
+    private func captureScreen(_ name: String, showing element: XCUIElement) {
+        reveal(element)
+        XCTAssertTrue(element.waitForExistence(timeout: 15))
+        XCTAssertTrue(element.isHittable, "Screenshot anchor must be visible: \(name)")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func login(_ role: String) {
         tap(app.buttons["login_\(role)"])
         let destination = role == "dispatcher" ? app.buttons["create_delivery"] : app.buttons["toggle_shift"]
@@ -154,6 +171,25 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(element.isHittable)
         element.tap()
     }
+    private func setSwitch(_ element: XCUIElement, to enabled: Bool) {
+        XCTAssertTrue(element.waitForExistence(timeout: 10))
+        reveal(element)
+        let target = enabled ? "1" : "0"
+        if element.value as? String != target {
+            // SwiftUI exposes both a label+control row and the native child switch.
+            // Tapping the row center hits its label rather than the actual control.
+            let nativeSwitch = element.switches.firstMatch
+            if nativeSwitch.exists && nativeSwitch.isHittable {
+                nativeSwitch.tap()
+            } else {
+                element.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap()
+            }
+        }
+        let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", target), object: element)
+        XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 10), .completed,
+                       "Switch did not reach \(target): \(element.debugDescription)")
+    }
+
     private func reveal(_ element: XCUIElement) {
         for _ in 0..<7 {
             if element.isHittable { return }

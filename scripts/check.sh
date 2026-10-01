@@ -5,4 +5,5 @@ cd "$ROOT"
 cargo fmt --manifest-path api/Cargo.toml -- --check
 cargo clippy --locked --manifest-path api/Cargo.toml --all-targets -- -D warnings
 cargo test --locked --manifest-path api/Cargo.toml
-python3 -m py_compile scripts/e2e.py
+python3 -m py_compile scripts/e2e.py scripts/export-screenshots.py
+python3 -m unittest discover -s scripts -p "test_*.py"

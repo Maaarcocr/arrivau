@@ -13,7 +13,7 @@ struct DispatcherView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(openDeliveries.isEmpty ? "Ready for the next delivery" : "\(openDeliveries.count) deliveries in progress")
+                    Text(openDeliveries.isEmpty ? "Ready for the next delivery" : "\(openDeliveries.count) \(openDeliveries.count == 1 ? "delivery" : "deliveries") in progress")
                         .font(.title2.bold())
                     Button { showingCreate = true } label: {
                         Label("New delivery", systemImage: "plus")
@@ -33,7 +33,7 @@ struct DispatcherView: View {
                 }
             }
             Section {
-                DisclosureGroup("Drivers · \(store.drivers.filter(\.active).count) on shift") {
+                ExpandableDetails("Drivers · \(store.drivers.filter(\.active).count) on shift", identifier: "drivers_details") {
                     ForEach(store.drivers) { driver in
                         HStack {
                             Label(driver.name, systemImage: "bicycle")
@@ -42,15 +42,15 @@ struct DispatcherView: View {
                                 .font(.subheadline).foregroundStyle(driver.active ? .green : .secondary)
                         }.accessibilityIdentifier("driver_\(driver.id)")
                     }
-                }.accessibilityIdentifier("drivers_details")
+                }
                 if store.deliveries.contains(where: { $0.status == .delivered }) {
-                    DisclosureGroup("Completed") {
+                    ExpandableDetails("Completed", identifier: "completed_deliveries") {
                         ForEach(store.deliveries.filter { $0.status == .delivered }.sorted { $0.createdAt > $1.createdAt }) { delivery in
                             NavigationLink { DeliveryDetailView(deliveryId: delivery.id) } label: {
                                 DeliveryRow(delivery: delivery)
                             }.accessibilityIdentifier("delivery_\(delivery.id)")
                         }
-                    }.accessibilityIdentifier("completed_deliveries")
+                    }
                 }
             }
             SyncFooter()
@@ -93,7 +93,7 @@ struct DeliveryDetailView: View {
                                 if let recommended = suggestions.first {
                                     assignment(recommended, recommended: true)
                                     if suggestions.count > 1 {
-                                        DisclosureGroup("Other drivers") {
+                                        ExpandableDetails("Other drivers", identifier: "other_drivers") {
                                             ForEach(Array(suggestions.dropFirst())) { assignment($0, recommended: false) }
                                         }
                                     }
@@ -180,7 +180,6 @@ struct NewDeliveryView: View {
     @State private var selectingPickup = false
     @State private var selectingDropoff = false
     @State private var customTiming = false
-    @State private var timingExpanded = false
     @State private var readyAt = Date()
     @State private var deadlineAt = Date().addingTimeInterval(3600)
     @State private var validationError: String?
@@ -200,18 +199,12 @@ struct NewDeliveryView: View {
                             placeButton(title: "Deliver to", place: dropoff, icon: "mappin.and.ellipse", identifier: "choose_dropoff") { selectingDropoff = true }
                         }
                         Section {
-                            DisclosureGroup(isExpanded: $timingExpanded) {
+                            ExpandableDetails(customTiming ? "Ready \(readyAt.formatted(date: .omitted, time: .shortened)) · due \(deadlineAt.formatted(date: .omitted, time: .shortened))" : "Ready now · deliver within an hour", systemImage: "clock", identifier: "delivery_timing") {
                                 DatePicker("Ready at", selection: $readyAt).accessibilityIdentifier("ready_at")
                                     .onChange(of: readyAt) { _, _ in customTiming = true }
                                 DatePicker("Deliver by", selection: $deadlineAt).accessibilityIdentifier("deadline_at")
                                     .onChange(of: deadlineAt) { _, _ in customTiming = true }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("Timing")
-                                    Text(customTiming ? "Ready \(readyAt.formatted(date: .omitted, time: .shortened)) · due \(deadlineAt.formatted(date: .omitted, time: .shortened))" : "Ready now · deliver within an hour")
-                                        .font(.subheadline).foregroundStyle(.secondary)
-                                }
-                            }.accessibilityIdentifier("delivery_timing")
+                            }
                         }
                         if let validationError {
                             Section { Text(validationError).foregroundStyle(.red).accessibilityIdentifier("form_error") }
@@ -260,13 +253,13 @@ struct NewDeliveryView: View {
                 Image(systemName: icon).foregroundStyle(.orange).frame(width: 24)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(title).font(.caption).foregroundStyle(.secondary)
-                    Text(place?.name ?? "Choose an address").font(.headline).foregroundStyle(.primary)
-                    if let place { Text(place.address).font(.subheadline).foregroundStyle(.secondary) }
+                    Text(place?.name ?? "Choose an address").font(.headline).foregroundStyle(Color.primary)
+                    if let place { Text(place.address).font(.subheadline).foregroundStyle(Color.secondary) }
                 }
                 Spacer()
                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
             }.padding(.vertical, 8)
-        }.accessibilityIdentifier(identifier)
+        }.buttonStyle(.plain).accessibilityIdentifier(identifier)
     }
 
     private func create() async {

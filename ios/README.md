@@ -25,7 +25,7 @@ xcodebuild test -project ios/Arrivau.xcodeproj \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-Use an installed simulator name. The UI suite requires a running API on `localhost:8080` and a fresh demo database, with Driver 1 off shift and no work. The test scheme fixes `ARRIVAU_API_URL` to `http://localhost:8080`; change its test environment variable in `project.yml` and regenerate to use another loopback port. Do not run the UI suite against a database you care about: it creates deliveries, starts/ends a shift, shares simulated coordinates, assigns, picks up and completes work. There is no test-only reset endpoint.
+Use an installed simulator name. The UI suite requires a running API on `localhost:8080` and a fresh demo database, with Driver 1 off shift and no work. The test scheme fixes `ARRIVAU_API_URL` to `http://127.0.0.1:8080`; change its test environment variable in `project.yml` and regenerate to use another loopback port. Do not run the UI suite against a database you care about: it creates deliveries, starts/ends a shift, shares simulated coordinates, assigns, picks up and completes work. There is no test-only reset endpoint.
 
 - `ArrivauTests`: snake_case/Unix-second contract decoding and encoding, coordinates/form validation, next-stop/state/ready-time guards, loopback URL policy, bearer/HTTP/error handling using URLProtocol
 - `ArrivauUITests`: real API dispatcher-to-driver lifecycle and persisted completion, plus cancelled creation and invalid remote-host rejection

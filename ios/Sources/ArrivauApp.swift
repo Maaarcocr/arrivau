@@ -84,7 +84,7 @@ struct LoginView: View {
                     if store.isMutating { ProgressView("Connecting…") }
                 }
                 Section {
-                    DisclosureGroup("Demo setup & limitations") {
+                    ExpandableDetails("Demo setup & limitations", identifier: "demo_settings") {
                         TextField("API URL", text: $store.apiURL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -95,7 +95,7 @@ struct LoginView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         Text("Public demo identities only. No production authentication, payments, customer contact details, push notifications or force-quit recovery. Background location is a separate opt-in and needs device validation.")
                             .font(.caption).foregroundStyle(.secondary)
-                    }.accessibilityIdentifier("demo_settings")
+                    }
                 }
             }
             .navigationTitle("Welcome")

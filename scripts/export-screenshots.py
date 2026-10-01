@@ -12,6 +12,7 @@ import json
 import pathlib
 import re
 import sqlite3
+import warnings
 
 NAMES = (
     "01-dispatcher-jobs", "02-new-delivery", "03-driver-route", "04-driver-shift",
@@ -24,7 +25,10 @@ def decompress(payload):
     if not payload.startswith(ZSTD):
         return payload
     import zstandard
-    return zstandard.ZstdDecompressor().decompress(payload, max_output_size=32 * 1024 * 1024)
+    try:
+        return zstandard.ZstdDecompressor().decompress(payload, max_output_size=32 * 1024 * 1024)
+    except zstandard.ZstdError as error:
+        raise ValueError(f"Unreadable Zstandard payload: {error}") from error
 
 
 def compact_records(result):
@@ -36,13 +40,24 @@ def compact_records(result):
         rb"K2:id\[S6:StringK2:_vV[0-9]+:([A-Za-z0-9_~=+-]+)\]\]"
     )
     records = []
+    unreadable = 0
     for path in (result / "Data").glob("data.*"):
-        payload = decompress(path.read_bytes())
+        try:
+            payload = decompress(path.read_bytes())
+        except (OSError, ValueError):
+            # A crashed test run can leave unrelated diagnostics incomplete or
+            # larger than the decode limit. Discovery must not depend on those
+            # records. Named screenshot payloads are read strictly in export().
+            unreadable += 1
+            continue
         # Compact typed records start with a type or structure marker, not logs/PNG.
         if not payload.startswith((b"[T", b"[S")):
             continue
         for match in pattern.finditer(payload):
             records.append((match[1].decode(), match[2].decode(), "public.png"))
+    if unreadable:
+        warnings.warn(f"Skipped {unreadable} unreadable XCResult records during attachment discovery; "
+                      "named screenshot payloads are still required to be readable.", RuntimeWarning)
     return records
 
 
@@ -65,8 +80,10 @@ def export(result, destination, require_all=False):
             continue
         if not ref or not re.fullmatch(r"[A-Za-z0-9_~=+-]+", ref):
             raise ValueError("Unsafe or unknown screenshot payload reference")
-        payload = (result / "Data" / ("data." + ref)).read_bytes()
-        payload = decompress(payload)
+        try:
+            payload = decompress((result / "Data" / ("data." + ref)).read_bytes())
+        except (OSError, ValueError) as error:
+            raise ValueError(f"Cannot read snapshot {name}: {error}") from error
         if not payload.startswith(PNG):
             raise ValueError(f"Snapshot {name} is not a PNG")
         output = destination / (name + ".png")

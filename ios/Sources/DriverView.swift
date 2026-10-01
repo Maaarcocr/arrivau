@@ -41,7 +41,7 @@ struct DriverView: View {
 
             if let route = store.route, !route.stops.isEmpty {
                 Section {
-                    DisclosureGroup {
+                    ExpandableDetails("Route · \(route.stops.count) stops", systemImage: "map", identifier: "route_details") {
                         RouteMap(stops: route.stops, driverLocation: store.currentDriver?.location)
                         ForEach(Array(route.stops.enumerated()), id: \.element.id) { index, stop in
                             VStack(alignment: .leading, spacing: 4) {
@@ -54,21 +54,17 @@ struct DriverView: View {
                         Text("About \(route.travelSeconds / 60) min travel · finish \(route.finishAt.epochDate.formatted(date: .omitted, time: .shortened))")
                             .font(.caption).foregroundStyle(.secondary)
                         Text("Approximate times, without live traffic.").font(.caption).foregroundStyle(.secondary)
-                    } label: {
-                        Label("Route · \(route.stops.count) stops", systemImage: "map")
-                    }.accessibilityIdentifier("route_details")
+                    }
                 }
             }
 
             if !completed.isEmpty {
                 Section {
-                    DisclosureGroup {
+                    ExpandableDetails("Completed · \(completed.count)", systemImage: "checkmark.circle", identifier: "delivery_history") {
                         ForEach(completed) { delivery in
                             DeliveryRow(delivery: delivery).accessibilityIdentifier("own_delivery_\(delivery.id)")
                         }
-                    } label: {
-                        Label("Completed · \(completed.count)", systemImage: "checkmark.circle")
-                    }.accessibilityIdentifier("delivery_history")
+                    }
                 }
             }
             Section { SyncFooter() }
@@ -144,7 +140,7 @@ struct DriverView: View {
                             .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
                         Text("Contact dispatch about the timing. Your next stop is still shown above.")
                             .font(.footnote).foregroundStyle(.secondary)
-                        DisclosureGroup("View timing warnings") {
+                        ExpandableDetails("View timing warnings", identifier: "route_warnings") {
                             ForEach(route.warnings, id: \.self) { Text($0).font(.footnote) }
                         }.font(.footnote)
                     }
@@ -221,7 +217,7 @@ private struct DriverShiftSheet: View {
                     }
                 }
                 Section {
-                    DisclosureGroup("About this demo") {
+                    ExpandableDetails("About this demo", identifier: "driver_demo_details") {
                         Text("Location updates need a fresh position and a network connection. Background sharing needs real-device validation and won't recover after a force-quit. The last position becomes stale after five minutes.")
                             .font(.caption).foregroundStyle(.secondary)
                         if store.isUITesting {

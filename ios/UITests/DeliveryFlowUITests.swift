@@ -14,7 +14,10 @@ final class DeliveryFlowUITests: XCTestCase {
         let configured = ProcessInfo.processInfo.environment["ARRIVAU_API_URL"] ?? ""
         let baseURL = configured.hasPrefix("http") ? configured : "http://localhost:8080"
         app.launchEnvironment["ARRIVAU_API_URL"] = baseURL
-        apiURL = try XCTUnwrap(URL(string: baseURL))
+        var readURL = try XCTUnwrap(URLComponents(string: baseURL))
+        // CI binds the demo server to IPv4; avoid localhost's slow IPv6 fallback in test reads.
+        if readURL.host == "localhost" { readURL.host = "127.0.0.1" }
+        apiURL = try XCTUnwrap(readURL.url)
         app.launch()
     }
 
@@ -33,7 +36,7 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     @MainActor
-    func testDispatcherToDriverLifecycle() async throws {
+    func testDispatcherToDriverLifecycle() throws {
         login("driver1")
         let start = app.buttons["toggle_shift"]
         XCTAssertEqual(start.label, "Start shift & share location", "Run against a fresh demo database")
@@ -42,7 +45,7 @@ final class DeliveryFlowUITests: XCTestCase {
         let startAt = Int(Date().timeIntervalSince1970)
         tap(start)
         waitForLabelContaining(app.buttons["shift_settings"], "On shift")
-        try await waitForServerLocation(since: startAt)
+        try waitForServerLocation(since: startAt)
         XCTAssertFalse(app.buttons["toggle_shift"].exists, "End shift belongs in shift settings")
         tap(app.buttons["shift_settings"])
         assertSwitch(app.switches["share_location"], value: "1")
@@ -66,7 +69,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["suggest_drivers"].exists, "Suggestions must load without another action")
         XCTAssertTrue(app.buttons["done_delivery"].exists)
         XCTAssertTrue(app.buttons["assign_driver-1"].waitForExistence(timeout: 15))
-        let created = try await readDeliveriesFromServer()
+        let created = try readDeliveriesFromServer()
         XCTAssertEqual(created.count, 1, "The happy path creates exactly one delivery")
         let delivery = try XCTUnwrap(created.first)
         XCTAssertEqual(delivery.shopName, shopName)
@@ -91,7 +94,7 @@ final class DeliveryFlowUITests: XCTestCase {
         let resumedAt = Int(Date().timeIntervalSince1970)
         tap(app.buttons["resume_location"])
         waitUntilAbsent(app.buttons["resume_location"])
-        try await waitForServerLocation(since: resumedAt)
+        try waitForServerLocation(since: resumedAt)
         XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists, "Show only the next stop's completion action")
         XCTAssertFalse(element("route_map").exists, "The map should start collapsed")
@@ -123,12 +126,12 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["confirm_pickup"], timeout: 15)
         XCTAssertTrue(app.buttons["confirm_dropoff"].waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["confirm_pickup"].exists)
-        try await assertServerStatus(delivery.id, "picked_up")
+        try assertServerStatus(delivery.id, "picked_up")
         tap(app.buttons["confirm_dropoff"], timeout: 15)
         XCTAssertTrue(app.staticTexts["empty_route"].waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["confirm_pickup"].exists)
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists)
-        try await assertServerStatus(delivery.id, "delivered")
+        try assertServerStatus(delivery.id, "delivered")
         let completed = element("own_delivery_\(delivery.id)")
         XCTAssertFalse(completed.exists, "Completed deliveries should start collapsed")
         tap(app.buttons["delivery_history"])
@@ -148,7 +151,7 @@ final class DeliveryFlowUITests: XCTestCase {
         assertSwitch(app.switches["background_location"], value: "0")
         XCTAssertFalse(app.switches["share_location"].isEnabled)
         tap(app.buttons["close_shift_settings"])
-        let endedDriver = try await readDriverFromServer()
+        let endedDriver = try readDriverFromServer()
         XCTAssertFalse(endedDriver.active)
         switchRole()
 
@@ -161,7 +164,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["assign_driver-1"].exists)
         XCTAssertFalse(app.buttons["change_driver"].exists)
         backToDeliveries()
-        try await verifyPendingDeliveryCanBeReopened()
+        try verifyPendingDeliveryCanBeReopened()
     }
 
     func testAddressSearchCancellationAndStaleResults() {
@@ -236,8 +239,8 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     @MainActor
-    private func verifyPendingDeliveryCanBeReopened() async throws {
-        let before = try await readDeliveriesFromServer()
+    private func verifyPendingDeliveryCanBeReopened() throws {
+        let before = try readDeliveriesFromServer()
         let previousIDs = Set(before.map(\.id))
         tap(app.buttons["create_delivery"])
         assertEmptyDeliveryForm()
@@ -251,7 +254,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(element("no_suggestions").waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["submit_delivery"].exists)
         XCTAssertFalse(app.buttons["cancel_delivery"].exists)
-        let after = try await readDeliveriesFromServer()
+        let after = try readDeliveriesFromServer()
         XCTAssertEqual(after.count, before.count + 1)
         let pending = try XCTUnwrap(after.first { !previousIDs.contains($0.id) })
         XCTAssertEqual(pending.status, "pending")
@@ -266,7 +269,7 @@ final class DeliveryFlowUITests: XCTestCase {
             XCTAssertFalse(app.buttons["suggest_drivers"].exists)
             backToDeliveries()
         }
-        let reopened = try await readDeliveriesFromServer()
+        let reopened = try readDeliveriesFromServer()
         XCTAssertEqual(Set(reopened.map(\.id)), Set(after.map(\.id)), "Reopening a created job must retain its ID")
     }
 
@@ -315,11 +318,48 @@ final class DeliveryFlowUITests: XCTestCase {
         let dropoff: ServerCoordinate
     }
 
-    private func readServer<T: Decodable>(_ path: String, token: String) async throws -> T {
+    /// Keep UI tests synchronous: XCTest's stop-on-failure unwinds the current test,
+    /// whereas throwing its assertion exception through an async task can cascade or crash.
+    private final class ServerResponse: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<(Data, URLResponse), Error>?
+
+        func store(_ value: Result<(Data, URLResponse), Error>) {
+            lock.lock()
+            defer { lock.unlock() }
+            result = value
+        }
+
+        func load() -> Result<(Data, URLResponse), Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+    }
+
+    private func readServer<T: Decodable>(_ path: String, token: String) throws -> T {
         var request = URLRequest(url: apiURL.appendingPathComponent(path))
         request.timeoutInterval = 5
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let completed = XCTestExpectation(description: "Read \(path) from the real API")
+        let responseBox = ServerResponse()
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error { responseBox.store(.failure(error)) }
+            else if let data, let response { responseBox.store(.success((data, response))) }
+            else {
+                responseBox.store(.failure(NSError(domain: "DeliveryFlowUITests", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "The API returned no response for \(path)"])))
+            }
+            completed.fulfill()
+        }
+        task.resume()
+        guard XCTWaiter.wait(for: [completed], timeout: 8) == .completed else {
+            task.cancel()
+            throw NSError(domain: "DeliveryFlowUITests", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "The API read timed out: \(path)"])
+        }
+        let result = try XCTUnwrap(responseBox.load())
+        let (data, response) = try result.get()
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200,
                        "Server read failed: \(String(decoding: data, as: UTF8.self))")
         let decoder = JSONDecoder()
@@ -327,16 +367,16 @@ final class DeliveryFlowUITests: XCTestCase {
         return try decoder.decode(T.self, from: data)
     }
 
-    private func readDriverFromServer() async throws -> ServerDriver {
-        try await readServer("v1/shift", token: "demo-driver-1")
+    private func readDriverFromServer() throws -> ServerDriver {
+        try readServer("v1/shift", token: "demo-driver-1")
     }
 
-    private func readDeliveriesFromServer() async throws -> [ServerDelivery] {
-        try await readServer("v1/deliveries", token: "demo-dispatcher")
+    private func readDeliveriesFromServer() throws -> [ServerDelivery] {
+        try readServer("v1/deliveries", token: "demo-dispatcher")
     }
 
-    private func assertServerStatus(_ id: String, _ status: String) async throws {
-        let deliveries = try await readDeliveriesFromServer()
+    private func assertServerStatus(_ id: String, _ status: String) throws {
+        let deliveries = try readDeliveriesFromServer()
         XCTAssertEqual(deliveries.first { $0.id == id }?.status, status)
     }
 
@@ -349,17 +389,17 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(delivery.dropoff.lng, 15.1, accuracy: 0.000001)
     }
 
-    private func waitForServerLocation(since timestamp: Int) async throws {
+    private func waitForServerLocation(since timestamp: Int) throws {
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline {
-            let driver = try await readDriverFromServer()
+            let driver = try readDriverFromServer()
             if let location = driver.location, let updated = driver.locationUpdatedAt, updated >= timestamp {
                 XCTAssertTrue(driver.active)
                 XCTAssertEqual(location.lat, 36.7163, accuracy: 0.000001)
                 XCTAssertEqual(location.lng, 15.0908, accuracy: 0.000001)
                 return
             }
-            try await Task.sleep(for: .milliseconds(250))
+            Thread.sleep(forTimeInterval: 0.25)
         }
         XCTFail("The app did not persist a fresh deterministic Pachino location to the real API after explicit location sharing")
     }
@@ -397,20 +437,22 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func tap(_ element: XCUIElement, timeout: TimeInterval = 10) {
-        if !element.waitForExistence(timeout: min(timeout, 3)) { reveal(element) }
-        XCTAssertTrue(element.waitForExistence(timeout: timeout))
+        if !element.exists { _ = element.waitForExistence(timeout: min(timeout, 3)) }
         reveal(element)
+        XCTAssertTrue(element.exists || element.waitForExistence(timeout: timeout))
         waitUntilEnabled(element, timeout: timeout)
         XCTAssertTrue(element.isHittable)
         element.tap()
     }
 
     private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval = 10) {
+        if element.exists && element.isHittable && element.isEnabled { return }
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true AND enabled == true"), object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: timeout), .completed)
     }
 
     private func waitUntilAbsent(_ element: XCUIElement) {
+        if !element.exists { return }
         let absent = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [absent], timeout: 10), .completed)
     }
@@ -436,12 +478,13 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func reveal(_ element: XCUIElement) {
-        for _ in 0..<7 {
-            if element.isHittable { return }
+        // Checking existence first avoids XCTest's repeated lookup retries for missing IDs.
+        for _ in 0..<4 {
+            if element.exists && element.isHittable { return }
             app.swipeUp()
         }
-        for _ in 0..<7 {
-            if element.isHittable { return }
+        for _ in 0..<4 {
+            if element.exists && element.isHittable { return }
             app.swipeDown()
         }
     }
@@ -454,11 +497,13 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func waitForLabel(_ element: XCUIElement, _ label: String) {
+        if element.exists && element.label == label { return }
         let expected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND label == %@", label), object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed)
     }
 
     private func waitForLabelContaining(_ element: XCUIElement, _ label: String) {
+        if element.exists && element.label.contains(label) { return }
         let expected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND label CONTAINS %@", label), object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed)
     }

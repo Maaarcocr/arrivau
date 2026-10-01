@@ -87,3 +87,42 @@ struct LocationAgeLabel: View {
     }
 }
 
+
+/// The whole row is a button, so details do not require a precise chevron tap.
+struct ExpandableDetails<Content: View>: View {
+    let title: String
+    let systemImage: String?
+    let identifier: String
+    let content: Content
+    @State private var expanded = false
+
+    init(_ title: String, systemImage: String? = nil, identifier: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.systemImage = systemImage
+        self.identifier = identifier
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                withAnimation { expanded.toggle() }
+            } label: {
+                HStack {
+                    if let systemImage { Image(systemName: systemImage) }
+                    Text(title)
+                    Spacer(minLength: 12)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier(identifier)
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            if expanded { content }
+        }
+    }
+}

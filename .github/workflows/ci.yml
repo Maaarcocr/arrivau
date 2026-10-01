@@ -1,0 +1,58 @@
+name: Verify API and iOS
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  api:
+    name: Rust and real HTTP tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Format, lint and tests
+        run: ./scripts/check.sh
+      - name: Build server and smoke via HTTP
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --manifest-path api/Cargo.toml
+          TEST_DIR=$(mktemp -d)
+          ARRIVAU_DEMO=1 ARRIVAU_DB_PATH="$TEST_DIR/smoke.sqlite3" api/target/debug/arrivau-api >"$TEST_DIR/api.log" 2>&1 &
+          API_PID=$!
+          trap 'kill "$API_PID" 2>/dev/null || true; cat "$TEST_DIR/api.log"' EXIT
+          for i in {1..100}; do
+            kill -0 "$API_PID" || exit 1
+            if curl -fsS --max-time 1 http://127.0.0.1:8080/health >/dev/null; then break; fi
+            sleep 0.2
+          done
+          python3 scripts/e2e.py
+  ios:
+    name: Native app to API E2E
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tool versions and project generator
+        run: |
+          xcodebuild -version
+          rustup show
+          brew install xcodegen
+          xcodegen --version
+          xcrun simctl list devices available
+      - name: Run native unit and UI tests with real server
+        run: ./scripts/test-ios.sh
+      - name: Save Xcode test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results
+          path: ios/build/*.xcresult
+          if-no-files-found: warn

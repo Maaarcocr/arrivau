@@ -2,8 +2,8 @@
 """Export named Arrivau screenshots from an Xcode 16 result bundle.
 
 Xcode 16.4's `export attachments --only-failures` can omit XCTest attachments.
-This narrow read-only extractor uses its observed SQLite attachment index and
-Zstandard/raw payloads; it fails visibly if the result format changes. It never
+This narrow read-only extractor uses its observed SQLite attachment index or
+compact v3 attachment records and Zstandard/raw payloads; it fails visibly if the result format changes. It never
 modifies the .xcresult and exports only the four intentional demo snapshots.
 Requires zstandard==0.25.0 for compressed payloads.
 """
@@ -20,33 +20,58 @@ PNG = b"\x89PNG\r\n\x1a\n"
 ZSTD = b"\x28\xb5\x2f\xfd"
 
 
+def decompress(payload):
+    if not payload.startswith(ZSTD):
+        return payload
+    import zstandard
+    return zstandard.ZstdDecompressor().decompress(payload, max_output_size=32 * 1024 * 1024)
+
+
+def compact_records(result):
+    """Read observed XCResult v3.53 named attachment records before lazy indexing."""
+    names = b"|".join(re.escape(name.encode()) for name in NAMES)
+    pattern = re.compile(
+        rb"K4:name\[S6:StringK2:_vV[0-9]+:(" + names + rb")\]"
+        rb"K10:payloadRef\[(?:S9:Reference|T\[K2:_nV9:Reference\])"
+        rb"K2:id\[S6:StringK2:_vV[0-9]+:([A-Za-z0-9_~=+-]+)\]\]"
+    )
+    records = []
+    for path in (result / "Data").glob("data.*"):
+        payload = decompress(path.read_bytes())
+        # Compact typed records start with a type or structure marker, not logs/PNG.
+        if not payload.startswith((b"[T", b"[S")):
+            continue
+        for match in pattern.finditer(payload):
+            records.append((match[1].decode(), match[2].decode(), "public.png"))
+    return records
+
+
 def export(result, destination, require_all=False):
     result, destination = pathlib.Path(result).resolve(), pathlib.Path(destination).resolve()
     database = result / "database.sqlite3"
-    if not database.is_file():
-        raise ValueError("Xcode result has no SQLite attachment index; export format needs review")
     destination.mkdir(parents=True, exist_ok=True)
     for name in NAMES:
         (destination / (name + ".png")).unlink(missing_ok=True)
     found = {}
-    with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
-        records = connection.execute(
-            "SELECT name, xcResultKitPayloadRefId, uniformTypeIdentifier FROM Attachments ORDER BY timestamp"
-        )
-        for name, ref, kind in records:
-            if name not in NAMES or kind != "public.png":
-                continue
-            if not ref or not re.fullmatch(r"[A-Za-z0-9_~=+-]+", ref):
-                raise ValueError("Unsafe or unknown screenshot payload reference")
-            payload = (result / "Data" / ("data." + ref)).read_bytes()
-            if payload.startswith(ZSTD):
-                import zstandard
-                payload = zstandard.ZstdDecompressor().decompress(payload, max_output_size=32 * 1024 * 1024)
-            if not payload.startswith(PNG):
-                raise ValueError(f"Snapshot {name} is not a PNG")
-            output = destination / (name + ".png")
-            output.write_bytes(payload)
-            found[name] = {"name": name, "file": output.name, "bytes": len(payload)}
+    if database.is_file():
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as connection:
+            records = list(connection.execute(
+                "SELECT name, xcResultKitPayloadRefId, uniformTypeIdentifier FROM Attachments ORDER BY timestamp"
+            ))
+    else:
+        records = compact_records(result)
+    for name, ref, kind in records:
+        if name not in NAMES or kind != "public.png":
+            continue
+        if not ref or not re.fullmatch(r"[A-Za-z0-9_~=+-]+", ref):
+            raise ValueError("Unsafe or unknown screenshot payload reference")
+        payload = (result / "Data" / ("data." + ref)).read_bytes()
+        payload = decompress(payload)
+        if not payload.startswith(PNG):
+            raise ValueError(f"Snapshot {name} is not a PNG")
+        output = destination / (name + ".png")
+        output.write_bytes(payload)
+        found[name] = {"name": name, "file": output.name, "bytes": len(payload)}
     summary = {"screenshots": [found[name] for name in NAMES if name in found],
                "missing": [name for name in NAMES if name not in found]}
     (destination / "manifest.json").write_text(json.dumps(summary, indent=2) + "\n")

@@ -41,6 +41,26 @@ class ScreenshotExportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing expected"):
             exporter.export(self.result, self.root / "screens", True)
 
+    def test_compact_result_without_materialized_sqlite_index(self):
+        records = bytearray(b"[T")
+        for index, name in enumerate(exporter.NAMES):
+            ref = f"0~compact{index}"
+            (self.result / "Data" / ("data." + ref)).write_bytes(exporter.PNG + b"fixture")
+            records.extend((f"K4:name[S6:StringK2:_vV{len(name)}:{name}]"
+                            f"K10:payloadRef[S9:ReferenceK2:id[S6:StringK2:_vV{len(ref)}:{ref}]]").encode())
+        (self.result / "Data" / "data.0~metadata").write_bytes(records)
+        self.db.close()
+        (self.result / "database.sqlite3").unlink()
+        manifest = exporter.export(self.result, self.root / "screens", True)
+        self.assertEqual(len(manifest["screenshots"]), 4)
+
+    def test_clears_stale_capture_from_previous_run(self):
+        destination = self.root / "screens"
+        destination.mkdir()
+        (destination / (exporter.NAMES[0] + ".png")).write_bytes(exporter.PNG)
+        exporter.export(self.result, destination)
+        self.assertFalse(list(destination.glob("*.png")))
+
     def test_rejects_path_escape(self):
         self.db.execute("INSERT INTO Attachments VALUES (?, '../outside', 'public.png', 0)", (exporter.NAMES[0],))
         self.db.commit()

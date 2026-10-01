@@ -1,6 +1,6 @@
 # Verification record
 
-Verified on 2026-10-01 in Linux using rustc 1.99.0 (b940084d7 2026-09-28). The first GitHub macOS run also compiled the native app and executed the tests noted below; full UI-flow verification is still in progress.
+Verified on 2026-10-01 in Linux using rustc 1.99.0, and in GitHub Actions on macOS with Xcode 16.4 and an iOS 18.5 simulator.
 
 | Check | Result |
 | --- | --- |
@@ -9,11 +9,15 @@ Verified on 2026-10-01 in Linux using rustc 1.99.0 (b940084d7 2026-09-28). The f
 | Rust unit/planner and real HTTP tests | Passed: 18 tests, comprising 6 planner tests and 12 real TCP/SQLite integration tests |
 | Black-box server smoke via Python | Passed: real process + HTTP create/suggest/assign/pickup/drop-off and permission/transition checks |
 | API restart persistence probe | Passed: completed job and timestamps, driver shift and last location identical after process restart |
-| Shell syntax, Python syntax and CI YAML parse | Passed |
 | Startup safety gates | Passed: missing ARRIVAU_DEMO=1 and non-loopback binding both refused |
-| iOS configuration | Passed: project YAML + Debug/Release plist parsing and source review; this is not an Xcode build |
-| iOS Swift compile / simulator unit tests | Passed on GitHub macOS/Xcode 16.4: native app compiled and 11 unit tests passed |
-| XCUITest app-to-server workflow | Initial runs: cancel/invalid-host UI test passed; lifecycle was blocked by a SwiftUI toggle test tap hitting the label instead of its nested switch. Targeted activation fix and screenshot-enabled rerun in progress |
-| GitHub Actions | [Initial run](https://github.com/Maaarcocr/arrivau/actions/runs/36896819365): Linux passed; native UI assertion under repair |
+| Shell/Python syntax and CI YAML/plist parsing | Passed |
+| iOS app compile | Passed on macOS/Xcode 16.4 |
+| Native unit tests | Passed: 11 tests covering model/API/URL policy and next-stop guards |
+| Real app-to-server XCUITest | Passed: 2 tests, including full dispatcher → assignment → driver pickup/drop-off and canceled form/invalid-host flows |
+| Main-screen screenshots | Four real simulator PNGs captured and visually checked: dispatcher, delivery form, driver map/stops, shift/location |
+| Screenshot exporter | Five regression tests passed, plus exact-byte extraction verified against the four real captured PNGs |
+| Physical-device background location | Not run; locked-screen, Maps handoff, poor network, revoked permission and battery behavior still need device testing |
 
-The complete iOS delivery workflow remains unverified until its macOS job passes. Physical-device background location behavior is separate and remains unverified. See the repository’s [Actions](https://github.com/Maaarcocr/arrivau/actions) for current commit results.
+The [first complete native-flow run](https://github.com/Maaarcocr/arrivau/actions/runs/36899061027) passed all native tests and captured the screens, but its post-test exporter failed because successful result bundles had a compact attachment index. The exporter now handles both observed result formats and fails visibly if an expected screen is absent. The [latest Actions result](https://github.com/Maaarcocr/arrivau/actions/workflows/ci.yml) is authoritative for the current commit's aggregate status and downloadable screenshot artifact.
+
+The fixture location is deterministic only under the Debug UI-test flag. All delivery, assignment, location persistence and status requests use the real Rust HTTP server and a fresh SQLite database. Simulator test success does not prove background GPS behavior on a physical iPhone.

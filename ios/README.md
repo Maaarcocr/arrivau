@@ -31,7 +31,7 @@ Use an installed simulator name. The UI suite requires a running API on `localho
 - `ArrivauUITests`: real API dispatcher-to-driver lifecycle and persisted completion, plus cancelled creation and invalid remote-host rejection
 - `--uitesting` replaces only location sensor input in Debug; all API requests and writes remain real
 
-The Linux authoring environment has no Swift compiler, Xcode, simulator or Apple SDK. Native compilation, XCTest and XCUITest were **not run there**; the macOS CI/script is the execution path, not a claim that these tests passed. Real device background behavior remains unverified.
+The Linux authoring environment has no Apple SDK, so native execution runs in GitHub Actions on macOS. Xcode 16.4 compiled the app and passed all 11 unit tests and both UI tests; see `docs/verification.md` and the current Actions run for exact results. Real-device background behavior remains unverified.
 
 ## Location and lifecycle
 

@@ -51,7 +51,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.arrivau.app.uitests
-        GENERATE_INFOPLIST_FILE: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Config/Info-UITests.plist
         TEST_TARGET_NAME: Arrivau
 schemes:
   Arrivau:

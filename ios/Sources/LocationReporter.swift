@@ -74,23 +74,45 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         message = "Location sharing is off"
     }
 
-    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        if requested { configure(enabled: true, foreground: foreground, allowBackground: backgroundOptIn) }
-    }
-    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard requested, running, foreground || backgroundOptIn,
-              let location = locations.last, location.horizontalAccuracy >= 0,
-              abs(location.timestamp.timeIntervalSinceNow) < 60 else { return }
-        // Throttle fresh sensor samples; never refresh server freshness using a cached coordinate.
-        if let lastReportedSampleAt, location.timestamp.timeIntervalSince(lastReportedSampleAt) < 30 { return }
-        let coordinate = Coordinate(lat: location.coordinate.latitude, lng: location.coordinate.longitude)
-        if coordinate.isValid {
-            lastReportedSampleAt = location.timestamp
-            onCoordinate?(coordinate)
+    // CLLocationManagerDelegate requirements are nonisolated. Copy sendable values and
+    // explicitly return to MainActor; never pass the manager across actor boundaries.
+    nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        Task { @MainActor [weak self] in
+            guard let self, self.requested else { return }
+            self.configure(enabled: true, foreground: self.foreground, allowBackground: self.backgroundOptIn)
         }
     }
-    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        guard requested else { return }
-        message = "Location unavailable: \(error.localizedDescription)"
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        let sample = LocationSample(
+            coordinate: Coordinate(lat: location.coordinate.latitude, lng: location.coordinate.longitude),
+            timestamp: location.timestamp,
+            horizontalAccuracy: location.horizontalAccuracy
+        )
+        Task { @MainActor [weak self] in self?.receive(sample) }
     }
+    private func receive(_ sample: LocationSample) {
+        guard requested, running, foreground || backgroundOptIn,
+              sample.horizontalAccuracy >= 0,
+              abs(sample.timestamp.timeIntervalSinceNow) < 60 else { return }
+        // Throttle fresh sensor samples; never refresh server freshness using a cached coordinate.
+        if let lastReportedSampleAt, sample.timestamp.timeIntervalSince(lastReportedSampleAt) < 30 { return }
+        if sample.coordinate.isValid {
+            lastReportedSampleAt = sample.timestamp
+            onCoordinate?(sample.coordinate)
+        }
+    }
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        let detail = error.localizedDescription
+        Task { @MainActor [weak self] in
+            guard let self, self.requested else { return }
+            self.message = "Location unavailable: \(detail)"
+        }
+    }
+}
+
+private struct LocationSample: Sendable {
+    let coordinate: Coordinate
+    let timestamp: Date
+    let horizontalAccuracy: Double
 }

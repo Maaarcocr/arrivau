@@ -87,11 +87,13 @@ struct DirectionsButton: View {
 
 struct LocationAgeLabel: View {
     let timestamp: Int
+    var accessibilityID = "location_age"
     var body: some View {
         TimelineView(.periodic(from: .now, by: 15)) { context in
             let age = max(0, Int(context.date.timeIntervalSince1970) - timestamp)
             Text("Last location \(timestamp.epochDate.formatted(date: .omitted, time: .standard)) · \(age > 300 ? "stale (>5 min)" : "recent")")
                 .font(.caption).foregroundStyle(age > 300 ? Color.orange : Color.secondary)
+                .accessibilityIdentifier(accessibilityID)
         }
     }
 }

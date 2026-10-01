@@ -1,6 +1,6 @@
 # Verification record
 
-Verified on 2026-10-01 in Linux using rustc 1.99.0 (b940084d7 2026-09-28). Native stages below remain unexecuted.
+Verified on 2026-10-01 in Linux using rustc 1.99.0 (b940084d7 2026-09-28). The first GitHub macOS run also compiled the native app and executed the tests noted below; full UI-flow verification is still in progress.
 
 | Check | Result |
 | --- | --- |
@@ -12,8 +12,8 @@ Verified on 2026-10-01 in Linux using rustc 1.99.0 (b940084d7 2026-09-28). Nativ
 | Shell syntax, Python syntax and CI YAML parse | Passed |
 | Startup safety gates | Passed: missing ARRIVAU_DEMO=1 and non-loopback binding both refused |
 | iOS configuration | Passed: project YAML + Debug/Release plist parsing and source review; this is not an Xcode build |
-| iOS Swift compile / simulator unit tests | Not run: this execution environment is Linux with no Xcode SDK or simulator |
-| XCUITest app-to-server workflow | Written for macOS; not run here |
-| GitHub Actions | Configured; no remote repository run has been observed |
+| iOS Swift compile / simulator unit tests | Passed on GitHub macOS/Xcode 16.4: native app compiled and 11 unit tests passed |
+| XCUITest app-to-server workflow | Initial run: cancel/invalid-host UI test passed; lifecycle test failed on a location-label accessibility query. Fix and full rerun in progress |
+| GitHub Actions | [Initial run](https://github.com/Maaarcocr/arrivau/actions/runs/36896819365): Linux passed; native UI assertion under repair |
 
-The iOS project should be treated as unverified until the macOS job completes successfully. Source review and YAML/plist validation cannot substitute for Xcode compilation or a simulator run.
+The complete iOS delivery workflow remains unverified until its macOS job passes. Physical-device background location behavior is separate and remains unverified. See the repository’s [Actions](https://github.com/Maaarcocr/arrivau/actions) for current commit results.

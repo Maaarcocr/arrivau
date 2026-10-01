@@ -34,7 +34,7 @@ struct DriverView: View {
                     Text(error).font(.caption).foregroundStyle(.red).accessibilityIdentifier("location_error")
                 }
                 if let updated = store.currentDriver?.locationUpdatedAt {
-                    LocationAgeLabel(timestamp: updated).accessibilityIdentifier("location_sent")
+                    LocationAgeLabel(timestamp: updated, accessibilityID: "location_sent")
                 }
                 Text("Sharing starts only after opt-in on an active shift. The separate screen-lock switch enables background continuation and the iOS location indicator. Switching roles, disabling sharing or ending a shift stops updates. The shift and its last position remain on the server. Background delivery needs real-device validation; force-quit recovery is not provided.")
                     .font(.caption).foregroundStyle(.secondary)

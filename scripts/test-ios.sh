@@ -31,6 +31,10 @@ cleanup() {
     wait "$API_PID" 2>/dev/null || true
   fi
   if [[ $status -ne 0 ]]; then
+    if [[ -n "${RESULT:-}" && -d "$RESULT" ]]; then
+      xcrun xcresulttool export attachments --path "$RESULT" \
+        --output-path "$ROOT/ios/build/failure-attachments" --only-failures || true
+    fi
     echo "API log (temporary test state retained at $TEMP_DIR):" >&2
     cat "$TEMP_DIR/api.log" >&2 || true
   else
@@ -56,15 +60,27 @@ for _ in {1..100}; do
 done
 [[ "$READY" == "1" ]] || { echo "API did not become healthy" >&2; exit 1; }
 if [[ -z "${SIMULATOR_UDID:-}" ]]; then
+  SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+  export SDK_VERSION
   SIMULATOR_UDID="$(xcrun simctl list devices available -j | python3 -c '
-import json, sys
+import json, os, re, sys
+def version(value):
+    return tuple(int(part) for part in re.findall(r"\d+", value))
+sdk = version(os.environ["SDK_VERSION"])
 catalog = json.load(sys.stdin)["devices"]
-choices = [(runtime, device) for runtime, devices in catalog.items() if "iOS" in runtime
+choices = [(runtime, device) for runtime, devices in catalog.items()
+           if "iOS" in runtime and version(runtime.split("iOS-")[-1]) <= sdk
            for device in devices if device.get("isAvailable") and "iPhone" in device["name"]]
 if not choices:
     raise SystemExit("No available iPhone simulator; install an iOS runtime in Xcode Settings")
 # A booted device avoids unnecessary cold boots; otherwise choose a recent runtime.
-choices.sort(key=lambda pair: (pair[1].get("state") == "Booted", pair[0], pair[1]["name"]), reverse=True)
+choices.sort(key=lambda pair: (
+    version(pair[0].split("iOS-")[-1]),
+    pair[1].get("state") == "Booted",
+    "SE" not in pair[1]["name"],
+    version(pair[1]["name"]),
+    "Pro" in pair[1]["name"]
+), reverse=True)
 print(choices[0][1]["udid"])
 ')"
 fi

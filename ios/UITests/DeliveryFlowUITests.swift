@@ -4,12 +4,15 @@ import XCTest
 /// Only the sensor input is deterministic; login, creation, assignment and status use HTTP.
 final class DeliveryFlowUITests: XCTestCase {
     private var app: XCUIApplication!
+    private var apiURL: URL!
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments = ["--uitesting"]
         let configured = ProcessInfo.processInfo.environment["ARRIVAU_API_URL"] ?? ""
-        app.launchEnvironment["ARRIVAU_API_URL"] = configured.hasPrefix("http") ? configured : "http://localhost:8080"
+        let baseURL = configured.hasPrefix("http") ? configured : "http://localhost:8080"
+        app.launchEnvironment["ARRIVAU_API_URL"] = baseURL
+        apiURL = try XCTUnwrap(URL(string: baseURL))
         app.launch()
     }
     override func tearDownWithError() throws {
@@ -18,19 +21,32 @@ final class DeliveryFlowUITests: XCTestCase {
             screenshot.name = "Delivery flow failure"
             screenshot.lifetime = .keepAlways
             add(screenshot)
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "Accessibility hierarchy at failure"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
         }
         app.terminate()
     }
 
-    func testDispatcherToDriverLifecycle() {
+    @MainActor
+    func testDispatcherToDriverLifecycle() async throws {
         login("driver1")
         let shift = app.buttons["toggle_shift"]
         XCTAssertTrue(shift.waitForExistence(timeout: 15))
         XCTAssertEqual(shift.label, "Start shift", "Run against a fresh demo database")
         tap(shift)
         waitForLabel(app.staticTexts["shift_status"], "On shift")
+        let beforeOptIn = try await readDriverFromServer()
+        XCTAssertTrue(beforeOptIn.active)
+        XCTAssertNil(beforeOptIn.location, "Starting a shift must not transmit a location without opt-in")
+        let optInAt = Int(Date().timeIntervalSince1970)
         tap(app.switches["share_location"])
-        XCTAssertTrue(app.staticTexts["location_sent"].waitForExistence(timeout: 15))
+        XCTAssertEqual(app.switches["share_location"].value as? String, "1")
+        try await waitForServerLocation(since: optInAt)
+        let sentLabel = app.staticTexts["location_sent"]
+        reveal(sentLabel)
+        XCTAssertTrue(sentLabel.waitForExistence(timeout: 15))
         switchRole()
 
         login("dispatcher")
@@ -90,6 +106,37 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(app.alerts.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "loopback")).firstMatch.exists)
         app.alerts.buttons["OK"].tap()
         XCTAssertTrue(app.buttons["login_dispatcher"].exists)
+    }
+
+    private struct ServerDriver: Decodable {
+        struct Location: Decodable { let lat: Double; let lng: Double }
+        let active: Bool
+        let location: Location?
+        let locationUpdatedAt: Int?
+    }
+    private func readDriverFromServer() async throws -> ServerDriver {
+        var request = URLRequest(url: apiURL.appendingPathComponent("v1/shift"))
+        request.timeoutInterval = 5
+        request.setValue("Bearer demo-driver-1", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200,
+                       "Shift read failed: \(String(decoding: data, as: UTF8.self))")
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ServerDriver.self, from: data)
+    }
+    private func waitForServerLocation(since timestamp: Int) async throws {
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline {
+            let driver = try await readDriverFromServer()
+            if let location = driver.location, let updated = driver.locationUpdatedAt, updated >= timestamp {
+                XCTAssertEqual(location.lat, 36.7163, accuracy: 0.000001)
+                XCTAssertEqual(location.lng, 15.0908, accuracy: 0.000001)
+                return
+            }
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        XCTFail("The app did not persist a fresh deterministic Pachino location to the real API after opt-in")
     }
 
     private func login(_ role: String) {

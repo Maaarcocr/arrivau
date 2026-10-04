@@ -102,16 +102,29 @@ quiet xcodebuild archive \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" ARRIVAU_API_URL="$ARRIVAU_API_URL"
 
 verify_app() {
-  local app="$1" label="$2"
+  local app="$1" label="$2" actual_profile_uuid
+  # Only these hand-written substeps reach the job log; Apple tool output stays private.
+  STAGE="verifying $label: Release bundle contents"
   quiet python3 "$ROOT/scripts/verify-ios-bundle.py" "$app"
+  STAGE="verifying $label: strict code signature"
   quiet codesign --verify --deep --strict "$app"
-  codesign --display --entitlements :- "$app" > "$WORK/$label-entitlements.plist" 2>> "$LOG"
+  STAGE="verifying $label: extracting XML entitlements"
+  # Current codesign defaults to a human-readable DER representation; request a plist explicitly.
+  codesign --display --entitlements - --xml "$app" > "$WORK/$label-entitlements.plist" 2>> "$LOG"
+  STAGE="verifying $label: reading signature metadata"
   codesign --display --verbose=4 "$app" > "$WORK/$label-signature.txt" 2>&1
-  quiet codesign --display --extract-certificates "$WORK/$label-cert" "$app"
+  STAGE="verifying $label: extracting the signing certificate"
+  # This optional argument must share its token with the flag. A separate prefix is a code path.
+  quiet codesign --display "--extract-certificates=$WORK/$label-cert" "$app"
+  STAGE="verifying $label: decoding the embedded provisioning profile"
   security cms -D -i "$app/embedded.mobileprovision" > "$WORK/$label-profile.plist" 2>> "$LOG"
-  [[ "$(python3 "$HELPER" profile "$WORK/$label-profile.plist")" == "$PROFILE_UUID" ]] || fail 'Actual embedded profile differs.'
+  STAGE="verifying $label: validating the embedded provisioning profile"
+  actual_profile_uuid="$(python3 "$HELPER" profile "$WORK/$label-profile.plist")"
+  [[ "$actual_profile_uuid" == "$PROFILE_UUID" ]] || fail 'Actual embedded profile differs.'
+  STAGE="verifying $label: matching signed metadata, entitlements and certificate"
   python3 "$HELPER" verify-app "$app" "$WORK/$label-profile.plist" "$WORK/$label-entitlements.plist" \
     "$WORK/$label-signature.txt" "$BUILD_NUMBER" "$IDENTITY" "$WORK/${label}-cert0"
+  printf 'Signed %s bundle verification passed.\n' "$label"
 }
 STAGE='verifying the signed archive bundle'
 verify_app "$ARCHIVE/Products/Applications/Arrivau.app" archive

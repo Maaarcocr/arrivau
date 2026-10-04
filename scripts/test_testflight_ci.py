@@ -79,7 +79,19 @@ marker = "PRIVATE-TOOL-DIAGNOSTIC-MUST-NOT-REACH-OUTPUT"
 stage = name + (":" + args[0] if args else "")
 if name == "xcrun" and "--upload-app" in args:
     stage = "xcrun:upload"
-if os.environ.get("FAKE_FAIL_AT") == stage:
+operation = stage
+if name == "codesign" and "--display" in args:
+    if "--entitlements" in args:
+        operation = "codesign:entitlements"
+    elif "--verbose=4" in args:
+        operation = "codesign:metadata"
+    elif any(arg.startswith("--extract-certificates") for arg in args):
+        operation = "codesign:certificates"
+elif name == "security" and args[0] == "cms" and args[-1].endswith("embedded.mobileprovision"):
+    operation = "security:embedded-profile"
+product = "export" if any("/unpacked/" in arg for arg in args) else "archive"
+if (os.environ.get("FAKE_FAIL_AT") in (stage, operation)
+        and os.environ.get("FAKE_FAIL_PRODUCT", product) == product):
     print(marker, file=sys.stderr)
     sys.exit(42)
 
@@ -98,7 +110,8 @@ def make_app(app):
         "CFBundleSupportedPlatforms": ["iPhoneOS"],
     }
     (app / "Info.plist").write_bytes(plistlib.dumps(info))
-    (app / "Arrivau").write_bytes(b"synthetic release executable")
+    binary = b"demo-dispatcher" if os.environ.get("FAKE_INVALID_BUNDLE") else b"synthetic release executable"
+    (app / "Arrivau").write_bytes(binary)
     (app / "Assets.car").write_bytes(b"synthetic compiled assets")
     (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps({"NSPrivacyTracking": False}))
     (app / "embedded.mobileprovision").write_bytes(profile_bytes)
@@ -111,6 +124,10 @@ elif name == "git":
 elif name == "openssl":
     if args == ["rand", "-hex", "32"]:
         print("1" * 64)
+    elif args[0] == "x509":
+        assert args[1:3] == ["-inform", "DER"] and args[-1] == "-noout"
+        assert pathlib.Path(value("-in")).read_bytes() == certificate
+        print(marker)
     else:
         assert args[0] == "pkey" and "-check" in args and "-noout" in args
         assert pathlib.Path(value("-in")).read_bytes() == b"FAKE-API-PRIVATE-KEY-NOT-A-KEY"
@@ -143,6 +160,8 @@ elif name == "xcodegen":
 elif name == "xcodebuild":
     if args == ["-version"]:
         print("Xcode 26.6\nBuild version SYNTHETIC")
+    elif args == ["-help"]:
+        print("-archivePath -exportArchive -exportOptionsPlist app-store-connect signingStyle provisioningProfiles manageAppVersionAndBuildNumber")
     elif args[0] == "archive":
         make_app(pathlib.Path(value("-archivePath")) / "Products/Applications/Arrivau.app")
         print(marker)
@@ -161,11 +180,24 @@ elif name == "xcodebuild":
         print(marker)
 elif name == "codesign":
     if "--entitlements" in args:
-        sys.stdout.buffer.write(plistlib.dumps(profile["Entitlements"]))
+        # Modern codesign only guarantees a machine-readable plist with --xml.
+        if "--xml" in args and value("--entitlements") == "-":
+            sys.stdout.buffer.write(plistlib.dumps(profile["Entitlements"]))
+        else:
+            print("[Dict] Human-readable DER entitlements, not a plist")
     elif "--verbose=4" in args:
         print("TeamIdentifier=" + os.environ["ARRIVAU_TEAM_ID"])
-    elif "--extract-certificates" in args:
-        pathlib.Path(value("--extract-certificates") + "0").write_bytes(certificate)
+    elif any(arg.startswith("--extract-certificates") for arg in args):
+        # getopt_long optional arguments do not consume the next token. A separate
+        # prefix becomes the first (nonexistent) code path, which fails verification.
+        if "--extract-certificates" in args:
+            print(marker, file=sys.stderr)
+            sys.exit(1)
+        prefix = next(arg.split("=", 1)[1] for arg in args if arg.startswith("--extract-certificates="))
+        assert args == ["--display", "--extract-certificates=" + prefix, args[-1]]
+        assert pathlib.Path(args[-1]).exists()
+        leaf = b"WRONG-FAKE-CERTIFICATE" if os.environ.get("FAKE_WRONG_CERT_PRODUCT") == product else certificate
+        pathlib.Path(prefix + "0").write_bytes(leaf)
         print(marker)
     else:
         assert args[:3] == ["--verify", "--deep", "--strict"]
@@ -178,6 +210,10 @@ elif name == "ditto":
 elif name == "xcrun":
     if args == ["--sdk", "iphoneos", "--show-sdk-version"]:
         print("26.6")
+    elif args == ["--find", "xcodebuild"]:
+        binary = root / "apple-xcodebuild"
+        binary.write_bytes(b"synthetic Apple-signed executable")
+        print(binary)
     elif args == ["altool", "--help"]:
         style = os.environ.get("FAKE_ALTOOL_STYLE", "legacy")
         print({"legacy": "--upload-app --apiKey --apiIssuer",
@@ -204,7 +240,7 @@ class OfflineRunner:
         scripts = self.repo / "scripts"
         scripts.mkdir(parents=True)
         (self.repo / "ios").mkdir()
-        for name in ("testflight-ci.sh", "testflight-signing.py", "validate-pilot-config.py", "verify-ios-bundle.py"):
+        for name in ("testflight-ci.sh", "testflight-signing.py", "validate-pilot-config.py", "verify-ios-bundle.py", "check-testflight-tools.sh"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         self.home = self.root / "home"
         self.temp = self.root / "runner-temp"
@@ -226,7 +262,7 @@ class OfflineRunner:
             target = self.bin / name
             target.write_text(f"#!{sys.executable}\n" + FAKE_TOOL)
             target.chmod(0o755)
-        for name in ("bash", "dirname", "head", "mkdir", "mktemp", "grep"):
+        for name in ("bash", "dirname", "head", "mkdir", "mktemp", "grep", "rm"):
             target = shutil.which(name)
             if not target:
                 raise RuntimeError(f"Required test utility unavailable: {name}")
@@ -255,6 +291,12 @@ class OfflineRunner:
     def calls(self):
         path = self.root / "calls.jsonl"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def check_tools(self):
+        env = {key: value for key, value in self.env.items() if not key.startswith(("APPLE_", "ASC_"))}
+        env["TMPDIR"] = str(self.temp)
+        return subprocess.run([BASH, str(self.repo / "scripts/check-testflight-tools.sh")],
+                              env=env, cwd=self.repo, capture_output=True, text=True, timeout=30)
 
 
 class WorkflowSafetyTests(unittest.TestCase):
@@ -498,6 +540,12 @@ class SigningOrchestrationTests(unittest.TestCase):
         calls = runner.calls()
         self.assertFalse(any(call[:2] == ["xcrun", "altool"] for call in calls))
         self.assertEqual(sum(call[:2] == ["codesign", "--verify"] for call in calls), 2)
+        extractions = [call for call in calls if any(arg.startswith("--extract-certificates") for arg in call)]
+        self.assertEqual(len(extractions), 2)
+        self.assertTrue(all(call[2].startswith("--extract-certificates=") for call in extractions))
+        entitlements = [call for call in calls if "--entitlements" in call]
+        self.assertEqual(len(entitlements), 2)
+        self.assertTrue(all(call[2:5] == ["--entitlements", "-", "--xml"] for call in entitlements))
         self.assertEqual(sum(call[:2] == ["xcodebuild", "archive"] for call in calls), 1)
         self.assertEqual(sum(call[:2] == ["xcodebuild", "-exportArchive"] for call in calls), 1)
         self.assertFalse(any("-allowProvisioningUpdates" in call for call in calls))
@@ -510,6 +558,86 @@ class SigningOrchestrationTests(unittest.TestCase):
         again = runner.run("cleanup")
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assert_clean(runner)
+
+    def test_old_codesign_argument_forms_fail_closed(self):
+        cases = [
+            ('"--extract-certificates=$WORK/$label-cert"', '--extract-certificates "$WORK/$label-cert"',
+             "extracting the signing certificate"),
+            ("--entitlements - --xml", "--entitlements :-", "matching signed metadata, entitlements and certificate"),
+        ]
+        for old, replacement, substep in cases:
+            with self.subTest(substep=substep):
+                runner = self.make_runner()
+                script = runner.repo / "scripts/testflight-ci.sh"
+                text = script.read_text()
+                self.assertIn(old, text)
+                script.write_text(text.replace(old, replacement))
+                runner.add_upload_secrets()
+                result = runner.run("upload", "17")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("verifying archive: " + substep, result.stderr)
+                self.assertFalse(any(call[:2] == ["xcodebuild", "-exportArchive"] for call in runner.calls()))
+                self.assertFalse(any(call[:3] == ["xcrun", "altool", "--upload-app"] for call in runner.calls()))
+                self.assert_private_output(runner, result)
+                self.assert_clean(runner)
+
+    def test_verification_substeps_fail_privately_for_both_products(self):
+        failures = [
+            ("codesign:--verify", "strict code signature"),
+            ("codesign:entitlements", "extracting XML entitlements"),
+            ("codesign:metadata", "reading signature metadata"),
+            ("codesign:certificates", "extracting the signing certificate"),
+            ("security:embedded-profile", "decoding the embedded provisioning profile"),
+        ]
+        for product in ("archive", "export"):
+            for operation, substep in failures:
+                with self.subTest(product=product, operation=operation):
+                    runner = self.make_runner()
+                    runner.add_upload_secrets()
+                    runner.env.update(FAKE_FAIL_AT=operation, FAKE_FAIL_PRODUCT=product)
+                    result = runner.run("upload", "17")
+                    self.assertEqual(result.returncode, 42)
+                    self.assertIn(f"verifying {product}: {substep} (exit 42)", result.stderr)
+                    self.assertFalse(any(call[:3] == ["xcrun", "altool", "--upload-app"] for call in runner.calls()))
+                    self.assert_private_output(runner, result)
+                    self.assert_clean(runner)
+
+    def test_bundle_and_signer_checks_still_block_upload(self):
+        for environment, substep in [
+            ({"FAKE_INVALID_BUNDLE": "1"}, "verifying archive: Release bundle contents"),
+            ({"FAKE_WRONG_CERT_PRODUCT": "archive"}, "verifying archive: matching signed metadata"),
+            ({"FAKE_WRONG_CERT_PRODUCT": "export"}, "verifying export: matching signed metadata"),
+        ]:
+            with self.subTest(environment=environment):
+                runner = self.make_runner()
+                runner.add_upload_secrets()
+                runner.env.update(environment)
+                result = runner.run("upload", "17")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(substep, result.stderr)
+                self.assertFalse(any(call[:3] == ["xcrun", "altool", "--upload-app"] for call in runner.calls()))
+                self.assert_private_output(runner, result)
+                self.assert_clean(runner)
+
+    def test_credential_free_tool_smoke_checks_certificate_and_cleans_up(self):
+        runner = self.make_runner()
+        result = runner.check_tools()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("required prefix syntax", result.stdout)
+        self.assertTrue(any(call[:2] == ["openssl", "x509"] for call in runner.calls()))
+        self.assertFalse(any(call[0] == "security" or "--sign" in call or "--upload-app" in call for call in runner.calls()))
+        self.assert_private_output(runner, result)
+        self.assert_clean(runner)
+
+    def test_tool_smoke_failures_do_not_print_tool_output(self):
+        for stage in ("codesign:certificates", "openssl:x509"):
+            with self.subTest(stage=stage):
+                runner = self.make_runner()
+                runner.env["FAKE_FAIL_AT"] = stage
+                result = runner.check_tools()
+                self.assertEqual(result.returncode, 1)
+                self.assert_private_output(runner, result)
+                self.assert_clean(runner)
 
     def test_explicit_upload_uses_only_mocked_uploader_then_cleans_up(self):
         for style, flags in [("legacy", ("--apiKey", "--apiIssuer", "-t")),

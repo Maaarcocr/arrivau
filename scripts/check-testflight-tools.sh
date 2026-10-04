@@ -18,4 +18,19 @@ else
   echo 'Apple upload CLI lacks the expected API-key authentication flags.' >&2
   exit 1
 fi
+# Exercise codesign's optional-argument syntax on an existing Apple-signed binary,
+# without creating a signature or loading owner-supplied signing assets.
+APPLE_TOOL="$(xcrun --find xcodebuild 2>"$TMP/codesign.txt")" || {
+  echo 'Could not locate the installed Apple-signed Xcode tool.' >&2; exit 1;
+}
+if ! codesign --display "--extract-certificates=$TMP/cert-" "$APPLE_TOOL" >>"$TMP/codesign.txt" 2>&1; then
+  echo 'Installed codesign could not extract the Apple tool certificate with an explicit prefix.' >&2
+  exit 1
+fi
+[[ -s "$TMP/cert-0" ]] || { echo 'Installed codesign did not create the expected leaf certificate.' >&2; exit 1; }
+if ! openssl x509 -inform DER -in "$TMP/cert-0" -noout >>"$TMP/codesign.txt" 2>&1; then
+  echo 'Installed codesign leaf certificate is not valid DER.' >&2
+  exit 1
+fi
+echo 'Installed codesign extracted the Apple tool leaf certificate with the required prefix syntax.'
 printf 'Pinned Xcode exposes the expected manual-export and API-key upload CLI options; no signing or upload performed.\n'

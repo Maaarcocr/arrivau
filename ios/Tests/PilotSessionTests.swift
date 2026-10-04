@@ -1,0 +1,613 @@
+import XCTest
+import Combine
+@testable import Arrivau
+
+/// Pilot authentication and durable recovery without real credentials, Keychain, or network access.
+/// Run with the Debug ArrivauTests scheme on an iOS simulator; these are not physical-device tests.
+@MainActor
+final class PilotSessionTests: XCTestCase {
+    private let endpoint = "https://pilot.arrivau.example"
+    private var session: URLSession!
+    private var backend: PilotSessionBackend!
+    private var storage: MemorySessionStorage!
+    private var store: DeliveryStore!
+    private var stores: [DeliveryStore] = []
+
+    override func setUp() async throws {
+        try await super.setUp()
+        backend = PilotSessionBackend()
+        PilotSessionURLProtocol.backend = backend
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PilotSessionURLProtocol.self]
+        session = URLSession(configuration: configuration)
+        storage = MemorySessionStorage()
+        store = makeStore()
+    }
+
+    override func tearDown() async throws {
+        stores.forEach { $0.logout() }
+        // URLSession throws an Objective-C exception if a queued logout task tries to
+        // create its request after invalidation. Join every store's revocations first.
+        for value in stores { await value.awaitPendingRevocations() }
+        stores.removeAll()
+        store = nil
+        session.invalidateAndCancel()
+        PilotSessionURLProtocol.backend = nil
+        backend = nil
+        storage = nil
+        try await super.tearDown()
+    }
+
+    private func makeStore(storage supplied: SessionStorage? = nil) -> DeliveryStore {
+        let result = DeliveryStore(session: session, deterministicLocation: true, mode: .pilot,
+                                   storage: supplied ?? storage)
+        result.apiURL = endpoint
+        stores.append(result)
+        return result
+    }
+
+    private func seedSavedSession(expiresAt: Int? = nil, token: String = "saved-pilot-token") {
+        storage.savedSession = SavedSession(endpoint: endpoint, token: token,
+                                            expiresAt: expiresAt ?? Int(Date().timeIntervalSince1970) + 3600)
+    }
+
+    private func assertSignedOut(_ value: DeliveryStore, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertNil(value.principal, file: file, line: line)
+        XCTAssertNil(value.role, file: file, line: line)
+        XCTAssertNil(value.currentDriver, file: file, line: line)
+        XCTAssertNil(value.route, file: file, line: line)
+        XCTAssertTrue(value.deliveries.isEmpty, file: file, line: line)
+        XCTAssertTrue(value.drivers.isEmpty, file: file, line: line)
+        XCTAssertFalse(value.locationSharing, file: file, line: line)
+        XCTAssertFalse(value.backgroundLocationSharing, file: file, line: line)
+        XCTAssertFalse(value.isMutating, file: file, line: line)
+        XCTAssertFalse(value.isRestoringSession, file: file, line: line)
+        XCTAssertNil(storage.savedSession, file: file, line: line)
+    }
+
+    func testLoginUsesServerRoleAndPostsOnlyUsernameAndPassword() async throws {
+        backend.withState { $0.user = Principal(id: "courier-42", name: "Corriere pilota", role: "driver") }
+        await store.login(username: "  dispatcher-looking-name  ", password: "test-only-password")
+        XCTAssertEqual(store.role, .driver, "A username must not select or elevate the server-defined role")
+        XCTAssertEqual(store.principal?.id, "courier-42")
+        XCTAssertFalse(store.isDemo)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        let login = try XCTUnwrap(backend.withState { $0.requests.first { $0.method == "POST" && $0.path == "/v1/session" } })
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: login.body) as? [String: String])
+        XCTAssertEqual(body, ["username": "dispatcher-looking-name", "password": "test-only-password"])
+        XCTAssertNil(login.authorization)
+        XCTAssertEqual(login.origin, endpoint)
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.path == "/v1/me" } })
+        let saved = try XCTUnwrap(storage.savedSession)
+        XCTAssertEqual(saved.endpoint, endpoint)
+        XCTAssertEqual(saved.token, "pilot-token-1")
+        let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(saved)) as? [String: Any])
+        XCTAssertEqual(Set(persisted.keys), Set(["endpoint", "token", "expiresAt"]))
+        XCTAssertFalse(String(data: try JSONEncoder().encode(saved), encoding: .utf8)!.contains("test-only-password"))
+    }
+
+    func testDispatcherAuthorityAlsoComesFromServer() async {
+        await store.login(username: "courier-looking-name", password: "test-only-password")
+        XCTAssertEqual(store.role, .dispatcher)
+        XCTAssertEqual(store.principal?.id, "dispatcher-a")
+        XCTAssertNil(store.currentDriver)
+    }
+
+    func testFailedLoginPersistsNeitherTokenNorPassword() async {
+        backend.withState { $0.loginStatus = 401 }
+        await store.login(username: "dispatcher-a", password: "incorrect-test-secret")
+        assertSignedOut(store)
+        XCTAssertTrue(storage.creations.isEmpty)
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertFalse(store.errorMessage?.contains("incorrect-test-secret") ?? true)
+        XCTAssertEqual(backend.withState { $0.requests.count }, 1, "Failed login must not fetch protected data")
+    }
+
+    func testInvalidLoginRoleEmptyTokenAndExpiredTokenAreNeverInstalled() async {
+        for invalidCase in 0..<3 {
+            let candidate = makeStore()
+            backend.withState {
+                $0.user = Principal(id: "dispatcher-a", name: "Centrale", role: invalidCase == 0 ? "admin" : "dispatcher")
+                $0.emptyLoginToken = invalidCase == 1
+                $0.expiresAt = Int(Date().timeIntervalSince1970) + (invalidCase == 2 ? -1 : 3600)
+            }
+            await candidate.login(username: "dispatcher-a", password: "test-only-password")
+            assertSignedOut(candidate)
+            XCTAssertNotNil(candidate.errorMessage)
+        }
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.path == "/v1/deliveries" } })
+    }
+
+    func testFailedLocalInstallationClearsSavedTokenAndRevokesServerSession() async {
+        let failing = FaultingPilotStorage(base: storage)
+        failing.failCreationLoad = true
+        let candidate = makeStore(storage: failing)
+        await candidate.login(username: "dispatcher-a", password: "test-only-password")
+        assertSignedOut(candidate)
+        XCTAssertNotNil(candidate.errorMessage)
+        XCTAssertEqual(backend.withState { $0.revokedTokens }, ["Bearer pilot-token-1"])
+    }
+
+    func testRestoreValidatesSavedTokenAndUsesServerIdentityWithoutLocationOptIn() async throws {
+        seedSavedSession()
+        backend.withState {
+            $0.user = Principal(id: "courier-42", name: "Corriere pilota", role: "driver")
+            $0.active = true
+        }
+        await store.restoreSession()
+        XCTAssertEqual(store.principal?.id, "courier-42")
+        XCTAssertEqual(store.role, .driver)
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertFalse(store.canRetryRestore)
+        let identity = try XCTUnwrap(backend.withState { $0.requests.first })
+        XCTAssertEqual(identity.method, "GET")
+        XCTAssertEqual(identity.path, "/v1/session")
+        XCTAssertEqual(identity.authorization, "Bearer saved-pilot-token")
+        XCTAssertEqual(storage.savedSession?.token, "saved-pilot-token")
+        XCTAssertEqual(storage.savedSession?.expiresAt, backend.withState { $0.expiresAt })
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.method == "POST" && $0.path == "/v1/session" } })
+        await store.restoreSession()
+        XCTAssertEqual(backend.withState { $0.requests.filter { $0.method == "GET" && $0.path == "/v1/session" }.count }, 1)
+    }
+
+    func testExpiredOrEmptySavedTokenIsClearedWithoutNetworkAccess() async {
+        for expired in [true, false] {
+            let candidate = makeStore()
+            seedSavedSession(expiresAt: Int(Date().timeIntervalSince1970) + (expired ? -1 : 3600),
+                             token: expired ? "expired-test-token" : "")
+            await candidate.restoreSession()
+            assertSignedOut(candidate)
+            XCTAssertFalse(candidate.canRetryRestore)
+        }
+        XCTAssertTrue(backend.withState { $0.requests.isEmpty })
+    }
+
+    func testRevokedSavedSessionIsClearedAndCannotRetryRestore() async {
+        seedSavedSession()
+        backend.withState { $0.identityStatus = 401 }
+        await store.restoreSession()
+        assertSignedOut(store)
+        XCTAssertFalse(store.canRetryRestore)
+        XCTAssertNotNil(store.errorMessage)
+        XCTAssertEqual(backend.withState { $0.requests.count }, 1)
+    }
+
+    func testInvalidRestoredRoleMissingExpiryAndExpiredIdentityAreCleared() async {
+        for invalidCase in 0..<3 {
+            let candidate = makeStore()
+            seedSavedSession()
+            backend.withState {
+                $0.user = Principal(id: "dispatcher-a", name: "Centrale", role: invalidCase == 0 ? "admin" : "dispatcher")
+                $0.omitIdentityExpiry = invalidCase == 1
+                $0.expiresAt = Int(Date().timeIntervalSince1970) + (invalidCase == 2 ? -1 : 3600)
+            }
+            await candidate.restoreSession()
+            assertSignedOut(candidate)
+            XCTAssertFalse(candidate.canRetryRestore)
+        }
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.path == "/v1/deliveries" } })
+    }
+
+    func testTemporaryRestoreFailureKeepsTokenWithoutGrantingAuthorityAndCanRetry() async {
+        seedSavedSession()
+        backend.withState { $0.identityStatus = 503 }
+        await store.restoreSession()
+        XCTAssertNil(store.principal)
+        XCTAssertNil(store.role)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertTrue(store.canRetryRestore)
+        XCTAssertEqual(storage.savedSession?.token, "saved-pilot-token")
+        backend.withState { $0.identityStatus = 200 }
+        await store.restoreSession(retry: true)
+        XCTAssertEqual(store.role, .dispatcher)
+        XCTAssertFalse(store.canRetryRestore)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testRevokedRunningSessionStopsLocationAndClearsProtectedState() async {
+        backend.withState {
+            $0.user = Principal(id: "courier-42", name: "Corriere pilota", role: "driver")
+            $0.active = true
+        }
+        await store.login(username: "courier-42", password: "test-only-password")
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        XCTAssertTrue(store.locationSharing)
+        XCTAssertTrue(store.backgroundLocationSharing)
+        backend.withState { $0.rejectProtectedReads = true }
+        await store.refresh(force: true)
+        assertSignedOut(store)
+        XCTAssertNil(store.lastSyncedAt)
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+        XCTAssertNotNil(store.errorMessage)
+    }
+
+    func testExpiryTimerInvalidatesSessionWithoutAnotherUserAction() async {
+        backend.withState {
+            $0.user = Principal(id: "courier-42", name: "Corriere pilota", role: "driver")
+            $0.active = true
+            $0.expiresAt = Int(Date().timeIntervalSince1970) + 3
+        }
+        await store.login(username: "courier-42", password: "test-only-password")
+        XCTAssertNotNil(store.principal)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        let invalidated = expectation(description: "Scheduled expiry clears the principal")
+        let observation = store.$principal.dropFirst().filter { $0 == nil }.sink { _ in invalidated.fulfill() }
+        await fulfillment(of: [invalidated], timeout: 6)
+        observation.cancel()
+        assertSignedOut(store)
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+    }
+
+    func testLogoutStopsLocationImmediatelyAndRevokesTheSameBearer() async {
+        backend.withState {
+            $0.user = Principal(id: "courier-42", name: "Corriere pilota", role: "driver")
+            $0.active = true
+        }
+        await store.login(username: "courier-42", password: "test-only-password")
+        let locationSent = expectation(description: "Opted-in location reaches test server")
+        let revoked = expectation(description: "Logout revokes server session")
+        backend.withState { $0.onLocation = { locationSent.fulfill() }; $0.onRevoke = { revoked.fulfill() } }
+        store.setForeground(true)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        await fulfillment(of: [locationSent], timeout: 5)
+        store.logout()
+        assertSignedOut(store)
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+        let writes = backend.withState { $0.locationWrites }
+        store.location.onCoordinate?(.pachino)
+        await fulfillment(of: [revoked], timeout: 5)
+        XCTAssertEqual(backend.withState { $0.locationWrites }, writes, "Late sensor callbacks must not send after logout")
+        XCTAssertEqual(backend.withState { $0.revokedTokens }, ["Bearer pilot-token-1"])
+    }
+
+    func testBackgroundLocationConflictStopsBothOptInsWithoutSigningOut() async {
+        backend.withState {
+            $0.user = Principal(id: "courier-42", name: "Corriere pilota", role: "driver")
+            $0.active = true
+            $0.locationStatus = 409
+        }
+        await store.login(username: "courier-42", password: "test-only-password")
+        store.setForeground(true)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        store.setForeground(false)
+        XCTAssertTrue(store.locationSharing)
+        XCTAssertTrue(store.backgroundLocationSharing)
+        let stopped = expectation(description: "Background location conflict disables sharing")
+        let observation = store.$locationSharing.dropFirst().filter { !$0 }.sink { _ in stopped.fulfill() }
+        await fulfillment(of: [stopped], timeout: 5)
+        observation.cancel()
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+        XCTAssertEqual(store.principal?.id, "courier-42")
+        XCTAssertNotNil(storage.savedSession)
+        let writes = backend.withState { $0.locationWrites }
+        XCTAssertEqual(writes, 1)
+        store.location.onCoordinate?(.pachino)
+        XCTAssertEqual(backend.withState { $0.locationWrites }, writes)
+    }
+
+    func testDelayedLoginAfterLogoutCannotRestoreUserOrPersistToken() async {
+        let started = expectation(description: "Server receives login")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState { $0.onLogin = { started.fulfill() }; $0.loginGate = release }
+        let login = Task { await store.login(username: "dispatcher-a", password: "test-only-password") }
+        await fulfillment(of: [started], timeout: 5)
+        store.logout()
+        assertSignedOut(store)
+        release.signal()
+        await login.value
+        assertSignedOut(store)
+        XCTAssertEqual(backend.withState { $0.revokedTokens }, ["Bearer pilot-token-1"], "Revoke the late-issued token")
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.path == "/v1/deliveries" } })
+    }
+
+    func testDelayedRestoreAfterLogoutCannotRestoreUserOrPersistToken() async {
+        seedSavedSession()
+        let started = expectation(description: "Server receives identity validation")
+        let revoked = expectation(description: "Logout revokes saved token while restoration is pending")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.onIdentity = { started.fulfill() }; $0.identityGate = release
+            $0.onRevoke = { revoked.fulfill() }
+        }
+        let restore = Task { await store.restoreSession() }
+        await fulfillment(of: [started], timeout: 5)
+        store.logout()
+        await fulfillment(of: [revoked], timeout: 5)
+        XCTAssertEqual(backend.withState { $0.revokedTokens }, ["Bearer saved-pilot-token"])
+        release.signal()
+        await restore.value
+        assertSignedOut(store)
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.path == "/v1/deliveries" } })
+    }
+
+    func testUncertainCreateRetryUsesSameKeyAndExactBodyWithoutDuplicate() async throws {
+        await store.login(username: "dispatcher-a", password: "test-only-password")
+        backend.withState { $0.lostCreateResponses = 1 }
+        let initial = await store.create(Fixtures.newDelivery)
+        XCTAssertNil(initial)
+        let pending = try XCTUnwrap(store.pendingCreation)
+        XCTAssertTrue(store.createOutcomeUncertain)
+        XCTAssertEqual(storage.creations["\(endpoint)|dispatcher-a"], pending)
+        let retried = await store.retryPendingCreation()
+        XCTAssertEqual(retried?.id, "created-1")
+        XCTAssertNil(store.pendingCreation)
+        XCTAssertFalse(store.createOutcomeUncertain)
+        XCTAssertTrue(storage.creations.isEmpty)
+        let requests = backend.withState { $0.requests.filter { $0.method == "POST" && $0.path == "/v1/deliveries" } }
+        XCTAssertEqual(requests.map(\.idempotencyKey), [pending.idempotencyKey, pending.idempotencyKey])
+        for request in requests {
+            XCTAssertEqual(try APIClient.decoder().decode(NewDelivery.self, from: request.body), pending.delivery)
+        }
+        XCTAssertEqual(backend.withState { $0.committedCreates }, 1)
+        XCTAssertEqual(store.deliveries.map(\.id), ["created-1"])
+    }
+
+    func testPendingCreateSurvivesRelaunchAndValidatedSessionRestore() async throws {
+        await store.login(username: "dispatcher-a", password: "test-only-password")
+        backend.withState { $0.lostCreateResponses = 1 }
+        _ = await store.create(Fixtures.newDelivery)
+        let pending = try XCTUnwrap(store.pendingCreation)
+        let relaunched = makeStore()
+        await relaunched.restoreSession()
+        XCTAssertEqual(relaunched.pendingCreation, pending)
+        XCTAssertTrue(relaunched.createOutcomeUncertain)
+        let result = await relaunched.retryPendingCreation()
+        XCTAssertEqual(result?.id, "created-1")
+        XCTAssertNil(relaunched.pendingCreation)
+        XCTAssertTrue(storage.creations.isEmpty)
+        XCTAssertEqual(backend.withState { $0.committedCreates }, 1)
+    }
+
+    func testPendingCreateIsIsolatedByServerIdentityAndEndpoint() async throws {
+        await store.login(username: "dispatcher-a", password: "test-only-password")
+        backend.withState { $0.lostCreateResponses = 1 }
+        _ = await store.create(Fixtures.newDelivery)
+        let pending = try XCTUnwrap(store.pendingCreation)
+        store.logout()
+        backend.withState { $0.user = Principal(id: "dispatcher-b", name: "Altra centrale", role: "dispatcher") }
+        await store.login(username: "dispatcher-b", password: "test-only-password")
+        XCTAssertNil(store.pendingCreation)
+        XCTAssertFalse(store.createOutcomeUncertain)
+        let wrongIdentity = await store.retryPendingCreation()
+        XCTAssertNil(wrongIdentity)
+        store.logout()
+        backend.withState { $0.user = Principal(id: "dispatcher-a", name: "Centrale", role: "dispatcher") }
+        store.apiURL = "https://other.arrivau.example"
+        await store.login(username: "dispatcher-a", password: "test-only-password")
+        XCTAssertNil(store.pendingCreation)
+        let wrongEndpoint = await store.retryPendingCreation()
+        XCTAssertNil(wrongEndpoint)
+        store.logout()
+        store.apiURL = endpoint
+        await store.login(username: "dispatcher-a", password: "test-only-password")
+        XCTAssertEqual(store.pendingCreation, pending, "The original server identity recovers the original request")
+        let recovered = await store.retryPendingCreation()
+        XCTAssertEqual(recovered?.id, "created-1")
+        XCTAssertEqual(backend.withState { $0.committedCreates }, 1)
+        XCTAssertTrue(storage.creations.isEmpty)
+    }
+
+    func testDifferentCreateCannotReplaceUncertainRequest() async throws {
+        await store.login(username: "dispatcher-a", password: "test-only-password")
+        backend.withState { $0.lostCreateResponses = 1 }
+        _ = await store.create(Fixtures.newDelivery)
+        let pending = try XCTUnwrap(store.pendingCreation)
+        let different = NewDelivery(shopName: "Altro negozio", pickupAddress: "Via Roma 1", pickup: .pachino,
+                                    dropoffAddress: "Via Garibaldi 8", dropoff: .pachino,
+                                    readyAt: 1, deadlineAt: 2_000_000_000, loadUnits: 1, maxRideSeconds: 1800)
+        let result = await store.create(different)
+        XCTAssertNil(result)
+        XCTAssertEqual(store.pendingCreation, pending)
+        XCTAssertEqual(storage.creations["\(endpoint)|dispatcher-a"], pending)
+        XCTAssertEqual(backend.withState { $0.createAttempts }, 1)
+    }
+
+    func testCreateDoesNotTransmitWhenRecoveryCannotBePersisted() async {
+        let failing = FaultingPilotStorage(base: storage)
+        failing.failCreationSave = true
+        let candidate = makeStore(storage: failing)
+        await candidate.login(username: "dispatcher-a", password: "test-only-password")
+        let result = await candidate.create(Fixtures.newDelivery)
+        XCTAssertNil(result)
+        XCTAssertNil(candidate.pendingCreation)
+        XCTAssertNotNil(candidate.errorMessage)
+        XCTAssertEqual(backend.withState { $0.createAttempts }, 0)
+        XCTAssertTrue(storage.creations.isEmpty)
+    }
+}
+
+private final class FaultingPilotStorage: SessionStorage {
+    let base: MemorySessionStorage
+    var failCreationLoad = false
+    var failCreationSave = false
+    init(base: MemorySessionStorage) { self.base = base }
+    func loadSession() throws -> SavedSession? { try base.loadSession() }
+    func saveSession(_ value: SavedSession) throws { try base.saveSession(value) }
+    func clearSession() throws { try base.clearSession() }
+    func loadCreation(scope: String) throws -> PendingCreation? {
+        if failCreationLoad { throw APIError(message: "Test storage read failed") }
+        return try base.loadCreation(scope: scope)
+    }
+    func saveCreation(_ value: PendingCreation, scope: String) throws {
+        if failCreationSave { throw APIError(message: "Test storage write failed") }
+        try base.saveCreation(value, scope: scope)
+    }
+    func clearCreation(scope: String) throws { try base.clearCreation(scope: scope) }
+}
+
+private final class PilotSessionURLProtocol: URLProtocol {
+    static var backend: PilotSessionBackend?
+    private let stateLock = NSLock()
+    private var stopped = false
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        // Capture this test's backend before dispatching, so a late canceled request cannot reach the next test.
+        guard let backend = Self.backend else { client?.urlProtocol(self, didFailWithError: URLError(.cancelled)); return }
+        DispatchQueue.global().async { [self] in
+            let result = Result { try backend.respond(to: request) }
+            stateLock.lock(); let cancelled = stopped; stateLock.unlock()
+            guard !cancelled else { return }
+            switch result {
+            case .success(let (status, data)):
+                let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
+                                               headerFields: ["Content-Type": "application/json"])!
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: data)
+                client?.urlProtocolDidFinishLoading(self)
+            case .failure(let error): client?.urlProtocol(self, didFailWithError: error)
+            }
+        }
+    }
+    override func stopLoading() { stateLock.lock(); stopped = true; stateLock.unlock() }
+}
+
+private final class PilotSessionBackend {
+    struct RequestRecord {
+        let method: String
+        let path: String
+        let origin: String
+        let authorization: String?
+        let idempotencyKey: String?
+        let body: Data
+    }
+    private let lock = NSLock()
+    var user = Principal(id: "dispatcher-a", name: "Centrale", role: "dispatcher")
+    var expiresAt = Int(Date().timeIntervalSince1970) + 3600
+    var active = false
+    var loginStatus = 201
+    var identityStatus = 200
+    var omitIdentityExpiry = false
+    var emptyLoginToken = false
+    var rejectProtectedReads = false
+    var lostCreateResponses = 0
+    var requests: [RequestRecord] = []
+    var revokedTokens: [String] = []
+    var locationWrites = 0
+    var locationStatus = 200
+    var createAttempts = 0
+    var committedCreates = 0
+    var onLogin: (() -> Void)?
+    var onIdentity: (() -> Void)?
+    var onRevoke: (() -> Void)?
+    var onLocation: (() -> Void)?
+    var loginGate: DispatchSemaphore?
+    var identityGate: DispatchSemaphore?
+    private var loginCount = 0
+    private var creations: [String: Delivery] = [:]
+
+    func withState<T>(_ operation: (PilotSessionBackend) throws -> T) rethrows -> T {
+        lock.lock(); defer { lock.unlock() }
+        return try operation(self)
+    }
+
+    func respond(to request: URLRequest) throws -> (Int, Data) {
+        let body = try Self.body(of: request)
+        let method = request.httpMethod ?? "GET"
+        let path = request.url!.path
+        let origin = "\(request.url!.scheme!)://\(request.url!.host!)"
+        let authorization = request.value(forHTTPHeaderField: "Authorization")
+        var gate: DispatchSemaphore?
+        var received: (() -> Void)?
+        // Never hold the backend lock while waiting for a test to release a delayed response.
+        let response: (Int, Data) = try withState { state in
+            state.requests.append(RequestRecord(method: method, path: path, origin: origin, authorization: authorization,
+                                                idempotencyKey: request.value(forHTTPHeaderField: "Idempotency-Key"), body: body))
+            if path == "/v1/session" && method == "POST" {
+                state.loginCount += 1
+                gate = state.loginGate; received = state.onLogin
+                if state.loginStatus != 201 { return (state.loginStatus, Self.errorBody) }
+                let token = state.emptyLoginToken ? "" : "pilot-token-\(state.loginCount)"
+                return (201, try Self.json(["token": token, "expires_at": state.expiresAt, "user": Self.userBody(state.user)]))
+            }
+            if path == "/v1/session" && method == "GET" {
+                gate = state.identityGate; received = state.onIdentity
+                if state.identityStatus != 200 { return (state.identityStatus, Self.errorBody) }
+                var identity: [String: Any] = ["user": Self.userBody(state.user)]
+                if !state.omitIdentityExpiry { identity["expires_at"] = state.expiresAt }
+                return (200, try Self.json(identity))
+            }
+            if path == "/v1/session" && method == "DELETE" {
+                state.revokedTokens.append(authorization ?? "")
+                received = state.onRevoke
+                return (204, Data())
+            }
+            if method == "GET" && state.rejectProtectedReads { return (401, Self.errorBody) }
+            let driver = Driver(id: state.user.id, name: state.user.name, active: state.active, capacity: 5,
+                                location: nil, locationUpdatedAt: nil)
+            switch (method, path) {
+            case ("GET", "/v1/drivers"): return (200, try APIClient.encoder().encode([driver]))
+            case ("GET", "/v1/shift"): return (200, try APIClient.encoder().encode(driver))
+            case ("GET", "/v1/route"):
+                let route = DriverRoute(driverId: state.user.id, stops: [], travelSeconds: 0, finishAt: 0, feasible: true, warnings: [])
+                return (200, try APIClient.encoder().encode(route))
+            case ("GET", "/v1/deliveries"):
+                let prefix = "\(origin)|\(state.user.id)|"
+                let deliveries = state.creations.filter { $0.key.hasPrefix(prefix) }.map { $0.value }.sorted { $0.id < $1.id }
+                return (200, try APIClient.encoder().encode(deliveries))
+            case ("POST", "/v1/location"):
+                state.locationWrites += 1; received = state.onLocation
+                if state.locationStatus != 200 { return (state.locationStatus, Self.errorBody) }
+                return (200, try APIClient.encoder().encode(driver))
+            case ("POST", "/v1/deliveries"):
+                state.createAttempts += 1
+                guard let key = request.value(forHTTPHeaderField: "Idempotency-Key"), !key.isEmpty else { return (400, Self.errorBody) }
+                let scope = "\(origin)|\(state.user.id)|\(key)"
+                let input = try APIClient.decoder().decode(NewDelivery.self, from: body)
+                let delivery: Delivery
+                if let existing = state.creations[scope] { delivery = existing }
+                else {
+                    state.committedCreates += 1
+                    delivery = Delivery(id: "created-\(state.committedCreates)", shopName: input.shopName,
+                                        pickupAddress: input.pickupAddress, pickup: input.pickup,
+                                        dropoffAddress: input.dropoffAddress, dropoff: input.dropoff,
+                                        readyAt: input.readyAt, deadlineAt: input.deadlineAt,
+                                        loadUnits: input.loadUnits, maxRideSeconds: input.maxRideSeconds,
+                                        status: .pending, driverId: nil, createdAt: 1, pickedUpAt: nil, deliveredAt: nil)
+                    state.creations[scope] = delivery
+                }
+                if state.lostCreateResponses > 0 {
+                    state.lostCreateResponses -= 1
+                    throw URLError(.networkConnectionLost)
+                }
+                return (201, try APIClient.encoder().encode(delivery))
+            default: return (404, Self.errorBody)
+            }
+        }
+        received?()
+        if let gate, gate.wait(timeout: .now() + 10) == .timedOut { throw URLError(.timedOut) }
+        return response
+    }
+
+    private static let errorBody = Data(#"{"error":"Test request rejected"}"#.utf8)
+    private static func userBody(_ user: Principal) -> [String: String] {
+        ["id": user.id, "name": user.name, "role": user.role]
+    }
+    private static func json(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
+    private static func body(of request: URLRequest) throws -> Data {
+        if let data = request.httpBody { return data }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open(); defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count < 0 { throw stream.streamError ?? URLError(.cannotDecodeContentData) }
+            if count == 0 { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+}

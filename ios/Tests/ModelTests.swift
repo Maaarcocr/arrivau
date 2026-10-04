@@ -57,10 +57,19 @@ final class ModelTests: XCTestCase {
         let invalid = NewDelivery(shopName: " ", pickupAddress: "A", pickup: .pachino, dropoffAddress: "B", dropoff: .pachino, readyAt: 2, deadlineAt: 1, loadUnits: 0, maxRideSeconds: 0)
         XCTAssertNotNil(invalid.validationError)
     }
-    func testConfigRejectsRemoteHostsAndEmbeddedCredentials() throws {
-        XCTAssertEqual(try APIConfiguration.validatedURL("http://localhost:8080").host, "localhost")
-        for url in ["http://example.com", "http://localhost.evil.test", "http://user:pass@localhost", "file:///tmp/api", "http://localhost:8080?token=x"] {
+    func testPilotRequiresHTTPSRootOriginAndNormalizesIt() throws {
+        XCTAssertEqual(try APIConfiguration.validatedURL("https://API.example.com:443/").absoluteString, "https://api.example.com")
+        XCTAssertEqual(try APIConfiguration.validatedURL("https://api.example.com:8443").port, 8443)
+        for url in ["", "http://api.example.com", "https://localhost", "https://127.0.0.1", "https://[::1]", "https://user:pass@api.example.com", "https://api.example.com/v1", "https://api.example.com?token=x", "https://api.example.com#x", "file:///tmp/api", " https://api.example.com", "https://api.example.com:0", "https://api.example.com:65536"] {
             XCTAssertThrowsError(try APIConfiguration.validatedURL(url), url)
+        }
+    }
+    func testExplicitDebugDemoAcceptsOnlyLoopback() throws {
+        for url in ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"] {
+            XCTAssertNoThrow(try APIConfiguration.validatedURL(url, mode: .demo), url)
+        }
+        for url in ["http://example.com", "https://example.com", "http://localhost.evil.test", "http://user:pass@localhost", "file:///tmp/api", "http://localhost:8080?token=x"] {
+            XCTAssertThrowsError(try APIConfiguration.validatedURL(url, mode: .demo), url)
         }
     }
 }
@@ -70,3 +79,4 @@ enum Fixtures {
     static let route = Data(#"{"driver_id":"driver-1","stops":[{"delivery_id":"delivery-1","kind":"pickup","address":"Via Roma 1","coordinate":{"lat":36.7163,"lng":15.0908},"arrival_at":1790874000,"departure_at":1790874060}],"travel_seconds":180,"finish_at":1790874240,"feasible":true,"warnings":[]}"#.utf8)
     static let newDelivery = NewDelivery(shopName: "Pizzeria", pickupAddress: "Via Roma 1", pickup: .pachino, dropoffAddress: "Via Garibaldi 8", dropoff: Coordinate(lat: 36.721, lng: 15.1), readyAt: 1_790_874_000, deadlineAt: 1_790_877_600, loadUnits: 1, maxRideSeconds: 1800)
 }
+

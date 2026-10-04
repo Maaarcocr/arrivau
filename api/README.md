@@ -1,64 +1,191 @@
-# Rust API
+# Rust API: supervised single-fleet pilot
 
-A local-development starter for a two-driver Pachino fleet. The root README and
-`../docs/api-contract.md` describe setup and the shared iOS wire contract.
+The loopback fixture demo and individually authenticated phone pilot are separate
+modes and use separate SQLite databases. This repository prepares an operator-run
+pilot; it does not deploy a service or provision real accounts.
 
-## Run and verify
+## Isolated simulator demo
+
+From the repository root:
 
 ```sh
-ARRIVAU_DEMO=1 cargo run --manifest-path api/Cargo.toml
-cargo test --manifest-path api/Cargo.toml --locked
-cargo clippy --manifest-path api/Cargo.toml --all-targets --locked -- -D warnings
-cargo fmt --manifest-path api/Cargo.toml -- --check
+./scripts/api-dev.sh
 ```
 
-Run those commands from the repository root. `ARRIVAU_DB_PATH` defaults to
-`arrivau.sqlite3`; `ARRIVAU_ADDR` defaults to `127.0.0.1:8080`. The executable
-refuses startup without `ARRIVAU_DEMO=1` or with a non-loopback bind address.
+The script explicitly selects demo mode, binds `127.0.0.1:8080`, and defaults to
+`arrivau-demo.sqlite3`. `ARRIVAU_DEMO=1` remains a legacy explicit opt-in. Demo
+mode seeds two fixture drivers and accepts the three public demo bearer strings.
+Never proxy it, bind it to a LAN, or enter customer data. Non-loopback binding
+is rejected even when production ingress flags are supplied. It cannot load a
+production account configuration, and demo databases cannot become pilot databases.
 
-## Design
+## Operator-managed pilot accounts
 
-- Axum/Tokio HTTP service; role checks on every supported protected route
-- SQLite WAL persistence for drivers, jobs, completion timestamps, and ordered
-  route stops. Demo driver seeding uses `INSERT OR IGNORE`, preserving shifts and
-  locations across restarts. Assignment/reassignment/status updates use SQLite
-  transactions. JSON domain bodies have indexed ownership/status columns
-- A single guarded SQLite connection intentionally serializes small-fleet
-  writes and route planning. Before larger deployment, use a blocking worker or
-  database pool, migrations, pagination, and realistic performance/load tests
-- Insertion checks every pickup/dropoff pair around existing stops, preserving
-  existing relative order. Simulation considers initial onboard load, pickup
-  readiness, capacity at each pickup, delivery deadlines, and elapsed ride time
-  from the pickup service start or actual persisted pickup timestamp
-- Travel uses Haversine × 1.3 at constant 25 km/h; each stop adds 60 seconds of
-  handling. No traffic, one-way streets, road accessibility, breaks, or global
-  optimization are modeled. Readiness waits and handling count toward freshness
-- Target routes must be fully feasible and have no more than 32 outstanding
-  stops. Locations are fresh for 300 seconds; missing/stale locations block
-  assignment and omit the driver from suggestions. Existing route stops remain
-  visible when time or GPS freshness makes their estimates infeasible
-- Reassignment also checks the source route: removing stops may make another
-  pickup earlier and increase food age during a later readiness wait. A new
-  violation rejects the move. Existing warning identities may remain so that
-  dispatch can recover work from an already-late or stale-location driver
-- Drivers can complete only the currently committed next stop. Readiness is
-  enforced for pickup. Late real-world completions remain recordable. This
-  starter does not geofence completion or prove the driver physically arrived
+Use one account per person, with stable IDs that are never recycled for someone
+else. Driver account IDs are also driver IDs in domain records. One database and
+configuration represent exactly one fleet; there is no multi-tenant server.
 
-## Tests
+Create a private, operator-managed JSON file outside the repository:
 
-`tests/http_e2e.rs` launches an ephemeral TCP listener against a real temporary
-SQLite file; no mocked HTTP server or in-memory database is used. A clock is
-injected only to make readiness, expiry, and location-age tests deterministic.
-Coverage includes auth/roles, JSON errors, ownership, transitions, full delivery
-flow, restart persistence, atomic rejection/reassignment, concurrent dispatch,
-route ordering, old-route freshness regressions, stale-driver recovery, and the
-odd-count 32-stop boundary. Planner unit tests cover geometry and constraints.
+```json
+{
+  "fleet_id": "your-fleet-id",
+  "session_ttl_seconds": 43200,
+  "accounts": [
+    {
+      "id": "dispatcher-unique-id",
+      "username": "dispatcher-login",
+      "name": "Dispatcher name",
+      "role": "dispatcher",
+      "password_hash": "REPLACE_WITH_INDIVIDUAL_ARGON2ID_HASH"
+    },
+    {
+      "id": "driver-unique-id",
+      "username": "driver-login",
+      "name": "Driver name",
+      "role": "driver",
+      "password_hash": "REPLACE_WITH_DIFFERENT_INDIVIDUAL_ARGON2ID_HASH"
+    }
+  ]
+}
+```
 
-## Before production
+These placeholders deliberately fail validation. No production account/password
+is supplied in the repository. Generate each hash locally:
 
-Replace the demo gate/tokens with verified user authentication and tenant-scoped
-authorization; deploy HTTPS, secure device credentials, migrations/backups,
-observability, rate limits, idempotency keys, retention controls, and a real road
-travel-time provider. Revalidate local transport and food-handling requirements.
-Do not expose this demo to a network or use it for live customer operations.
+```sh
+cargo run --locked --manifest-path api/Cargo.toml --bin arrivau-password-hash
+```
+
+On a terminal the helper hides input and asks for confirmation. It also accepts
+stdin for an operator's secure provisioning flow. Never put passwords in command
+arguments, environment variables, shell history, chat, logs, or committed files.
+The helper prints only the PHC hash; protect that output and the configuration
+with owner-only filesystem permissions. Use unique, strong individual passwords
+from a password manager. The helper requires at least 12 UTF-8 bytes and uses
+Argon2id v19, 19 MiB memory, two iterations, one lane, random 16-byte salt, and
+32-byte output. Configuration validation rejects weaker hash parameters.
+
+Configure 1–100 accounts, including a dispatcher. IDs/usernames contain 1–64 ASCII
+letters, digits, dot, underscore or hyphen, starting with a letter or digit;
+usernames must be lowercase. Session
+TTL must be 300–86400 seconds. Roles come exclusively from this configuration.
+There is no public signup, role-selection endpoint, or password-reset endpoint.
+
+## Production-mode configuration
+
+```sh
+ARRIVAU_MODE=production \
+ARRIVAU_DB_PATH=/absolute/persistent/fleet.sqlite3 \
+ARRIVAU_AUTH_CONFIG=/absolute/private/accounts.json \
+ARRIVAU_ADDR=127.0.0.1:8080 \
+ARRIVAU_TLS_PROXY=1 \
+./api/target/release/arrivau-api
+```
+
+Build first with `cargo build --release --locked --manifest-path api/Cargo.toml`.
+`ARRIVAU_TLS_PROXY=1` is an operator assertion, not TLS validation performed by the
+Rust HTTP process. Set it only after configuring trusted HTTPS ingress. The
+recommended upstream is loopback behind a same-host TLS reverse proxy.
+
+A managed host whose TLS proxy reaches a private container interface may use
+`ARRIVAU_ADDR=0.0.0.0:8080` plus **both** `ARRIVAU_TLS_PROXY=1` and
+`ARRIVAU_ALLOW_NON_LOOPBACK=1`. Configure the host to prevent direct public access
+to this cleartext HTTP port; all outside traffic must use the HTTPS proxy. The
+binary does not read `PORT`, infer proxy trust from forwarded headers, obtain
+certificates, or terminate TLS itself. Never use the opt-in on an exposed VPS
+HTTP port. Missing mode, conflicting demo flags, missing config, relative database
+paths, weak/placeholder password hashes, and unsafe binds fail closed.
+
+Use one running API process and durable storage with private filesystem access.
+SQLite WAL contains customer addresses, latest coordinates, delivery state, session
+hashes, login counters and idempotency records. Protect the database, WAL/SHM files,
+configuration and backups together. Do not put SQLite on ephemeral container disk
+or an unsupported network filesystem. A mode/fleet marker rejects cross-mode or
+cross-fleet database reuse; legacy demo data is not imported into a pilot.
+
+## Sessions and account changes
+
+- `POST /v1/session` with `{ "username": "...", "password": "..." }` returns
+  HTTP 201 with `{ "token": "...", "expires_at": 1790000000, "user":
+  { "id": "...", "name": "...", "role": "driver" } }`
+- `GET /v1/session` with `Authorization: Bearer <token>` returns `user` and
+  `expires_at`; `GET /v1/me` retains the original user-only response
+- `DELETE /v1/session` revokes the presented session and returns HTTP 204
+- Missing, invalid, revoked or expired credentials return 401; wrong roles return
+  403. Existing JSON error shape is `{ "error": "message" }`
+- Sessions use 32 cryptographically random bytes, are stored only as SHA-256
+  hashes, expire at a fixed deadline, and survive process restarts. Each account
+  retains at most ten live sessions; no automatic refresh is implemented
+- Changing an account's hash, username, name or role, or removing the account,
+  revokes its sessions on the next restart. Restart is required to apply config
+  edits. Removing a driver disables new assignments but preserves route/history
+  for dispatcher recovery. Resolve/reassign outstanding work before removal
+- For an emergency lost-device revocation, change that individual's hash or remove
+  their account, then restart the service. Other unchanged users retain sessions
+- Login attempts, including unknown usernames, are limited to ten per username
+  per five minutes and sixty overall per minute, persisted through restart. HTTP
+  429 means wait; a maximum of two concurrent Argon2 checks bounds CPU/memory
+- Add ingress/IP rate limiting, request timeouts and monitoring at the TLS proxy.
+  The simple per-account limit can be deliberately exhausted by an attacker
+- Session responses and API data use `Cache-Control: no-store`; tokens/passwords
+  are never application-logged. Do not configure a proxy to log authorization or
+  request bodies
+
+Production accepts no demo bearer tokens and seeds no fixture drivers. Account
+login is unavailable in demo mode. Demo session identity has `expires_at: null`;
+its public fixture tokens cannot truly be revoked and must never leave loopback.
+
+## Durable retry contract
+
+`POST /v1/deliveries`, `POST /v1/deliveries/{id}/assign`, and
+`POST /v1/deliveries/{id}/status` accept `Idempotency-Key` with 8–128 ASCII letters,
+digits, dot, underscore or hyphen. A fresh UUID per intended action is recommended.
+Persist and resend the same key **and exact request** after a timeout or disconnect.
+Do not automatically mint a new key when the server may already have committed.
+
+The original successful response and request fingerprint commit in the same SQLite
+transaction as the domain mutation. Repeating the same authenticated account's key
+and request returns the original response, even after restart/new login. Reusing a
+key for a different endpoint, target or body returns 409. Account scopes are
+independent, and role/ownership checks still apply. Keys are optional for legacy
+clients; requests without a key keep the original strict transition behavior.
+
+Only successful writes are recorded; rejected requests can be corrected and retried.
+A replay response may describe an older delivery state, so refresh deliveries/route
+afterwards. Idempotency records are retained with the pilot database and are not
+silently expired. Do not independently prune them while clients can retry old actions.
+
+## Domain behavior and limits
+
+- Server-enforced dispatcher/driver roles and driver ownership on protected routes
+- SQLite serializes small-fleet planning and writes. Assignment, reassignment,
+  completion, ordered route stops and retry records commit transactionally
+- The insertion planner checks capacity, readiness, pickup-before-dropoff, deadline,
+  elapsed onboard time and the previous driver's route when reassigning
+- Travel remains Haversine × 1.3 at 25 km/h plus 60 seconds per stop, without roads,
+  traffic, one-way restrictions or global optimization. Human review is required
+- A driver's location must be at most 300 seconds old for new assignments. Existing
+  work stays visible with warnings. At most 32 outstanding route stops are allowed
+- Drivers complete only their committed next stop; pickup readiness is enforced.
+  Late real-world completions remain recordable. There is no arrival geofence
+- Latest location only, no location history. Ending shifts/signing out stops client
+  updates; account logout does not end a shift or cancel work
+- No multi-instance scheduling, audit trail, automated backups, retention/deletion
+  service, APNs, durable offline queue or live road-time provider is claimed
+
+## Verification
+
+```sh
+cargo fmt --manifest-path api/Cargo.toml -- --check
+cargo clippy --locked --manifest-path api/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path api/Cargo.toml
+```
+
+Tests use actual ephemeral TCP listeners, temporary on-disk SQLite, fake clocks and
+explicit test-only passwords. Coverage includes original dispatch/planning flows,
+individual login, role isolation, fixture rejection, expiry, logout, restart,
+password/account revocation, login limits, database mode/fleet separation, startup
+misconfiguration, and durable/conflicting create/assignment/completion retries.
+Physical-iPhone behavior and a real TLS deployment require the separate operator
+acceptance checklist; a passing Rust test suite does not establish those outcomes.

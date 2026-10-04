@@ -77,7 +77,7 @@ final class APIClientTests: XCTestCase {
         catch {
             let error = try XCTUnwrap(error as? APIError)
             XCTAssertTrue(error.mutationOutcomeUncertain)
-            XCTAssertEqual(error.localizedDescription, "La risposta del server contiene dati non validi o non compatibili con questa demo.")
+            XCTAssertEqual(error.localizedDescription, "La risposta del server contiene dati non validi o non compatibili con questa app.")
         }
     }
     func testUnreadableReadResponseDoesNotMarkMutationUncertain() async throws {
@@ -122,6 +122,70 @@ final class APIClientTests: XCTestCase {
         }
         _ = try await client.status(deliveryId: "delivery-1", status: .pickedUp)
     }
+    func testLoginUsesCredentialsOnceWithoutBearerAndDecodesSession() async throws {
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/session")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            XCTAssertFalse(request.httpShouldHandleCookies)
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: String])
+            XCTAssertEqual(payload, ["username": "mario", "password": "test-only-password"])
+            return (201, Data(#"{"token":"opaque-session","expires_at":2000000000,"user":{"id":"rider-a","name":"Mario","role":"driver"}}"#.utf8))
+        }
+        let anonymous = APIClient(baseURL: URL(string: "https://api.example.com")!, token: "", session: session)
+        let authenticated = try await anonymous.login(username: "mario", password: "test-only-password")
+        XCTAssertEqual(authenticated.token, "opaque-session")
+        XCTAssertEqual(authenticated.expiresAt, 2_000_000_000)
+        XCTAssertEqual(authenticated.user.serverRole, .driver)
+    }
+    func testRevokeAcceptsEmpty204AndUsesBearer() async throws {
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.url?.path, "/v1/session")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer demo-driver-1")
+            XCTAssertNil(request.httpBody)
+            return (204, Data())
+        }
+        try await client.revokeSession()
+    }
+    func testUnauthorizedIsTypedAndCannotEchoServerDetails() async {
+        StubURLProtocol.handler = { _ in (401, Data(#"{"error":"private account details"}"#.utf8)) }
+        do { _ = try await client.identity(); XCTFail("Expected unauthorized") }
+        catch {
+            XCTAssertTrue((error as? APIError)?.isUnauthorized == true)
+            XCTAssertEqual(error.localizedDescription, "Sessione scaduta o revocata. Accedi di nuovo.")
+        }
+    }
+    func testIdempotencyKeyIsReusedExactlyAsSupplied() async throws {
+        let key = UUID().uuidString
+        var requests = 0
+        StubURLProtocol.handler = { request in
+            requests += 1
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), key)
+            return (201, Fixtures.delivery)
+        }
+        _ = try await client.create(Fixtures.newDelivery, idempotencyKey: key)
+        _ = try await client.create(Fixtures.newDelivery, idempotencyKey: key)
+        XCTAssertEqual(requests, 2)
+    }
+    func testServerFailureLeavesMutationOutcomeUncertain() async {
+        StubURLProtocol.handler = { _ in (503, Data()) }
+        do { _ = try await client.create(Fixtures.newDelivery); XCTFail("Expected unavailable") }
+        catch { XCTAssertTrue((error as? APIError)?.mutationOutcomeUncertain == true) }
+    }
+    func testRedirectPolicyRejectsEvenSameOriginRedirects() {
+        let original = URL(string: "https://api.example.com/v1/session")!
+        let response = HTTPURLResponse(url: original, statusCode: 307, httpVersion: nil, headerFields: ["Location": "https://other.example.com/session"])!
+        let task = session.dataTask(with: original)
+        var called = false
+        NoAPIRedirects.shared.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                                         newRequest: URLRequest(url: URL(string: "https://other.example.com/session")!)) { request in
+            called = true
+            XCTAssertNil(request)
+        }
+        XCTAssertTrue(called)
+        task.cancel()
+    }
     private static func body(of request: URLRequest) throws -> Data {
         if let data = request.httpBody { return data }
         guard let stream = request.httpBodyStream else { return Data() }
@@ -155,4 +219,5 @@ final class StubURLProtocol: URLProtocol {
     }
     override func stopLoading() { }
 }
+
 

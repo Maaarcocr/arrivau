@@ -1,3 +1,4 @@
+pub mod auth;
 mod db;
 mod error;
 pub mod model;
@@ -8,7 +9,7 @@ use axum::{
         rejection::{JsonRejection, PathRejection},
         DefaultBodyLimit, Path, Request, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
@@ -16,7 +17,8 @@ use axum::{
 };
 use error::{ApiError, ApiResult};
 use model::*;
-use rusqlite::Connection;
+use rand_core::{OsRng, RngCore};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path as FsPath,
@@ -42,6 +44,13 @@ impl Clock for SystemClock {
 pub struct AppState {
     db: Arc<Mutex<Connection>>,
     clock: Arc<dyn Clock>,
+    authentication: Arc<Authentication>,
+    auth_workers: Arc<tokio::sync::Semaphore>,
+}
+
+enum Authentication {
+    Demo,
+    Production(auth::ProductionConfig),
 }
 
 impl AppState {
@@ -55,12 +64,41 @@ impl AppState {
         clock: Arc<dyn Clock>,
     ) -> Result<Self, String> {
         if !demo_enabled {
-            return Err("Production authentication is not implemented. Set ARRIVAU_DEMO=1 for local development only.".into());
+            return Err("Explicit demo opt-in is required; use open_production for configured pilot authentication".into());
         }
-        let db = db::open(path).map_err(|e| e.message)?;
+        let db = db::open(path, "demo").map_err(|e| e.message)?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
             clock,
+            authentication: Arc::new(Authentication::Demo),
+            auth_workers: Arc::new(tokio::sync::Semaphore::new(2)),
+        })
+    }
+
+    pub fn open_production(
+        path: impl AsRef<FsPath>,
+        config: auth::ProductionConfig,
+    ) -> Result<Self, String> {
+        Self::open_production_with_clock(path, config, Arc::new(SystemClock))
+    }
+
+    pub fn open_production_with_clock(
+        path: impl AsRef<FsPath>,
+        config: auth::ProductionConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, String> {
+        config.validate()?;
+        if !path.as_ref().is_absolute() {
+            return Err("Production requires an absolute persistent database path".into());
+        }
+        let mut db =
+            db::open(path, &format!("production:{}", config.fleet_id)).map_err(|e| e.message)?;
+        auth::initialize(&mut db, &config).map_err(|e| e.message)?;
+        Ok(Self {
+            db: Arc::new(Mutex::new(db)),
+            clock,
+            authentication: Arc::new(Authentication::Production(config)),
+            auth_workers: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
@@ -75,7 +113,7 @@ impl AppState {
 struct Principal {
     id: String,
     name: String,
-    role: &'static str,
+    role: String,
 }
 impl Principal {
     fn require(&self, role: &str) -> ApiResult<()> {
@@ -90,28 +128,41 @@ impl Principal {
     }
 }
 
-async fn authenticate(mut request: Request, next: Next) -> ApiResult<Response> {
+async fn authenticate(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> ApiResult<Response> {
     let token = request
         .headers()
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let (id, name, role) = match token {
-        Some("demo-dispatcher") => ("dispatcher-1", "Dispatcher", "dispatcher"),
-        Some("demo-driver-1") => ("driver-1", "Driver 1", "driver"),
-        Some("demo-driver-2") => ("driver-2", "Driver 2", "driver"),
-        _ => {
-            return Err(ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "A valid bearer token is required",
-            ))
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(auth::unauthorized)?;
+    let session = match state.authentication.as_ref() {
+        Authentication::Demo => {
+            let (id, name, role) = match token {
+                "demo-dispatcher" => ("dispatcher-1", "Dispatcher", "dispatcher"),
+                "demo-driver-1" => ("driver-1", "Driver 1", "driver"),
+                "demo-driver-2" => ("driver-2", "Driver 2", "driver"),
+                _ => return Err(auth::unauthorized()),
+            };
+            auth::Session {
+                principal: Principal {
+                    id: id.into(),
+                    name: name.into(),
+                    role: role.into(),
+                },
+                expires_at: None,
+                token_hash: None,
+            }
+        }
+        Authentication::Production(config) => {
+            auth::session(&*state.db()?, config, token, state.clock.now())?
         }
     };
-    request.extensions_mut().insert(Principal {
-        id: id.into(),
-        name: name.into(),
-        role,
-    });
+    request.extensions_mut().insert(session.principal.clone());
+    request.extensions_mut().insert(session);
     Ok(next.run(request).await)
 }
 
@@ -135,6 +186,7 @@ fn json_body<T>(body: Result<Json<T>, JsonRejection>) -> ApiResult<T> {
 pub fn app(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/me", get(me))
+        .route("/session", get(session_identity).delete(logout))
         .route("/drivers", get(list_drivers))
         .route("/shift", get(get_shift).post(shift))
         .route("/location", post(location))
@@ -144,19 +196,120 @@ pub fn app(state: AppState) -> Router {
         .route("/deliveries/{id}/suggestions", get(suggestions))
         .route("/route", get(own_route))
         .route("/drivers/{id}/route", get(driver_route))
-        .route_layer(middleware::from_fn(authenticate));
+        .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
     Router::new()
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),
         )
+        .route("/v1/session", post(login))
         .nest("/v1", v1)
         .fallback(|| async { ApiError::not_found("Endpoint not found") })
         .method_not_allowed_fallback(|| async {
             ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed")
         })
         .layer(DefaultBodyLimit::max(16 * 1024))
+        .layer(middleware::from_fn(
+            |request: Request, next: Next| async move {
+                let mut response = next.run(request).await;
+                response
+                    .headers_mut()
+                    .insert("cache-control", "no-store".parse().unwrap());
+                response
+                    .headers_mut()
+                    .insert("x-content-type-options", "nosniff".parse().unwrap());
+                response
+            },
+        ))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginInput {
+    username: String,
+    password: String,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    body: Result<Json<LoginInput>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let Authentication::Production(config) = state.authentication.as_ref() else {
+        return Err(ApiError::not_found(
+            "Account login is unavailable in isolated demo mode",
+        ));
+    };
+    let input = json_body(body)?;
+    if input.username.len() > 64 || input.password.is_empty() || input.password.len() > 1024 {
+        return Err(auth::unauthorized());
+    }
+    let username = input.username.trim().to_ascii_lowercase();
+    auth::reserve_login(&*state.db()?, &username, state.clock.now())?;
+    let account = config
+        .accounts
+        .iter()
+        .find(|a| a.username == username)
+        .cloned();
+    // Unknown usernames still perform one Argon2 verification to avoid a cheap timing oracle.
+    let hash = account
+        .as_ref()
+        .unwrap_or(&config.accounts[0])
+        .password_hash
+        .clone();
+    let permit = state
+        .auth_workers
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Login is busy; try again shortly",
+            )
+        })?;
+    let valid = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        auth::verify(&hash, &input.password)
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    let account = account.filter(|_| valid).ok_or_else(auth::unauthorized)?;
+    let mut bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(ApiError::internal)?;
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let now = state.clock.now();
+    let expires_at = now + config.session_ttl_seconds;
+    let db = state.db()?;
+    db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now])?;
+    db.execute("DELETE FROM sessions WHERE account_id=?1 AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE account_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 9)", [&account.id])?;
+    db.execute("INSERT INTO sessions(token_hash,account_id,account_fingerprint,expires_at,created_at) VALUES (?1,?2,?3,?4,?5)",params![auth::digest(&token),account.id,account.fingerprint(),expires_at,now])?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({"token":token,"expires_at":expires_at,"user":account.principal()})),
+    ))
+}
+
+async fn session_identity(
+    Extension(session): Extension<auth::Session>,
+) -> Json<auth::SessionIdentity> {
+    Json(auth::SessionIdentity {
+        user: session.principal,
+        expires_at: session.expires_at,
+    })
+}
+
+async fn logout(
+    State(state): State<AppState>,
+    Extension(session): Extension<auth::Session>,
+) -> ApiResult<StatusCode> {
+    if let Some(hash) = session.token_hash {
+        state
+            .db()?
+            .execute("DELETE FROM sessions WHERE token_hash=?1", [hash])?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn me(Extension(principal): Extension<Principal>) -> Json<Principal> {
@@ -268,20 +421,91 @@ async fn list_deliveries(
     Ok(Json(jobs))
 }
 
+struct Idempotency {
+    key: String,
+    request_hash: String,
+}
+impl Idempotency {
+    fn parse(headers: &HeaderMap, path: &str, body: &impl Serialize) -> ApiResult<Option<Self>> {
+        let Some(value) = headers.get("idempotency-key") else {
+            return Ok(None);
+        };
+        let key = value
+            .to_str()
+            .map_err(|_| ApiError::bad_request("Invalid Idempotency-Key"))?;
+        if key.len() < 8
+            || key.len() > 128
+            || !key
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+        {
+            return Err(ApiError::bad_request("Idempotency-Key must contain 8–128 ASCII letters, digits, dots, underscores or hyphens"));
+        }
+        Ok(Some(Self {
+            key: key.into(),
+            request_hash: auth::digest(&format!("{path}:{}", serde_json::to_string(body)?)),
+        }))
+    }
+    fn replay(&self, db: &Connection, principal: &Principal) -> ApiResult<Option<Delivery>> {
+        let row: Option<(String, String)> = db
+            .query_row(
+                "SELECT request_hash,response FROM idempotency WHERE principal_id=?1 AND key=?2",
+                params![principal.id, self.key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((hash, _)) if hash != self.request_hash => Err(ApiError::conflict(
+                "Idempotency-Key was already used for a different request",
+            )),
+            Some((_, body)) => Ok(Some(serde_json::from_str(&body)?)),
+            None => Ok(None),
+        }
+    }
+    fn save(&self, db: &Connection, principal: &Principal, response: &Delivery) -> ApiResult<()> {
+        db.execute(
+            "INSERT INTO idempotency(principal_id,key,request_hash,response) VALUES (?1,?2,?3,?4)",
+            params![
+                principal.id,
+                self.key,
+                self.request_hash,
+                serde_json::to_string(response)?
+            ],
+        )?;
+        Ok(())
+    }
+}
+
 async fn create_delivery(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
     body: Result<Json<NewDelivery>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Delivery>)> {
     principal.require("dispatcher")?;
     let input = json_body(body)?;
     input.validate().map_err(ApiError::bad_request)?;
+    let key = Idempotency::parse(&headers, "/deliveries", &input)?;
+    let mut db = state.db()?;
+    let tx = db.transaction()?;
+    if let Some(saved) = key
+        .as_ref()
+        .map(|k| k.replay(&tx, &principal))
+        .transpose()?
+        .flatten()
+    {
+        return Ok((StatusCode::CREATED, Json(saved)));
+    }
     let delivery = input.into_delivery(state.clock.now());
-    db::save_delivery(&*state.db()?, &delivery)?;
+    db::save_delivery(&tx, &delivery)?;
+    if let Some(key) = key {
+        key.save(&tx, &principal, &delivery)?;
+    }
+    tx.commit()?;
     Ok((StatusCode::CREATED, Json(delivery)))
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AssignInput {
     driver_id: String,
@@ -290,13 +514,23 @@ async fn assign(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
     body: Result<Json<AssignInput>, JsonRejection>,
 ) -> ApiResult<Json<Delivery>> {
     principal.require("dispatcher")?;
     let id = path_id(path)?;
     let input = json_body(body)?;
+    let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/assign"), &input)?;
     let mut db = state.db()?;
     let tx = db.transaction()?;
+    if let Some(saved) = key
+        .as_ref()
+        .map(|k| k.replay(&tx, &principal))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(Json(saved));
+    }
     let mut job = db::delivery(&tx, &id)?;
     if matches!(
         job.status,
@@ -346,11 +580,14 @@ async fn assign(
     job.status = DeliveryStatus::Assigned;
     db::save_delivery(&tx, &job)?;
     db::save_route(&tx, &driver.id, &keys)?;
+    if let Some(key) = key {
+        key.save(&tx, &principal, &job)?;
+    }
     tx.commit()?;
     Ok(Json(job))
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StatusInput {
     status: DeliveryStatus,
@@ -359,6 +596,7 @@ async fn status(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
     body: Result<Json<StatusInput>, JsonRejection>,
 ) -> ApiResult<Json<Delivery>> {
     principal.require("driver")?;
@@ -372,6 +610,7 @@ async fn status(
             "Status must be picked_up or delivered",
         ));
     }
+    let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/status"), &input)?;
     let mut db = state.db()?;
     let tx = db.transaction()?;
     let mut job = db::delivery(&tx, &id)?;
@@ -380,6 +619,14 @@ async fn status(
             StatusCode::FORBIDDEN,
             "Delivery is not assigned to this driver",
         ));
+    }
+    if let Some(saved) = key
+        .as_ref()
+        .map(|k| k.replay(&tx, &principal))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(Json(saved));
     }
     let driver = db::driver(&tx, &principal.id)?;
     if !driver.active {
@@ -423,6 +670,9 @@ async fn status(
     keys.remove(0);
     db::save_delivery(&tx, &job)?;
     db::save_route(&tx, &principal.id, &keys)?;
+    if let Some(key) = key {
+        key.save(&tx, &principal, &job)?;
+    }
     tx.commit()?;
     Ok(Json(job))
 }

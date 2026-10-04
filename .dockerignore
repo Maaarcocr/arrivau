@@ -1,0 +1,14 @@
+.git
+**/target
+**/DerivedData*
+**/build
+**/*.sqlite3*
+**/*.db*
+**/*.log
+**/.env
+**/*.p12
+**/*.p8
+**/*.mobileprovision
+deploy/auth.json
+deploy/pilot.env
+ios

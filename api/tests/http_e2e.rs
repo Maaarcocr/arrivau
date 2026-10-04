@@ -811,3 +811,193 @@ async fn route_stop_limit_counts_the_resulting_pair_even_with_odd_stop_counts() 
         serde_json::to_value(server.route(DRIVER_1).await).unwrap()
     );
 }
+
+#[tokio::test]
+async fn idempotent_mutations_survive_restart_and_cannot_change_request_or_owner() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("retry.sqlite3");
+    let clock = TestClock::new();
+    let mut server = Server::start(&path, clock.clone()).await;
+    server.driver_online(DRIVER_1, 2).await;
+    async fn keyed(server: &Server, path: &str, token: &str, key: &str, body: Value) -> Response {
+        server
+            .client
+            .post(format!("{}{}", server.base, path))
+            .bearer_auth(token)
+            .header("Idempotency-Key", key)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+    let first: Value = keyed(
+        &server,
+        "/v1/deliveries",
+        DISPATCHER,
+        "create-test-1234",
+        new_job(),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    let replay: Value = keyed(
+        &server,
+        "/v1/deliveries",
+        DISPATCHER,
+        "create-test-1234",
+        new_job(),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(first, replay);
+    let job: Delivery = serde_json::from_value(first.clone()).unwrap();
+    let mut changed = new_job();
+    changed["shop_name"] = json!("different body");
+    error_is_json(
+        keyed(
+            &server,
+            "/v1/deliveries",
+            DISPATCHER,
+            "create-test-1234",
+            changed,
+        )
+        .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    error_is_json(
+        keyed(
+            &server,
+            "/v1/deliveries",
+            DRIVER_1,
+            "create-test-1234",
+            new_job(),
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    let assign_path = format!("/v1/deliveries/{}/assign", job.id);
+    let body = json!({"driver_id":"driver-1"});
+    error_is_json(
+        keyed(
+            &server,
+            &assign_path,
+            DISPATCHER,
+            "create-test-1234",
+            body.clone(),
+        )
+        .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    assert_eq!(
+        keyed(
+            &server,
+            &assign_path,
+            DISPATCHER,
+            "assign-test-1234",
+            body.clone()
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        keyed(&server, &assign_path, DISPATCHER, "assign-test-1234", body)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(server.route(DRIVER_1).await.stops.len(), 2);
+    let status_path = format!("/v1/deliveries/{}/status", job.id);
+    let pickup = json!({"status":"picked_up"});
+    let picked: Value = keyed(
+        &server,
+        &status_path,
+        DRIVER_1,
+        "pickup-test-1234",
+        pickup.clone(),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    server.close().await;
+    let server = Server::start(&path, clock).await;
+    let retry: Value = keyed(
+        &server,
+        &status_path,
+        DRIVER_1,
+        "pickup-test-1234",
+        pickup.clone(),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(picked, retry);
+    assert_eq!(server.route(DRIVER_1).await.stops.len(), 1);
+    error_is_json(
+        keyed(
+            &server,
+            &status_path,
+            DRIVER_2,
+            "pickup-test-1234",
+            pickup.clone(),
+        )
+        .await,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    assert_eq!(
+        keyed(
+            &server,
+            &status_path,
+            DRIVER_1,
+            "dropoff-test-1234",
+            json!({"status":"delivered"})
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let late: Value = keyed(&server, &status_path, DRIVER_1, "pickup-test-1234", pickup)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        late, picked,
+        "replay returns original response, without rolling back delivery"
+    );
+    assert!(server.route(DRIVER_1).await.stops.is_empty());
+    let replay: Value = keyed(
+        &server,
+        "/v1/deliveries",
+        DISPATCHER,
+        "create-test-1234",
+        new_job(),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(replay, first);
+    let jobs: Vec<Delivery> = server
+        .get("/v1/deliveries", DISPATCHER)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(serde_json::to_value(jobs[0].status).unwrap(), "delivered");
+    error_is_json(
+        keyed(&server, "/v1/deliveries", DISPATCHER, "bad", new_job()).await,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+}

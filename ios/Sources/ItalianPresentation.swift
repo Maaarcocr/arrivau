@@ -40,19 +40,22 @@ enum ItalianPresentation {
             }
         }
         if error is CancellationError { return "Richiesta annullata." }
-        if error is DecodingError { return "La risposta del server contiene dati non validi o non compatibili con questa demo." }
+        if error is DecodingError { return "La risposta del server contiene dati non validi o non compatibili con questa app." }
         if error is EncodingError { return "Impossibile preparare i dati da inviare. Controlla i valori inseriti." }
         return unknownError
     }
 
     static func serverError(_ message: String?, statusCode: Int) -> String {
+        if statusCode == 401 { return "Sessione scaduta o revocata. Accedi di nuovo." }
+        if statusCode == 429 { return "Troppi tentativi di accesso. Attendi qualche minuto e riprova." }
+        if (300..<400).contains(statusCode) { return "Il server richiede un reindirizzamento non consentito. Chiedi al responsabile l’indirizzo HTTPS definitivo." }
         if let message, let translated = serverErrors[message] { return translated }
         return "La richiesta al server non è riuscita (HTTP \(statusCode)). Riprova."
     }
 
     /// Exact contract messages only: unknown text is not echoed or translated by substring.
     private static let serverErrors: [String: String] = [
-        "A valid bearer token is required": "Accesso non valido. Seleziona di nuovo un ruolo demo.",
+        "A valid bearer token is required": "Accesso non valido. Accedi di nuovo.",
         "dispatcher role required": "Questa operazione richiede il ruolo Centrale.",
         "driver role required": "Questa operazione richiede il ruolo Corriere.",
         "Path must contain a valid UTF-8 identifier": "L’identificativo della richiesta non è valido.",
@@ -149,3 +152,4 @@ extension Date {
     var italianTimeWithSeconds: String { ItalianPresentation.time(self, includesSeconds: true) }
     var italianDateTime: String { ItalianPresentation.dateTime(self) }
 }
+

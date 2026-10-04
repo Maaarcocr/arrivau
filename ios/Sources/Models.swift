@@ -9,6 +9,7 @@ struct Coordinate: Codable, Equatable, Sendable {
     static let pachino = Coordinate(lat: 36.7163, lng: 15.0908)
 }
 
+#if DEBUG
 enum DemoRole: String, CaseIterable, Identifiable {
     case dispatcher, driver1, driver2
     var id: String { rawValue }
@@ -23,11 +24,16 @@ enum DemoRole: String, CaseIterable, Identifiable {
     }
 }
 
-struct Principal: Decodable, Equatable {
+#endif
+
+enum UserRole: String, Codable { case dispatcher, driver }
+
+struct Principal: Codable, Equatable {
     let id: String
     let name: String
     let role: String
     var displayName: String { ItalianPresentation.demoName(id: id, name: name) }
+    var serverRole: UserRole? { UserRole(rawValue: role) }
     var roleTitle: String {
         switch role { case "dispatcher": "Centrale"; case "driver": "Corriere"; default: "Ruolo non riconosciuto" }
     }
@@ -135,4 +141,5 @@ enum DeliveryAction {
 extension Int {
     var epochDate: Date { Date(timeIntervalSince1970: TimeInterval(self)) }
 }
+
 

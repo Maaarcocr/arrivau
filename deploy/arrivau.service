@@ -1,0 +1,23 @@
+[Unit]
+Description=Arrivau supervised pilot API
+After=network.target
+
+[Service]
+Type=simple
+User=arrivau
+Group=arrivau
+WorkingDirectory=/var/lib/arrivau
+EnvironmentFile=/etc/arrivau/pilot.env
+ExecStart=/opt/arrivau/arrivau-api
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/arrivau
+
+[Install]
+WantedBy=multi-user.target

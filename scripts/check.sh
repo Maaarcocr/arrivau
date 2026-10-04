@@ -7,3 +7,4 @@ cargo clippy --locked --manifest-path api/Cargo.toml --all-targets -- -D warning
 cargo test --locked --manifest-path api/Cargo.toml
 python3 -m py_compile scripts/e2e.py scripts/export-screenshots.py
 python3 -m unittest discover -s scripts -p "test_*.py"
+

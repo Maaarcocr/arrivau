@@ -100,16 +100,21 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["estimate_readiness"])
         tap(app.buttons["save_readiness"])
         waitForReadinessValue(prefix: "Prevista alle ", suffix: "(stima)")
-        waitForLabelContaining(element("automatic_assignment_status"), "Assegnazione prevista quando pronta")
+        waitForAutomaticAssignmentValue("Assegnazione prevista quando pronta")
         let estimated = try XCTUnwrap(readDeliveriesFromServer().first)
         XCTAssertEqual(estimated.status, "pending")
         XCTAssertEqual(estimated.readinessState, "estimated")
+        XCTAssertGreaterThan(estimated.readyAt, Int(Date().timeIntervalSince1970), "The real API must retain the future estimate")
         XCTAssertNil(estimated.driverId)
         // Ready now triggers server assignment. No driver-selection button is needed.
         let readyNow = app.buttons["ready_now"]
         reveal(readyNow)
         readyNow.doubleTap()
+        // Reading the lower automatic-state section may have scrolled these
+        // fields outside the lazy List viewport. Bring each exact field back.
+        reveal(app.staticTexts["delivery_status"])
         waitForLabel(app.staticTexts["delivery_status"], "Assegnata")
+        reveal(element("delivery_readiness"))
         waitForReadinessValue(prefix: "Pronta dalle ", suffix: "(confermata)")
         let assignedAutomatically = try XCTUnwrap(readDeliveriesFromServer().first)
         XCTAssertEqual(assignedAutomatically.driverId, "driver-1")
@@ -597,8 +602,10 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(Set(reopened.map(\.id)), Set(after.map(\.id)), "Reopening a created job must retain its ID")
         tap(app.buttons["delivery_\(pending.id)"])
         tap(app.buttons["ready_now"])
-        waitForLabelContaining(element("automatic_assignment_status"), "In attesa di un corriere")
-        XCTAssertTrue(element("dispatch_waiting_reason").waitForExistence(timeout: 10))
+        waitForAutomaticAssignmentValue("In attesa di un corriere")
+        let waitingReason = element("dispatch_waiting_reason")
+        reveal(waitingReason)
+        XCTAssertTrue(waitingReason.waitForExistence(timeout: 10))
         let waiting = try XCTUnwrap(readDeliveriesFromServer().first { $0.id == pending.id })
         XCTAssertEqual(waiting.status, "pending")
         XCTAssertEqual(waiting.readinessState, "ready")
@@ -686,6 +693,7 @@ final class DeliveryFlowUITests: XCTestCase {
         let status: String
         let driverId: String?
         let readinessState: String
+        let readyAt: Int
         let readinessRevision: Int
         let dispatchWaitingReason: String?
         let pickupAddress: String
@@ -945,6 +953,25 @@ final class DeliveryFlowUITests: XCTestCase {
         let current = field.value as? String ?? ""
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
         if !value.isEmpty { field.typeText(value) }
+    }
+
+    /// The automatic-assignment section can be outside List's realized viewport
+    /// after saving an estimate. Reveal its semantic row before matching exact state.
+    private func waitForAutomaticAssignmentValue(_ value: String, file: StaticString = #filePath, line: UInt = #line) {
+        let assignment = element("automatic_assignment_status")
+        reveal(assignment)
+        let expected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND label == %@ AND value == %@", "Assegnazione", value),
+            object: assignment)
+        XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed,
+                       assignmentDiagnostic(assignment), file: file, line: line)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "automatic_assignment_status").count, 1,
+                       "Automatic assignment must expose one semantic field", file: file, line: line)
+    }
+
+    private func assignmentDiagnostic(_ assignment: XCUIElement) -> String {
+        guard assignment.exists else { return "Assignment field is unavailable" }
+        return "Assignment label: \(assignment.label); value: \(String(describing: assignment.value))"
     }
 
     /// LabeledContent exposes readiness as one label/value pair, regardless of

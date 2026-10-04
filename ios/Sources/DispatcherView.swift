@@ -168,9 +168,14 @@ struct DeliveryDetailView: View {
                     if delivery.status == .pending, delivery.hasKnownReadiness {
                         Section {
                             TimelineView(.periodic(from: .now, by: 1)) { context in
-                                Label(Int(context.date.timeIntervalSince1970) < delivery.readyAt
-                                      ? "Assegnazione prevista quando pronta" : "In attesa di un corriere",
-                                      systemImage: "bicycle")
+                                let assignmentState = Int(context.date.timeIntervalSince1970) < delivery.readyAt
+                                    ? "Assegnazione prevista quando pronta" : "In attesa di un corriere"
+                                Label(assignmentState, systemImage: "bicycle")
+                                    // Keep the changing state on one semantic row; a Label's
+                                    // SF Symbol must not inherit the query identifier.
+                                    .accessibilityElement(children: .ignore)
+                                    .accessibilityLabel("Assegnazione")
+                                    .accessibilityValue(assignmentState)
                                     .accessibilityIdentifier("automatic_assignment_status")
                             }
                             if let reason = delivery.localizedDispatchWaitingReason {

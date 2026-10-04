@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic, deliberately fictional test roads. Not OpenStreetMap data. -->
+<osm version="0.6" generator="arrivau-native-test">
+  <bounds minlat="36.70" minlon="15.08" maxlat="36.75" maxlon="15.14"/>
+  <node id="1" lat="36.7160" lon="15.0900"/>
+  <node id="2" lat="36.7160" lon="15.0940"/>
+  <node id="3" lat="36.7200" lon="15.0940"/>
+  <node id="4" lat="36.7200" lon="15.0900"/>
+  <node id="5" lat="36.7400" lon="15.1300"/>
+  <node id="6" lat="36.7400" lon="15.1340"/>
+  <node id="7" lat="36.7440" lon="15.1340"/>
+  <node id="8" lat="36.7440" lon="15.1300"/>
+  <way id="1"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/>
+    <tag k="highway" v="residential"/><tag k="name" v="Synthetic one-way loop A"/><tag k="oneway" v="yes"/><tag k="maxspeed" v="30"/>
+  </way>
+  <way id="2"><nd ref="5"/><nd ref="6"/><nd ref="7"/><nd ref="8"/><nd ref="5"/>
+    <tag k="highway" v="residential"/><tag k="name" v="Synthetic isolated loop B"/><tag k="oneway" v="yes"/><tag k="maxspeed" v="30"/>
+  </way>
+</osm>

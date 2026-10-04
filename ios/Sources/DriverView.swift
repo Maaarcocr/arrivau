@@ -58,7 +58,7 @@ struct DriverView: View {
                                 .font(.caption).foregroundStyle(.secondary)
                             Text("Tempi indicativi, senza traffico in tempo reale.").font(.caption).foregroundStyle(.secondary)
                         } else {
-                            Text("Posizione non disponibile; orari da verificare").font(.caption).foregroundStyle(.orange)
+                            Text(route.unavailableEstimateMessage).font(.caption).foregroundStyle(.orange)
                         }
                     }
                 }
@@ -121,9 +121,10 @@ struct DriverView: View {
                     Text(stop.address).font(.title3)
                 }
                 if !route.estimatesAvailable {
-                    Text("Posizione non disponibile; orari da verificare")
+                    Text(route.unavailableEstimateMessage)
                         .font(.subheadline).foregroundStyle(.orange).accessibilityIdentifier("route_estimates_unavailable")
                 }
+                RouteTravelNotice(route: route)
                 DirectionsButton(stop: stop)
                     .buttonStyle(.bordered)
                 TimelineView(.periodic(from: .now, by: 1)) { context in

@@ -13,6 +13,8 @@ fn rejected(env: &[(&str, &str)], expected: &str) {
         "ARRIVAU_TLS_PROXY",
         "ARRIVAU_ALLOW_NON_LOOPBACK",
         "ARRIVAU_ADDR",
+        "ARRIVAU_ROUTING",
+        "ARRIVAU_OSRM_DATASET",
     ] {
         command.env_remove(key);
     }
@@ -89,5 +91,37 @@ fn binary_requires_explicit_mode_and_secure_ingress_configuration() {
             ("ARRIVAU_AUTH_CONFIG", "relative.json"),
         ],
         "absolute operator-managed",
+    );
+}
+
+#[test]
+fn routing_opt_in_fails_before_database_creation_when_misconfigured() {
+    rejected(
+        &[("ARRIVAU_MODE", "demo"), ("ARRIVAU_ROUTING", "remote")],
+        "ARRIVAU_ROUTING must be",
+    );
+    rejected(
+        &[
+            ("ARRIVAU_MODE", "demo"),
+            ("ARRIVAU_OSRM_DATASET", "/unused/manifest.json"),
+        ],
+        "ARRIVAU_OSRM_DATASET requires",
+    );
+    #[cfg(not(feature = "embedded-osrm"))]
+    rejected(
+        &[
+            ("ARRIVAU_MODE", "demo"),
+            ("ARRIVAU_ROUTING", "embedded-osrm"),
+        ],
+        "Rebuild with --features embedded-osrm",
+    );
+    #[cfg(feature = "embedded-osrm")]
+    rejected(
+        &[
+            ("ARRIVAU_MODE", "demo"),
+            ("ARRIVAU_ROUTING", "embedded-osrm"),
+            ("ARRIVAU_OSRM_DATASET", "relative.json"),
+        ],
+        "manifest path must be absolute",
     );
 }

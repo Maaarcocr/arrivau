@@ -1,7 +1,9 @@
 //! Small-fleet pickup/dropoff insertion heuristic. Existing relative stop order is
 //! retained; every possible ordered insertion pair is evaluated. Distances are
-//! deliberately approximate, NOT a road-routing or traffic model.
+//! selected by an injected directed matrix; the compatibility wrappers use the
+//! explicit air-line approximation. No native calls occur inside the search.
 use crate::model::*;
+use crate::routing::{Approximate, TravelTimes};
 use std::collections::{HashMap, HashSet};
 
 const HANDLING_SECONDS: i64 = 60;
@@ -23,19 +25,22 @@ pub fn location_is_fresh(driver: &Driver, now: i64) -> bool {
 }
 
 pub fn travel_seconds(from: Coordinate, to: Coordinate) -> i64 {
-    let lat_delta = (to.lat - from.lat).to_radians();
-    let lng_delta = (to.lng - from.lng).to_radians();
-    let a = ((lat_delta / 2.0).sin().powi(2)
-        + from.lat.to_radians().cos()
-            * to.lat.to_radians().cos()
-            * (lng_delta / 2.0).sin().powi(2))
-    .clamp(0.0, 1.0);
-    let meters = 6_371_000.0 * 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
-    (meters * 1.3 / (25_000.0 / 3600.0)).ceil() as i64
+    crate::routing::approximate_seconds(from, to)
 }
 
 pub fn evaluate(driver: &Driver, keys: &[StopKey], jobs: &[Delivery], now: i64) -> Route {
+    evaluate_with_travel(driver, keys, jobs, now, &Approximate)
+}
+
+pub fn evaluate_with_travel(
+    driver: &Driver,
+    keys: &[StopKey],
+    jobs: &[Delivery],
+    now: i64,
+    travel: &dyn TravelTimes,
+) -> Route {
     let mut route = Route {
+        travel_estimate: travel.estimate(),
         driver_id: driver.id.clone(),
         stops: Vec::new(),
         travel_seconds: 0,
@@ -100,9 +105,22 @@ pub fn evaluate(driver: &Driver, keys: &[StopKey], jobs: &[Delivery], now: i64) 
             StopKind::Pickup => (job.pickup, job.pickup_address.clone()),
             StopKind::Dropoff => (job.dropoff, job.dropoff_address.clone()),
         };
-        let travel = current
-            .map(|from| travel_seconds(from, coordinate))
-            .unwrap_or(0);
+        let travel = match current {
+            Some(from) => match travel.seconds(from, coordinate) {
+                Some(seconds) => seconds,
+                None => {
+                    route.estimates_available = false;
+                    route.warnings.push(format!(
+                        "Percorso stradale non raggiungibile per {}",
+                        job.id
+                    ));
+                    // Compatibility-only numeric placeholder; never a cost usable
+                    // for assignment. Clients hide ETAs when estimates unavailable.
+                    1
+                }
+            },
+            None => 0, // No GPS is explicitly unavailable, not a routed zero leg.
+        };
         route.travel_seconds = route.travel_seconds.saturating_add(travel);
         time = time.saturating_add(travel);
         match key.kind {
@@ -197,6 +215,17 @@ pub fn insert(
     candidate: &Delivery,
     now: i64,
 ) -> Option<(Vec<StopKey>, Route)> {
+    insert_with_travel(driver, current, jobs, candidate, now, &Approximate)
+}
+
+pub fn insert_with_travel(
+    driver: &Driver,
+    current: &[StopKey],
+    jobs: &[Delivery],
+    candidate: &Delivery,
+    now: i64,
+    travel: &dyn TravelTimes,
+) -> Option<(Vec<StopKey>, Route)> {
     if !driver.active
         || !location_is_fresh(driver, now)
         || candidate.readiness_at().is_none()
@@ -204,7 +233,7 @@ pub fn insert(
     {
         return None;
     }
-    best_insertion(driver, current, jobs, candidate, now, false)
+    best_insertion(driver, current, jobs, candidate, now, false, travel)
 }
 
 /// Automatic dispatch must still pick the least-bad driver when timing targets
@@ -216,6 +245,17 @@ pub fn insert_for_dispatch(
     jobs: &[Delivery],
     candidate: &Delivery,
     now: i64,
+) -> Option<(Vec<StopKey>, Route)> {
+    insert_for_dispatch_with_travel(driver, current, jobs, candidate, now, &Approximate)
+}
+
+pub fn insert_for_dispatch_with_travel(
+    driver: &Driver,
+    current: &[StopKey],
+    jobs: &[Delivery],
+    candidate: &Delivery,
+    now: i64,
+    travel: &dyn TravelTimes,
 ) -> Option<(Vec<StopKey>, Route)> {
     if !driver.active
         || candidate.readiness_at().is_none()
@@ -243,10 +283,10 @@ pub fn insert_for_dispatch(
         assigned.status = DeliveryStatus::Assigned;
         proposed_jobs.retain(|job| job.id != candidate.id);
         proposed_jobs.push(assigned);
-        let route = evaluate(driver, &keys, &proposed_jobs, now);
+        let route = evaluate_with_travel(driver, &keys, &proposed_jobs, now, travel);
         return structurally_safe(&route).then_some((keys, route));
     }
-    best_insertion(driver, current, jobs, candidate, now, true)
+    best_insertion(driver, current, jobs, candidate, now, true, travel)
 }
 
 /// A readiness report is a fact, even when its timing is no longer feasible.
@@ -259,17 +299,37 @@ pub fn replan_readiness(
     candidate: &Delivery,
     now: i64,
 ) -> (Vec<StopKey>, Route) {
+    replan_readiness_with_travel(driver, current, jobs, candidate, now, &Approximate)
+}
+
+pub fn replan_readiness_with_travel(
+    driver: &Driver,
+    current: &[StopKey],
+    jobs: &[Delivery],
+    candidate: &Delivery,
+    now: i64,
+    travel: &dyn TravelTimes,
+) -> (Vec<StopKey>, Route) {
     if driver.location.is_none() {
         let base: Vec<_> = current
             .iter()
             .filter(|key| key.delivery_id != candidate.id)
             .cloned()
             .collect();
-        return insert_for_dispatch(driver, &base, jobs, candidate, now)
-            .unwrap_or_else(|| (current.to_vec(), evaluate(driver, current, jobs, now)));
+        return insert_for_dispatch_with_travel(driver, &base, jobs, candidate, now, travel)
+            .unwrap_or_else(|| {
+                (
+                    current.to_vec(),
+                    evaluate_with_travel(driver, current, jobs, now, travel),
+                )
+            });
     }
-    best_insertion(driver, current, jobs, candidate, now, true)
-        .unwrap_or_else(|| (current.to_vec(), evaluate(driver, current, jobs, now)))
+    best_insertion(driver, current, jobs, candidate, now, true, travel).unwrap_or_else(|| {
+        (
+            current.to_vec(),
+            evaluate_with_travel(driver, current, jobs, now, travel),
+        )
+    })
 }
 
 fn best_insertion(
@@ -279,6 +339,7 @@ fn best_insertion(
     candidate: &Delivery,
     now: i64,
     recovery: bool,
+    travel: &dyn TravelTimes,
 ) -> Option<(Vec<StopKey>, Route)> {
     let base: Vec<StopKey> = current
         .iter()
@@ -297,7 +358,7 @@ fn best_insertion(
     assigned_candidate.driver_id = Some(driver.id.clone());
     assigned_candidate.status = DeliveryStatus::Assigned;
     proposed_jobs.push(assigned_candidate);
-    let baseline = evaluate(driver, current, jobs, now);
+    let baseline = evaluate_with_travel(driver, current, jobs, now, travel);
     let mut best: Option<(Vec<StopKey>, Route)> = None;
     for pickup_index in 0..=base.len() {
         for dropoff_index in (pickup_index + 1)..=(base.len() + 1) {
@@ -316,7 +377,7 @@ fn best_insertion(
                     kind: StopKind::Dropoff,
                 },
             );
-            let route = evaluate(driver, &keys, &proposed_jobs, now);
+            let route = evaluate_with_travel(driver, &keys, &proposed_jobs, now, travel);
             if (route.feasible || (recovery && structurally_safe(&route)))
                 && best
                     .as_ref()
@@ -782,5 +843,62 @@ mod tests {
         assert_eq!(keys, current);
         assert!(!route.estimates_available);
         assert_eq!(route.stops[0].delivery_id, "aboard");
+    }
+    #[test]
+    fn native_unreachable_is_hard_even_for_late_or_no_gps_dispatch() {
+        use crate::routing::{TravelEstimate, TravelMatrix, TravelMode};
+        let mut d = driver(2);
+        let candidate = job("unreachable");
+        let a = candidate.pickup;
+        let b = candidate.dropoff;
+        let matrix = TravelMatrix::new(
+            &[a, b],
+            vec![vec![Some(0), None], vec![Some(90), Some(0)]],
+            TravelEstimate {
+                mode: TravelMode::EmbeddedOsrm,
+                approximate: false,
+                notice: None,
+                map_date: None,
+                attribution: None,
+            },
+        )
+        .unwrap();
+        assert!(insert_with_travel(&d, &[], &[], &candidate, 1000, &matrix).is_none());
+        assert!(insert_for_dispatch_with_travel(&d, &[], &[], &candidate, 1000, &matrix).is_none());
+        d.location = None;
+        assert!(insert_for_dispatch_with_travel(&d, &[], &[], &candidate, 1000, &matrix).is_none());
+    }
+    #[test]
+    fn no_gps_readiness_replan_preserves_native_unreachable_constraints() {
+        use crate::routing::{TravelEstimate, TravelMatrix};
+        let mut d = driver(2);
+        d.location = None;
+        let mut candidate = job("unreachable");
+        candidate.status = DeliveryStatus::Assigned;
+        candidate.driver_id = Some(d.id.clone());
+        let keys = vec![
+            stop(&candidate.id, StopKind::Pickup),
+            stop(&candidate.id, StopKind::Dropoff),
+        ];
+        let matrix = TravelMatrix::new(
+            &[candidate.pickup, candidate.dropoff],
+            vec![vec![Some(0), None], vec![Some(90), Some(0)]],
+            TravelEstimate::default(),
+        )
+        .unwrap();
+        let (after, route) = replan_readiness_with_travel(
+            &d,
+            &keys,
+            &[candidate.clone()],
+            &candidate,
+            1000,
+            &matrix,
+        );
+        assert_eq!(after, keys);
+        assert!(!route.feasible && !route.estimates_available);
+        assert!(route
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("Percorso stradale non raggiungibile")));
     }
 }

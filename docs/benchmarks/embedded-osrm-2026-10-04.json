@@ -1,0 +1,256 @@
+{
+  "measured_at_utc": "2026-10-04",
+  "scope": "Offline regional map proof; no target-host fit claim; no full production authentication or database load benchmark",
+  "toolchain": {
+    "os": "Linux x86_64 Debian 13",
+    "kernel": "6.18.44",
+    "cpu": "AMD EPYC 9V74 (shared cloud host)",
+    "gcc": "14.2.0",
+    "cmake": "3.31.6",
+    "rust": "1.99.0",
+    "osrm": "6.0.0",
+    "osrm_interface": "0.8.2",
+    "preprocessing_threads": 2
+  },
+  "dataset": {
+    "source_url": "https://download.geofabrik.de/europe/italy/isole-261003.osm.pbf",
+    "source_sha256": "dd8d74618baa05534b878f56913420ef0356ba043bb0e1cc3cdfdb3b7eaa44ad",
+    "osm_timestamp": "2026-10-03T20:20:50Z",
+    "extract_bounds": [
+      14.85,
+      36.6,
+      15.25,
+      37.1
+    ],
+    "service_bounds": [
+      14.95,
+      36.65,
+      15.18,
+      36.95
+    ],
+    "strategy": "complete_ways",
+    "cropped_pbf_bytes": 8966735,
+    "prepared_graph_bytes": 31127516,
+    "prepared_file_count": 23,
+    "manifest_sha256": "9cb999897187dc4ef92463e15bc04c3c174589b436c141ebe00cc2bb5daba16e",
+    "license": "ODbL 1.0; \u00a9 OpenStreetMap contributors"
+  },
+  "binary_sha256": "ac656c469dc94189e1a2ade983316cab83585117994dcd2f36f8022abd677654",
+  "preprocessing": {
+    "extract": {
+      "exit_code": 0,
+      "wall_seconds": 1.9566987819998758,
+      "sampled_peak_kib": {
+        "Rss": 120496,
+        "Pss": 119345,
+        "Pss_Dirty": 111888,
+        "Pss_Anon": 110696,
+        "Pss_File": 8649,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 2128,
+        "Shared_Dirty": 0,
+        "Private_Clean": 6480,
+        "Private_Dirty": 111888,
+        "Referenced": 120496,
+        "Anonymous": 110696,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "sampling_period_ms": 20
+    },
+    "contract": {
+      "exit_code": 0,
+      "wall_seconds": 31.924910138000996,
+      "sampled_peak_kib": {
+        "Rss": 66836,
+        "Pss": 65701,
+        "Pss_Dirty": 60880,
+        "Pss_Anon": 60880,
+        "Pss_File": 4821,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 5032,
+        "Shared_Dirty": 0,
+        "Private_Clean": 3860,
+        "Private_Dirty": 60880,
+        "Referenced": 66836,
+        "Anonymous": 60880,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "sampling_period_ms": 20
+    }
+  },
+  "runtime": {
+    "three_stops_10000_requests": {
+      "exit_code": 0,
+      "wall_seconds": 5.667115314994589,
+      "sampled_peak_kib": {
+        "Rss": 20252,
+        "Pss": 19140,
+        "Pss_Dirty": 3460,
+        "Pss_Anon": 912,
+        "Pss_File": 18228,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 2052,
+        "Shared_Dirty": 0,
+        "Private_Clean": 14740,
+        "Private_Dirty": 3460,
+        "Referenced": 20252,
+        "Anonymous": 912,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "sampling_period_ms": 20,
+      "process_output": {
+        "cache_note": "Manifest checksum verification reads all graph files; exact-coordinate full matrix cache includes moving driver; each new GPS gets a fresh native matrix. RSS and page cache overlap.",
+        "combined_matrix_size": 4,
+        "iterations": 10000,
+        "matrix_seconds": [
+          [
+            0,
+            473,
+            1585
+          ],
+          [
+            543,
+            0,
+            1752
+          ],
+          [
+            1608,
+            1762,
+            0
+          ]
+        ],
+        "memory_after_queries": {
+          "anonymous_kib": 912,
+          "pss_anon_kib": 912,
+          "pss_file_kib": 18260,
+          "pss_kib": 19172,
+          "rss_kib": 20316,
+          "vmhwm_kib": 20316
+        },
+        "memory_before": {
+          "anonymous_kib": 396,
+          "pss_anon_kib": 396,
+          "pss_file_kib": 4952,
+          "pss_kib": 5348,
+          "rss_kib": 6428,
+          "vmhwm_kib": 6432
+        },
+        "memory_initialized": {
+          "anonymous_kib": 544,
+          "pss_anon_kib": 544,
+          "pss_file_kib": 5728,
+          "pss_kib": 6272,
+          "rss_kib": 7384,
+          "vmhwm_kib": 7384
+        },
+        "queries_total_ms": 5610.675233,
+        "query_max_ms": 3.508433,
+        "query_median_ms": 0.554682,
+        "query_p95_ms": 0.667689,
+        "startup_ms_including_manifest_checksums": 34.336536,
+        "stop_count": 3
+      }
+    },
+    "thirtyfour_stops_1000_requests": {
+      "exit_code": 0,
+      "wall_seconds": 4.275563715003955,
+      "sampled_peak_kib": {
+        "Rss": 21076,
+        "Pss": 19972,
+        "Pss_Dirty": 4148,
+        "Pss_Anon": 1600,
+        "Pss_File": 18372,
+        "Pss_Shmem": 0,
+        "Shared_Clean": 2036,
+        "Shared_Dirty": 0,
+        "Private_Clean": 14892,
+        "Private_Dirty": 4148,
+        "Referenced": 21076,
+        "Anonymous": 1600,
+        "KSM": 0,
+        "LazyFree": 0,
+        "AnonHugePages": 0,
+        "ShmemPmdMapped": 0,
+        "FilePmdMapped": 0,
+        "Shared_Hugetlb": 0,
+        "Private_Hugetlb": 0,
+        "Swap": 0,
+        "SwapPss": 0,
+        "Locked": 0
+      },
+      "sampling_period_ms": 20,
+      "process_output": {
+        "cache_note": "Manifest checksum verification reads all graph files; exact-coordinate full matrix cache includes moving driver; each new GPS gets a fresh native matrix. RSS and page cache overlap.",
+        "combined_matrix_size": 35,
+        "iterations": 1000,
+        "memory_after_queries": {
+          "anonymous_kib": 1420,
+          "pss_anon_kib": 1420,
+          "pss_file_kib": 18372,
+          "pss_kib": 19792,
+          "rss_kib": 20896,
+          "vmhwm_kib": 21008
+        },
+        "memory_before": {
+          "anonymous_kib": 392,
+          "pss_anon_kib": 392,
+          "pss_file_kib": 4992,
+          "pss_kib": 5384,
+          "rss_kib": 6456,
+          "vmhwm_kib": 6460
+        },
+        "memory_initialized": {
+          "anonymous_kib": 540,
+          "pss_anon_kib": 540,
+          "pss_file_kib": 5768,
+          "pss_kib": 6308,
+          "rss_kib": 7412,
+          "vmhwm_kib": 7412
+        },
+        "queries_total_ms": 4233.999962000001,
+        "query_max_ms": 8.010669,
+        "query_median_ms": 4.146218,
+        "query_p95_ms": 4.692367,
+        "startup_ms_including_manifest_checksums": 24.469134,
+        "stop_count": 34
+      }
+    }
+  },
+  "method_notes": [
+    "Linux smaps_rollup sampled every 20 ms; transient peaks may fall between samples",
+    "KiB=1024 bytes; MiB=1048576 bytes",
+    "Startup reads every graph checksum and warms file cache before native queries",
+    "File-backed RSS and kernel page cache overlap; do not add them",
+    "One combined native matrix per request; 20 exact driver positions cycle through a 16-entry cache",
+    "35x35 size stress uses small offsets around three public town anchors, not broad geographic coverage",
+    "No mocked or remote routing engine used; no routing daemon; public map files downloaded only during preparation",
+    "Exact complete native matrices remain available to the fallback path if the worker is overloaded or unavailable; no table is reused for a changed GPS or point ordering"
+  ]
+}

@@ -141,3 +141,27 @@ struct ExpandableDetails<Content: View>: View {
         }
     }
 }
+
+/// Road estimates and their fallback/provenance remain visible in both roles.
+struct RouteTravelNotice: View {
+    let route: DriverRoute
+    var body: some View {
+        if !route.stops.isEmpty {
+            let estimate = route.travelEstimate ?? .legacy
+            VStack(alignment: .leading, spacing: 4) {
+                if let notice = estimate.notice {
+                    Label(notice, systemImage: estimate.approximate ? "exclamationmark.triangle" : "road.lanes")
+                        .foregroundStyle(estimate.approximate ? Color.orange : Color.secondary)
+                        .accessibilityIdentifier("route_travel_estimate")
+                }
+                if estimate.attribution != nil {
+                    Link("© OpenStreetMap contributors · ODbL", destination: URL(string: "https://www.openstreetmap.org/copyright")!)
+                        .accessibilityIdentifier("routing_attribution")
+                }
+                if let date = estimate.mapDate {
+                    Text("Dati mappa: \(String(date.prefix(10)))").foregroundStyle(.secondary)
+                }
+            }.font(.caption)
+        }
+    }
+}

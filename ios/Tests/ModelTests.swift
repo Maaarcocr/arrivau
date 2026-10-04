@@ -118,7 +118,7 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(route.estimatesAvailable)
         XCTAssertFalse(route.stops.isEmpty, "Missing GPS must not discard committed stops")
         var job = try XCTUnwrap(JSONSerialization.jsonObject(with: Fixtures.delivery) as? [String: Any])
-        for (reason, expected) in [("no_active_driver", "Nessun corriere in turno"), ("capacity_or_route_limit", "al completo"), ("Future English reason", "Assegnazione in attesa")] {
+        for (reason, expected) in [("no_active_driver", "Nessun corriere in turno"), ("capacity_or_route_limit", "viabilità"), ("Future English reason", "Assegnazione in attesa")] {
             job["dispatch_waiting_reason"] = reason
             let delivery = try APIClient.decoder().decode(Delivery.self, from: JSONSerialization.data(withJSONObject: job))
             XCTAssertTrue(try XCTUnwrap(delivery.localizedDispatchWaitingReason).contains(expected))
@@ -201,6 +201,26 @@ final class ModelTests: XCTestCase {
             XCTAssertThrowsError(try APIConfiguration.validatedURL(url, mode: .demo), url)
         }
     }
+    func testRoadRoutingMetadataAndLegacyCompatibility() throws {
+        let legacy = try APIClient.decoder().decode(DriverRoute.self, from: Fixtures.route)
+        XCTAssertNil(legacy.travelEstimate)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Fixtures.route) as? [String: Any])
+        object["travel_estimate"] = ["mode": "approximate_fallback", "approximate": true,
+            "notice": "Percorso stradale non disponibile", "map_date": "2026-10-03T20:20:50Z",
+            "attribution": "© OpenStreetMap contributors"]
+        let route = try APIClient.decoder().decode(DriverRoute.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertEqual(try APIClient.decoder().decode(DriverRoute.self, from: APIClient.encoder().encode(route)), route)
+        XCTAssertEqual(route.travelEstimate?.mode, "approximate_fallback")
+        XCTAssertEqual(route.travelEstimate?.approximate, true)
+        XCTAssertEqual(route.travelEstimate?.mapDate, "2026-10-03T20:20:50Z")
+        XCTAssertEqual(route.travelEstimate?.attribution, "© OpenStreetMap contributors")
+        let unavailable = DriverRoute(driverId: route.driverId, stops: route.stops, travelSeconds: 1,
+            finishAt: route.finishAt, feasible: false, warnings: ["Percorso stradale non raggiungibile per delivery-1"],
+            estimatesAvailable: false, travelEstimate: route.travelEstimate)
+        XCTAssertEqual(unavailable.unavailableEstimateMessage, "Percorso non raggiungibile; orari non disponibili")
+        XCTAssertTrue(unavailable.localizedWarnings[0].contains("non raggiungibile"))
+    }
+
 }
 
 enum Fixtures {

@@ -79,6 +79,8 @@ The fixture uses `Pizzeria Pachino Demo`, the sample Pachino pickup/drop-off, a 
 The Xcode `.xcresult` artifact contains the attachments. GitHub Actions exports the named screenshots for separate download/sharing; the export step must include successful attachments, rather than only failures. Failure screenshots and an accessibility hierarchy remain separate diagnostics.
 
 
+The same export also requires `dual-account-centrale` and `dual-account-corriere`, showing the private team label and the same-account view picker.
+
 ## Minimal everyday flow
 
 - Driver home prioritizes the next stop, directions and pickup/drop-off completion. The ordered map, completed rows and shift/privacy controls are secondary. Capacity uses the driver's existing server setting; it is not a task required before every shift.

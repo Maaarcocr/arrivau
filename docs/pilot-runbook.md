@@ -1,6 +1,6 @@
 # Supervised two-phone pilot
 
-This branch prepares code for a **single fleet, one server process, one dispatcher and one or more drivers**. It does not deploy a service, register an Apple account, install signing credentials, upload a build or enroll testers. Start with synthetic deliveries. A successful simulator run does not establish physical-device or TestFlight readiness.
+This branch prepares code for a **private teams, one server process, and dispatcher/driver capabilities (including dual-role accounts)**. It does not deploy a service, register an Apple account, install signing credentials, upload a build or enroll testers. Start with synthetic deliveries. A successful simulator run does not establish physical-device or TestFlight readiness.
 
 ## 1. Server prerequisites and boundaries
 
@@ -21,7 +21,7 @@ Create a dedicated `arrivau` system user. Create `/var/lib/arrivau` owned by tha
 
 Install the environment file as `/etc/arrivau/pilot.env` and the account configuration as `/etc/arrivau/auth.json`; make them root-owned, group `arrivau`, mode `0640`. Install the service unit and configure the proxy using the official systemd/Caddy documentation for your host. Review firewall and DNS yourself. Never commit the filled-in files, password hashes, tokens, signing keys or production database.
 
-Use a **fresh database path** for the pilot. A persisted mode/fleet marker rejects reuse of demo data in production. Keep one process and one local SQLite database; do not use network storage, autoscaling replicas, or multiple instances against the same fleet.
+For a brand-new pilot, use a **fresh database path**. For an existing deployment, retain its database and follow [the team migration and upgrade order](teams-and-review.md); never replace live data to enable teams. A persisted mode/fleet marker rejects reuse of demo data in production. Keep one process and one local SQLite database; do not use network storage, autoscaling replicas, or multiple instances against the same fleet.
 
 ### Managed host / container alternative
 
@@ -33,7 +33,7 @@ Render supports secret files at `/etc/secrets/<filename>` and requires binding t
 
 ## 2. Individual accounts and revocation
 
-See `api/README.md` for the exact account JSON schema and password-hashing command. Provision one dispatcher and a separate account for each driver; never share a login. Use stable, unique account IDs; a driver's account ID is also their driver ID. Give accounts clear display names. Choose strong unique passwords and pass them privately to their owners. The server stores only Argon2id password hashes in the local configuration; it never has public pilot tokens.
+See `api/README.md` for the exact account JSON schema and password-hashing command. Provision one individual account per person, granting dispatcher, driver or both capabilities within one team; never share pilot logins. Keep App Review in its own team, as described in [Teams and App Review](teams-and-review.md). Use stable, unique account IDs; a driver's account ID is also their driver ID. Give accounts clear display names. Choose strong unique passwords and pass them privately to their owners. The server stores only Argon2id password hashes in the local configuration; it never has public pilot tokens.
 
 Login creates an expiring opaque bearer session. The native app stores it in the device Keychain and verifies its identity with the server before resuming. Logout revokes that token when reachable and stops local GPS immediately. If the network is unavailable at logout, the local token is discarded and the server session remains valid until expiry or operator revocation. Account removal/password changes require a server restart; see the API guide for session invalidation behavior. Treat a lost phone as a reason to revoke the account's sessions, not just change its display name.
 
@@ -60,7 +60,7 @@ There is no automatic data-retention/deletion service or audit trail. Decide ret
 
 Read [the TestFlight guide](testflight.md). You will provide the HTTPS URL, Apple Developer team, a registered bundle identifier and App Store Connect app record. Xcode 26+ is required by Apple's current upload rules; the app still targets iOS 17+. The repository contains an opaque 1024px icon, privacy manifest, Release transport restrictions, version/build settings and an archive-only script.
 
-The app opens an Italian login screen. Enter your service's exact HTTPS origin and the assigned username/password. The server returns the role; there is no role picker in the normal pilot flow. Release builds cannot use demo credentials or HTTP. The first login may need network access for Apple Maps place search later.
+The app opens an Italian login screen. Enter your service's exact HTTPS origin and the assigned username/password. The server returns the role; there is no permissions picker at login. Accounts authorized for both roles have a Centrale / Corriere view switch after login. Release builds cannot use demo credentials or HTTP. The first login may need network access for Apple Maps place search later.
 
 ## 5. Run one supervised delivery
 
@@ -91,6 +91,6 @@ Mutations use idempotency keys to make retries of a still-pending action safe. T
 - Foreground polling, no APNs and no guaranteed background delivery notifications. A suspended dispatcher app can miss assignments/status changes until reopened
 - Background GPS is opt-in and must be verified on signed physical devices; iOS can suspend/terminate it. No tracking outside an explicitly active shift
 - Approximate routes, no traffic/road restrictions or global optimality guarantee; human judgement remains necessary
-- Single fleet, operator-managed accounts, no self-service signup/reset, no multi-tenant data partitioning, no billing or customer app
+- Private server-enforced teams, operator-managed accounts, no self-service signup/reset or team-administration UI, no billing or customer app
 - Database backups, service monitoring, certificate renewal, host security and retention are the operator's responsibility
 - Physical phones, signing, TestFlight processing/review, hosted TLS and real-world network behavior are not covered by CI

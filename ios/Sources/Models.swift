@@ -11,32 +11,65 @@ struct Coordinate: Codable, Equatable, Sendable {
 
 #if DEBUG
 enum DemoRole: String, CaseIterable, Identifiable {
-    case dispatcher, driver1, driver2
+    case dispatcher, driver1, driver2, dual
     var id: String { rawValue }
     var title: String {
-        switch self { case .dispatcher: "Centrale"; case .driver1: "Corriere 1"; case .driver2: "Corriere 2" }
+        switch self { case .dispatcher: "Centrale"; case .driver1: "Corriere 1"; case .driver2: "Corriere 2"; case .dual: "Centrale e corriere" }
     }
     var token: String {
-        switch self { case .dispatcher: "demo-dispatcher"; case .driver1: "demo-driver-1"; case .driver2: "demo-driver-2" }
+        switch self { case .dispatcher: "demo-dispatcher"; case .driver1: "demo-driver-1"; case .driver2: "demo-driver-2"; case .dual: "demo-dual" }
     }
     var driverId: String? {
-        switch self { case .dispatcher: nil; case .driver1: "driver-1"; case .driver2: "driver-2" }
+        switch self { case .dispatcher: nil; case .driver1: "driver-1"; case .driver2: "driver-2"; case .dual: "dual-1" }
     }
 }
 
 #endif
 
-enum UserRole: String, Codable { case dispatcher, driver }
+enum UserRole: String, Codable, CaseIterable, Hashable {
+    case dispatcher, driver
+    var title: String { self == .dispatcher ? "Centrale" : "Corriere" }
+}
 
 struct Principal: Codable, Equatable {
     let id: String
     let name: String
+    /// Kept for compatibility with servers that predate multi-capability accounts.
     let role: String
-    var displayName: String { ItalianPresentation.demoName(id: id, name: name) }
-    var serverRole: UserRole? { UserRole(rawValue: role) }
-    var roleTitle: String {
-        switch role { case "dispatcher": "Centrale"; case "driver": "Corriere"; default: "Ruolo non riconosciuto" }
+    let roles: [String]
+    let teamId: String?
+    let teamName: String?
+
+    init(id: String, name: String, role: String, roles: [String]? = nil,
+         teamId: String? = nil, teamName: String? = nil) {
+        self.id = id; self.name = name; self.role = role
+        self.roles = roles ?? [role]
+        self.teamId = teamId; self.teamName = teamName
     }
+    private enum CodingKeys: String, CodingKey { case id, name, role, roles, teamId, teamName }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        role = try values.decode(String.self, forKey: .role)
+        // Explicit empty, null or malformed capabilities must never grant legacy authority.
+        roles = values.contains(.roles) ? try values.decode([String].self, forKey: .roles) : [role]
+        teamId = try values.decodeIfPresent(String.self, forKey: .teamId)
+        teamName = try values.decodeIfPresent(String.self, forKey: .teamName)
+        if values.contains(.teamId), teamId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            throw DecodingError.dataCorruptedError(forKey: .teamId, in: values, debugDescription: "Team identity must be nonempty")
+        }
+    }
+    var displayName: String { ItalianPresentation.demoName(id: id, name: name) }
+    var availableRoles: [UserRole] { UserRole.allCases.filter { roles.contains($0.rawValue) } }
+    func supports(_ capability: UserRole) -> Bool { availableRoles.contains(capability) }
+    /// The legacy primary role is a preference, never a capability grant.
+    var serverRole: UserRole? {
+        if let primary = UserRole(rawValue: role), supports(primary) { return primary }
+        return availableRoles.first
+    }
+    var roleTitle: String { serverRole?.title ?? "Ruolo non riconosciuto" }
+    var teamTitle: String? { teamName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? teamName : teamId }
 }
 struct Driver: Codable, Identifiable, Equatable {
     let id: String

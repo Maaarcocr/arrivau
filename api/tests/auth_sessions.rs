@@ -29,6 +29,7 @@ fn config() -> ProductionConfig {
     let hash = HASH.get_or_init(|| hash_password(PASSWORD).unwrap());
     ProductionConfig {
         fleet_id: "test-fleet".into(),
+        teams: vec![],
         session_ttl_seconds: 300,
         accounts: vec![
             Account {
@@ -36,6 +37,8 @@ fn config() -> ProductionConfig {
                 username: "alice".into(),
                 name: "Alice fixture".into(),
                 role: "dispatcher".into(),
+                roles: None,
+                team_id: None,
                 password_hash: hash.clone(),
             },
             Account {
@@ -43,6 +46,8 @@ fn config() -> ProductionConfig {
                 username: "bob".into(),
                 name: "Bob fixture".into(),
                 role: "driver".into(),
+                roles: None,
+                team_id: None,
                 password_hash: hash.clone(),
             },
             Account {
@@ -50,6 +55,8 @@ fn config() -> ProductionConfig {
                 username: "carol".into(),
                 name: "Carol fixture".into(),
                 role: "driver".into(),
+                roles: None,
+                team_id: None,
                 password_hash: hash.clone(),
             },
         ],
@@ -128,6 +135,7 @@ async fn production_identity_roles_and_no_fixture_tokens_or_seed_drivers() {
         "demo-dispatcher",
         "demo-driver-1",
         "demo-driver-2",
+        "demo-dual",
         "",
         &"0".repeat(64),
     ] {
@@ -160,7 +168,7 @@ async fn production_identity_roles_and_no_fixture_tokens_or_seed_drivers() {
     let me: Value = server.get("/v1/session", &bob).await.json().await.unwrap();
     assert_eq!(
         me,
-        json!({"user":{"id":"driver-bob","name":"Bob fixture","role":"driver"},"expires_at":NOW+300})
+        json!({"user":{"id":"driver-bob","name":"Bob fixture","role":"driver","roles":["driver"],"team_id":"test-fleet","team_name":"test-fleet"},"expires_at":NOW+300})
     );
     let drivers: Vec<Value> = server
         .get("/v1/drivers", &alice)

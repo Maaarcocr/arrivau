@@ -2,26 +2,48 @@
 
 Pilot API base: your configured HTTPS root origin. Isolated demo base: `http://127.0.0.1:8080`. JSON uses snake_case. Timestamps are UTC Unix seconds (integers), coordinates decimal degrees. IDs are strings. All routes except `GET /health` and `POST /v1/session` require `Authorization: Bearer <token>`.
 
-Demo-only principals (enabled explicitly by `ARRIVAU_DEMO=1`): token `demo-dispatcher` has dispatcher role; `demo-driver-1` / `demo-driver-2` have driver role and matching IDs `driver-1` / `driver-2`. These tokens never authenticate in production mode. The API fails closed unless an explicit demo or fully configured production mode is selected. Bind loopback by default; managed hosts require both trusted-TLS-proxy and nonloopback opt-ins. Never expose raw HTTP or use public fixture tokens outside local development.
+Demo-only principals (enabled explicitly by `ARRIVAU_DEMO=1`): token `demo-dispatcher` has dispatcher role; `demo-driver-1` / `demo-driver-2` have driver role and matching IDs `driver-1` / `driver-2`. The additional `demo-dual` token identifies `dual-1` with both capabilities in the separate `demo-review` team. These tokens never authenticate in production mode. The API fails closed unless an explicit demo or fully configured production mode is selected. Bind loopback by default; managed hosts require both trusted-TLS-proxy and nonloopback opt-ins. Never expose raw HTTP or use public fixture tokens outside local development.
 
-Responses below are complete stable contracts. API errors: `{"error":"human-readable reason"}` with suitable 400/401/403/404/409/422/429 status. Responses have `Cache-Control: no-store`; request bodies are bounded to 16 KiB.
+Response examples retain the legacy fields; identity responses also include the additive fields described below. API errors: `{"error":"human-readable reason"}` with suitable 400/401/403/404/409/422/429 status. Responses have `Cache-Control: no-store`; request bodies are bounded to 16 KiB.
 
 - `POST /v1/session` (production, no bearer): body `{"username":"dispatcher","password":"<private password>"}` → 201 `{"token":"<opaque bearer>","expires_at":1791117600,"user":{"id":"dispatcher-1","name":"Centrale","role":"dispatcher"}}`. Invalid credentials return generic 401; throttling returns 429. Accounts are configured offline; no signup endpoint
 - `GET /v1/session` (authenticated) → `{"expires_at":1791117600,"user":{"id":"dispatcher-1","name":"Centrale","role":"dispatcher"}}`. Demo expiry is null
 - `DELETE /v1/session` (authenticated) → 204; revokes that production token immediately. Expired/revoked tokens return 401
 - `GET /health` → `{"status":"ok"}`
 - `GET /v1/me` → `{"id":"dispatcher-1","name":"Dispatcher","role":"dispatcher"}` (driver principals use matching IDs and name `Driver 1` etc.)
-- `GET /v1/drivers` (dispatcher) → array of Driver
+- `GET /v1/drivers` (dispatcher) → array of Driver in the caller’s team
 - `GET /v1/shift` (driver) → caller Driver, including persisted shift/location state
 - `POST /v1/shift` (driver) body `{"active":true,"capacity":2}` → Driver. Capacity integer 1–8. Ending a shift with assigned/onboard work is rejected (409).
 - `POST /v1/location` (driver) body `{"lat":36.7163,"lng":15.0908}` → Driver. Active shift required.
-- `GET /v1/deliveries` → array of Delivery; dispatcher sees all, driver sees their own only
+- `GET /v1/deliveries` → array of Delivery; dispatcher sees their team’s deliveries, driver-only accounts see their own only. Dual-capability accounts receive team deliveries, with the Corriere view filtering their own assignments
 - `POST /v1/deliveries` (dispatcher) → 201 Delivery. Body: `{"shop_name":"Pizzeria","pickup_address":"Via Roma 1, Pachino","pickup":{"lat":36.7163,"lng":15.0908},"dropoff_address":"Via Garibaldi 8, Pachino","dropoff":{"lat":36.7210,"lng":15.1000},"ready_at":1790874000,"deadline_at":1790877600,"load_units":1,"max_ride_seconds":1800}`. Validate nonempty bounded text, valid finite coordinates, deadline >= ready, load 1–8, max ride 60–7200 seconds. Created job initially pending and unassigned.
 - `POST /v1/deliveries/{id}/assign` (dispatcher) body `{"driver_id":"driver-1"}` → Delivery. Active shift/location reported within the last 300 seconds required; target driver's whole proposed route must be feasible before commit. Reassignment also rejects newly introduced violations in the previous driver's remaining route, while allowing already-present warnings so dispatch can recover work from stale or late routes. At most 32 outstanding stops per driver. Cannot reassign picked-up/completed jobs; return 409/422 rather than silently violating constraints.
 - `POST /v1/deliveries/{id}/status` (assigned driver only) body `{"status":"picked_up"}` or `{"status":"delivered"}` → Delivery. State transitions only assigned→picked_up→delivered. Pickup before ready_at rejected; delivery before pickup rejected. Driver may only act on their currently suggested next stop (409 otherwise), so app/route do not drift.
 - `GET /v1/route` (driver) → Route for caller
 - `GET /v1/drivers/{id}/route` (dispatcher) → Route
 - `GET /v1/deliveries/{id}/suggestions` (dispatcher) → array of Suggestion, feasible active drivers sorted by incremental travel seconds. Infeasible drivers and drivers whose location is older than 300 seconds are omitted.
+
+## Team identity and dual capabilities
+
+Every `user`/`/me` response adds `roles`, `team_id`, and `team_name`, for example:
+
+```json
+{"id":"review-operator","name":"App Review","role":"dispatcher","roles":["dispatcher","driver"],"team_id":"apple-review","team_name":"App Review"}
+```
+
+`role` remains a recognized primary role for legacy clients; the complete
+server-authoritative capability list is `roles`. An older client sees only its
+primary screen. Updated clients accept legacy identities that omit the new fields
+and retain their single-role behavior. They must not infer extra capabilities.
+The account/team cannot be changed by a request body or the native view switch.
+
+All protected reads, mutations and retry lookups are scoped to the authenticated
+team. Foreign driver/delivery IDs are unavailable even when guessed; suggestions,
+assignment, routes and location never cross teams. Both-capability accounts can
+use dispatcher endpoints and their own driver endpoints; `/status` still requires
+the same account to be the delivery’s assigned driver. Team isolation does not
+change the stable Driver/Delivery/Route JSON shapes below.
+
 
 Driver: `{"id":"driver-1","name":"Driver 1","active":true,"capacity":2,"location":{"lat":36.7163,"lng":15.0908},"location_updated_at":1790874000}`. location and location_updated_at can be null. Start/stop shift and location updates persisted.
 
@@ -36,6 +58,8 @@ The app refreshes every 5 seconds while foregrounded, plus after writes. Push an
 
 ## Retry and session contract
 
-`POST /v1/deliveries`, `POST /v1/deliveries/{id}/assign` and `POST /v1/deliveries/{id}/status` accept `Idempotency-Key` (use a UUID). A key is scoped to the authenticated principal, method/path and canonical request body. The original response is committed in the same SQLite transaction as the domain write and survives restart. Repeating the exact request returns the original response; reusing a key for a different operation/body returns 409. Keep the same key while the result is uncertain. This is not an offline queue. Shift changes set a desired state; location reporting uses the next fresh sample.
+`POST /v1/deliveries`, `POST /v1/deliveries/{id}/assign` and `POST /v1/deliveries/{id}/status` accept `Idempotency-Key` (use a UUID). A key is scoped to the authenticated team and principal, method/path and canonical request body. The original response is committed in the same SQLite transaction as the domain write and survives restart. Repeating the exact request returns the original response; reusing a key for a different operation/body returns 409. Keep the same key while the result is uncertain. This is not an offline queue. Shift changes set a desired state; location reporting uses the next fresh sample.
 
-The native app persists an uncertain creation's exact body/key scoped to HTTPS origin and user ID, and retains assignment/status keys while the current process reconciles. It does not replay credentials across redirects. The app never infers the role from a login choice in pilot mode. Tokens expire at the server's Unix timestamp; the app clears private state and stops local GPS on expiry/401/signout. Remote revocation cannot be guaranteed while the phone is offline, so session TTL and operator revocation remain part of the safety boundary.
+The native app persists an uncertain creation's exact body/key scoped to HTTPS origin, team ID and user ID, and retains assignment/status keys while the current process reconciles. It does not replay credentials across redirects. The app never infers capabilities or membership from a login or view choice in pilot mode. Tokens expire at the server's Unix timestamp; the app clears private state and stops local GPS on expiry/401/signout. Remote revocation cannot be guaranteed while the phone is offline, so session TTL and operator revocation remain part of the safety boundary.
+
+A legacy endpoint/account-only pending creation is quarantined when explicit team identity becomes available: the app shows its original details and blocks creation/retry until the user has verified the server outcome and deliberately clears that local recovery record. It never silently replays an unscoped request into a new team.

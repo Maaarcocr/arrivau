@@ -2,6 +2,51 @@ import XCTest
 @testable import Arrivau
 
 final class ModelTests: XCTestCase {
+    func testLegacyIdentityDecodesOnlyItsSingleRole() throws {
+        for role in ["dispatcher", "driver"] {
+            let data = Data("{\"id\":\"account\",\"name\":\"Persona\",\"role\":\"\(role)\"}".utf8)
+            let user = try APIClient.decoder().decode(Principal.self, from: data)
+            XCTAssertEqual(user.roles, [role])
+            XCTAssertEqual(user.availableRoles.count, 1)
+            XCTAssertEqual(user.serverRole?.rawValue, role)
+            XCTAssertNil(user.teamId)
+            XCTAssertNil(user.teamTitle)
+        }
+    }
+    func testDualIdentityUsesOnlyServerCapabilitiesAndTeam() throws {
+        let data = Data(#"{"id":"reviewer","name":"Revisione","role":"dispatcher","roles":["dispatcher","driver"],"team_id":"review","team_name":"Squadra revisione"}"#.utf8)
+        let user = try APIClient.decoder().decode(Principal.self, from: data)
+        XCTAssertEqual(user.availableRoles, [.dispatcher, .driver])
+        XCTAssertEqual(user.serverRole, .dispatcher)
+        XCTAssertEqual(user.teamId, "review")
+        XCTAssertEqual(user.teamTitle, "Squadra revisione")
+        XCTAssertEqual(try APIClient.decoder().decode(Principal.self, from: APIClient.encoder().encode(user)), user)
+        let narrowed = Principal(id: "reviewer", name: "Revisione", role: "dispatcher", roles: ["driver"], teamId: "review")
+        XCTAssertEqual(narrowed.serverRole, .driver, "Legacy primary role must never expand explicit capabilities")
+        XCTAssertFalse(narrowed.supports(.dispatcher))
+        XCTAssertNil(Principal(id: "x", name: "X", role: "dispatcher", roles: []).serverRole)
+        XCTAssertNil(Principal(id: "x", name: "X", role: "dispatcher", roles: ["admin"]).serverRole)
+    }
+    func testMalformedCapabilitiesNeverFallBackToLegacyPrivilege() throws {
+        for roles in ["null", "123", "\"driver\"", "[null]"] {
+            let data = Data("{\"id\":\"x\",\"name\":\"X\",\"role\":\"dispatcher\",\"roles\":\(roles)}".utf8)
+            XCTAssertThrowsError(try APIClient.decoder().decode(Principal.self, from: data))
+        }
+        let empty = Data(#"{"id":"x","name":"X","role":"dispatcher","roles":[]}"#.utf8)
+        XCTAssertNil(try APIClient.decoder().decode(Principal.self, from: empty).serverRole)
+        for team in ["null", "\"\"", "\"   \""] {
+            let data = Data("{\"id\":\"x\",\"name\":\"X\",\"role\":\"dispatcher\",\"team_id\":\(team)}".utf8)
+            XCTAssertThrowsError(try APIClient.decoder().decode(Principal.self, from: data))
+        }
+    }
+    func testRecoveryScopeIncludesTeamAccountEndpointWithoutDelimiterCollisions() {
+        let first = Principal(id: "a|b", name: "X", role: "dispatcher", teamId: "review")
+        let second = Principal(id: "b", name: "X", role: "dispatcher", teamId: "review|a")
+        let firstScope = CreationScope.current(endpoint: "https://api.example", user: first)
+        XCTAssertNotEqual(firstScope, CreationScope.current(endpoint: "https://api.example", user: second))
+        XCTAssertNotEqual(firstScope, CreationScope.current(endpoint: "https://other.example", user: first))
+        XCTAssertEqual(CreationScope.current(endpoint: "https://api.example", user: Principal(id: "x", name: "X", role: "dispatcher")), "https://api.example|x")
+    }
     func testDecodesSnakeCaseEpochContract() throws {
         let delivery = try APIClient.decoder().decode(Delivery.self, from: Fixtures.delivery)
         XCTAssertEqual(delivery.shopName, "Pizzeria")

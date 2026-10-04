@@ -20,7 +20,17 @@ struct PendingCreation: Codable, Equatable {
     let delivery: NewDelivery
 }
 
-/// No password is persisted. Unconfirmed creation requests are scoped to endpoint + server identity.
+enum CreationScope {
+    static func legacy(endpoint: String, accountId: String) -> String { "\(endpoint)|\(accountId)" }
+    static func current(endpoint: String, user: Principal) -> String {
+        guard let teamId = user.teamId else { return legacy(endpoint: endpoint, accountId: user.id) }
+        // Length-prefix each UTF-8 component so identifiers containing separators cannot collide.
+        return "v2:" + [endpoint, teamId, user.id].map { "\($0.utf8.count):\($0)" }.joined()
+    }
+}
+
+/// No password is persisted. Recovery is bound to endpoint + team + authenticated account.
+/// Legacy unscoped records are never silently replayed into a newly declared team.
 protocol SessionStorage {
     func loadSession() throws -> SavedSession?
     func saveSession(_ value: SavedSession) throws

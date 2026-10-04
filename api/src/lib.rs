@@ -66,7 +66,7 @@ impl AppState {
         if !demo_enabled {
             return Err("Explicit demo opt-in is required; use open_production for configured pilot authentication".into());
         }
-        let db = db::open(path, "demo").map_err(|e| e.message)?;
+        let db = db::open(path, "demo", "demo", &[]).map_err(|e| e.message)?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
             clock,
@@ -91,8 +91,17 @@ impl AppState {
         if !path.as_ref().is_absolute() {
             return Err("Production requires an absolute persistent database path".into());
         }
-        let mut db =
-            db::open(path, &format!("production:{}", config.fleet_id)).map_err(|e| e.message)?;
+        let mut db = db::open(
+            path,
+            &format!("production:{}", config.fleet_id),
+            &config.fleet_id,
+            &config
+                .accounts
+                .iter()
+                .map(|a| (a.id.as_str(), a.team_id(&config)))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| e.message)?;
         auth::initialize(&mut db, &config).map_err(|e| e.message)?;
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
@@ -114,10 +123,16 @@ struct Principal {
     id: String,
     name: String,
     role: String,
+    roles: Vec<String>,
+    team_id: String,
+    team_name: String,
 }
 impl Principal {
+    fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|r| r == role)
+    }
     fn require(&self, role: &str) -> ApiResult<()> {
-        if self.role == role {
+        if self.has_role(role) {
             Ok(())
         } else {
             Err(ApiError::new(
@@ -141,10 +156,39 @@ async fn authenticate(
         .ok_or_else(auth::unauthorized)?;
     let session = match state.authentication.as_ref() {
         Authentication::Demo => {
-            let (id, name, role) = match token {
-                "demo-dispatcher" => ("dispatcher-1", "Dispatcher", "dispatcher"),
-                "demo-driver-1" => ("driver-1", "Driver 1", "driver"),
-                "demo-driver-2" => ("driver-2", "Driver 2", "driver"),
+            let (id, name, role, team_id, team_name, roles) = match token {
+                "demo-dispatcher" => (
+                    "dispatcher-1",
+                    "Dispatcher",
+                    "dispatcher",
+                    "demo",
+                    "Squadra demo",
+                    vec!["dispatcher".into()],
+                ),
+                "demo-driver-1" => (
+                    "driver-1",
+                    "Driver 1",
+                    "driver",
+                    "demo",
+                    "Squadra demo",
+                    vec!["driver".into()],
+                ),
+                "demo-driver-2" => (
+                    "driver-2",
+                    "Driver 2",
+                    "driver",
+                    "demo",
+                    "Squadra demo",
+                    vec!["driver".into()],
+                ),
+                "demo-dual" => (
+                    "dual-1",
+                    "Revisione Apple",
+                    "dispatcher",
+                    "demo-review",
+                    "Squadra revisione",
+                    vec!["dispatcher".into(), "driver".into()],
+                ),
                 _ => return Err(auth::unauthorized()),
             };
             auth::Session {
@@ -152,6 +196,9 @@ async fn authenticate(
                     id: id.into(),
                     name: name.into(),
                     role: role.into(),
+                    roles,
+                    team_id: team_id.into(),
+                    team_name: team_name.into(),
                 },
                 expires_at: None,
                 token_hash: None,
@@ -284,10 +331,12 @@ async fn login(
     let db = state.db()?;
     db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now])?;
     db.execute("DELETE FROM sessions WHERE account_id=?1 AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE account_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 9)", [&account.id])?;
-    db.execute("INSERT INTO sessions(token_hash,account_id,account_fingerprint,expires_at,created_at) VALUES (?1,?2,?3,?4,?5)",params![auth::digest(&token),account.id,account.fingerprint(),expires_at,now])?;
+    db.execute("INSERT INTO sessions(token_hash,account_id,account_fingerprint,expires_at,created_at,team_id) VALUES (?1,?2,?3,?4,?5,?6)",params![auth::digest(&token),account.id,account.fingerprint(config),expires_at,now,account.team_id(config)])?;
     Ok((
         StatusCode::CREATED,
-        Json(serde_json::json!({"token":token,"expires_at":expires_at,"user":account.principal()})),
+        Json(
+            serde_json::json!({"token":token,"expires_at":expires_at,"user":account.principal(config)}),
+        ),
     ))
 }
 
@@ -321,7 +370,7 @@ async fn list_drivers(
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<Vec<Driver>>> {
     principal.require("dispatcher")?;
-    Ok(Json(db::drivers(&*state.db()?)?))
+    Ok(Json(db::drivers(&*state.db()?, &principal.team_id)?))
 }
 
 async fn get_shift(
@@ -330,7 +379,7 @@ async fn get_shift(
 ) -> ApiResult<Json<Driver>> {
     principal.require("driver")?;
     let db = state.db()?;
-    Ok(Json(db::driver(&db, &principal.id)?))
+    Ok(Json(db::driver(&db, &principal.team_id, &principal.id)?))
 }
 
 #[derive(Deserialize)]
@@ -350,8 +399,8 @@ async fn shift(
         return Err(ApiError::bad_request("Capacity must be between 1 and 8"));
     }
     let db = state.db()?;
-    let mut driver = db::driver(&db, &principal.id)?;
-    let jobs = db::deliveries(&db)?;
+    let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
+    let jobs = db::deliveries(&db, &principal.team_id)?;
     let has_work = jobs.iter().any(|j| {
         j.driver_id.as_deref() == Some(&principal.id)
             && matches!(
@@ -368,7 +417,7 @@ async fn shift(
     driver.capacity = input.capacity;
     let route = planner::evaluate(
         &driver,
-        &db::route_keys(&db, &driver.id)?,
+        &db::route_keys(&db, &principal.team_id, &driver.id)?,
         &jobs,
         state.clock.now(),
     );
@@ -381,7 +430,7 @@ async fn shift(
             "Capacity is too small for the committed route",
         ));
     }
-    db::save_driver(&db, &driver)?;
+    db::save_driver(&db, &principal.team_id, &driver)?;
     Ok(Json(driver))
 }
 
@@ -398,7 +447,7 @@ async fn location(
         ));
     }
     let db = state.db()?;
-    let mut driver = db::driver(&db, &principal.id)?;
+    let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
     if !driver.active {
         return Err(ApiError::conflict(
             "Start a shift before reporting location",
@@ -406,7 +455,7 @@ async fn location(
     }
     driver.location = Some(coordinate);
     driver.location_updated_at = Some(state.clock.now());
-    db::save_driver(&db, &driver)?;
+    db::save_driver(&db, &principal.team_id, &driver)?;
     Ok(Json(driver))
 }
 
@@ -414,8 +463,8 @@ async fn list_deliveries(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<Vec<Delivery>>> {
-    let mut jobs = db::deliveries(&*state.db()?)?;
-    if principal.role == "driver" {
+    let mut jobs = db::deliveries(&*state.db()?, &principal.team_id)?;
+    if !principal.has_role("dispatcher") {
         jobs.retain(|j| j.driver_id.as_deref() == Some(principal.id.as_str()));
     }
     Ok(Json(jobs))
@@ -449,8 +498,8 @@ impl Idempotency {
     fn replay(&self, db: &Connection, principal: &Principal) -> ApiResult<Option<Delivery>> {
         let row: Option<(String, String)> = db
             .query_row(
-                "SELECT request_hash,response FROM idempotency WHERE principal_id=?1 AND key=?2",
-                params![principal.id, self.key],
+                "SELECT request_hash,response FROM idempotency WHERE principal_id=?1 AND key=?2 AND team_id=?3",
+                params![principal.id, self.key, principal.team_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
@@ -458,18 +507,23 @@ impl Idempotency {
             Some((hash, _)) if hash != self.request_hash => Err(ApiError::conflict(
                 "Idempotency-Key was already used for a different request",
             )),
-            Some((_, body)) => Ok(Some(serde_json::from_str(&body)?)),
+            Some((_, body)) => {
+                let response: Delivery = serde_json::from_str(&body)?;
+                db::delivery(db, &principal.team_id, &response.id)?;
+                Ok(Some(response))
+            }
             None => Ok(None),
         }
     }
     fn save(&self, db: &Connection, principal: &Principal, response: &Delivery) -> ApiResult<()> {
         db.execute(
-            "INSERT INTO idempotency(principal_id,key,request_hash,response) VALUES (?1,?2,?3,?4)",
+            "INSERT INTO idempotency(principal_id,key,request_hash,response,team_id) VALUES (?1,?2,?3,?4,?5)",
             params![
                 principal.id,
                 self.key,
                 self.request_hash,
-                serde_json::to_string(response)?
+                serde_json::to_string(response)?,
+                principal.team_id
             ],
         )?;
         Ok(())
@@ -497,7 +551,7 @@ async fn create_delivery(
         return Ok((StatusCode::CREATED, Json(saved)));
     }
     let delivery = input.into_delivery(state.clock.now());
-    db::save_delivery(&tx, &delivery)?;
+    db::save_delivery(&tx, &principal.team_id, &delivery)?;
     if let Some(key) = key {
         key.save(&tx, &principal, &delivery)?;
     }
@@ -523,6 +577,8 @@ async fn assign(
     let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/assign"), &input)?;
     let mut db = state.db()?;
     let tx = db.transaction()?;
+    let mut job = db::delivery(&tx, &principal.team_id, &id)?;
+    let driver = db::driver(&tx, &principal.team_id, &input.driver_id)?;
     if let Some(saved) = key
         .as_ref()
         .map(|k| k.replay(&tx, &principal))
@@ -531,7 +587,6 @@ async fn assign(
     {
         return Ok(Json(saved));
     }
-    let mut job = db::delivery(&tx, &id)?;
     if matches!(
         job.status,
         DeliveryStatus::PickedUp | DeliveryStatus::Delivered
@@ -540,7 +595,6 @@ async fn assign(
             "Picked-up and delivered jobs cannot be reassigned",
         ));
     }
-    let driver = db::driver(&tx, &input.driver_id)?;
     if !driver.active || driver.location.is_none() {
         return Err(ApiError::conflict(
             "Driver must be on shift with a reported location",
@@ -551,8 +605,8 @@ async fn assign(
             "Driver location is older than 5 minutes; request an update",
         ));
     }
-    let jobs = db::deliveries(&tx)?;
-    let current = db::route_keys(&tx, &driver.id)?;
+    let jobs = db::deliveries(&tx, &principal.team_id)?;
+    let current = db::route_keys(&tx, &principal.team_id, &driver.id)?;
     if current
         .iter()
         .filter(|key| key.delivery_id != job.id)
@@ -570,16 +624,23 @@ async fn assign(
                 "No feasible insertion: check capacity, readiness, deadline, and maximum ride time",
             )
         })?;
-    if let Some(change) = route_after_removal(&tx, &job, &driver.id, &jobs, state.clock.now())? {
+    if let Some(change) = route_after_removal(
+        &tx,
+        &principal.team_id,
+        &job,
+        &driver.id,
+        &jobs,
+        state.clock.now(),
+    )? {
         if change.introduces_violation {
             return Err(ApiError::unprocessable("Reassignment introduces a new constraint violation in the previous driver's remaining route"));
         }
-        db::save_route(&tx, &change.driver_id, &change.keys)?;
+        db::save_route(&tx, &principal.team_id, &change.driver_id, &change.keys)?;
     }
     job.driver_id = Some(driver.id.clone());
     job.status = DeliveryStatus::Assigned;
-    db::save_delivery(&tx, &job)?;
-    db::save_route(&tx, &driver.id, &keys)?;
+    db::save_delivery(&tx, &principal.team_id, &job)?;
+    db::save_route(&tx, &principal.team_id, &driver.id, &keys)?;
     if let Some(key) = key {
         key.save(&tx, &principal, &job)?;
     }
@@ -613,7 +674,7 @@ async fn status(
     let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/status"), &input)?;
     let mut db = state.db()?;
     let tx = db.transaction()?;
-    let mut job = db::delivery(&tx, &id)?;
+    let mut job = db::delivery(&tx, &principal.team_id, &id)?;
     if job.driver_id.as_deref() != Some(principal.id.as_str()) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -628,7 +689,7 @@ async fn status(
     {
         return Ok(Json(saved));
     }
-    let driver = db::driver(&tx, &principal.id)?;
+    let driver = db::driver(&tx, &principal.team_id, &principal.id)?;
     if !driver.active {
         return Err(ApiError::conflict("Driver must be on shift"));
     }
@@ -637,7 +698,7 @@ async fn status(
         (DeliveryStatus::PickedUp, DeliveryStatus::Delivered) => StopKind::Dropoff,
         _ => return Err(ApiError::conflict("Invalid delivery status transition")),
     };
-    let mut keys = db::route_keys(&tx, &principal.id)?;
+    let mut keys = db::route_keys(&tx, &principal.team_id, &principal.id)?;
     if keys.first()
         != Some(&StopKey {
             delivery_id: job.id.clone(),
@@ -652,7 +713,7 @@ async fn status(
             if now < job.ready_at {
                 return Err(ApiError::conflict("Delivery is not ready for pickup"));
             }
-            let onboard: i32 = db::deliveries(&tx)?
+            let onboard: i32 = db::deliveries(&tx, &principal.team_id)?
                 .iter()
                 .filter(|j| j.driver_id == job.driver_id && j.status == DeliveryStatus::PickedUp)
                 .map(|j| j.load_units)
@@ -668,8 +729,8 @@ async fn status(
     }
     job.status = input.status;
     keys.remove(0);
-    db::save_delivery(&tx, &job)?;
-    db::save_route(&tx, &principal.id, &keys)?;
+    db::save_delivery(&tx, &principal.team_id, &job)?;
+    db::save_route(&tx, &principal.team_id, &principal.id, &keys)?;
     if let Some(key) = key {
         key.save(&tx, &principal, &job)?;
     }
@@ -688,6 +749,7 @@ struct SourceRouteChange {
 }
 fn route_after_removal(
     db: &Connection,
+    team_id: &str,
     candidate: &Delivery,
     target_driver: &str,
     jobs: &[Delivery],
@@ -699,8 +761,8 @@ fn route_after_removal(
     if source_id == target_driver {
         return Ok(None);
     }
-    let source = db::driver(db, source_id)?;
-    let mut keys = db::route_keys(db, source_id)?;
+    let source = db::driver(db, team_id, source_id)?;
+    let mut keys = db::route_keys(db, team_id, source_id)?;
     let before = planner::evaluate(&source, &keys, jobs, now);
     keys.retain(|key| key.delivery_id != candidate.id);
     let remaining: Vec<Delivery> = jobs
@@ -720,13 +782,13 @@ fn route_after_removal(
     }))
 }
 
-fn get_route(state: &AppState, driver_id: &str) -> ApiResult<Route> {
+fn get_route(state: &AppState, team_id: &str, driver_id: &str) -> ApiResult<Route> {
     let db = state.db()?;
-    let driver = db::driver(&db, driver_id)?;
+    let driver = db::driver(&db, team_id, driver_id)?;
     Ok(planner::evaluate(
         &driver,
-        &db::route_keys(&db, driver_id)?,
-        &db::deliveries(&db)?,
+        &db::route_keys(&db, team_id, driver_id)?,
+        &db::deliveries(&db, team_id)?,
         state.clock.now(),
     ))
 }
@@ -735,7 +797,7 @@ async fn own_route(
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<Route>> {
     principal.require("driver")?;
-    Ok(Json(get_route(&state, &principal.id)?))
+    Ok(Json(get_route(&state, &principal.team_id, &principal.id)?))
 }
 async fn driver_route(
     State(state): State<AppState>,
@@ -744,7 +806,7 @@ async fn driver_route(
 ) -> ApiResult<Json<Route>> {
     principal.require("dispatcher")?;
     let id = path_id(path)?;
-    Ok(Json(get_route(&state, &id)?))
+    Ok(Json(get_route(&state, &principal.team_id, &id)?))
 }
 async fn suggestions(
     State(state): State<AppState>,
@@ -754,7 +816,7 @@ async fn suggestions(
     principal.require("dispatcher")?;
     let id = path_id(path)?;
     let db = state.db()?;
-    let job = db::delivery(&db, &id)?;
+    let job = db::delivery(&db, &principal.team_id, &id)?;
     if matches!(
         job.status,
         DeliveryStatus::PickedUp | DeliveryStatus::Delivered
@@ -763,11 +825,11 @@ async fn suggestions(
             "Suggestions are only available before pickup",
         ));
     }
-    let jobs = db::deliveries(&db)?;
+    let jobs = db::deliveries(&db, &principal.team_id)?;
     let now = state.clock.now();
     let mut result = Vec::new();
-    for driver in db::drivers(&db)? {
-        let current = db::route_keys(&db, &driver.id)?;
+    for driver in db::drivers(&db, &principal.team_id)? {
+        let current = db::route_keys(&db, &principal.team_id, &driver.id)?;
         if current
             .iter()
             .filter(|key| key.delivery_id != job.id)
@@ -777,7 +839,7 @@ async fn suggestions(
         {
             continue;
         }
-        if route_after_removal(&db, &job, &driver.id, &jobs, now)?
+        if route_after_removal(&db, &principal.team_id, &job, &driver.id, &jobs, now)?
             .is_some_and(|change| change.introduces_violation)
         {
             continue;

@@ -18,7 +18,7 @@ def verify(path):
     if privacy.get('NSPrivacyTracking') is not False:
         raise ValueError('Privacy manifest is missing or inconsistent')
     binary = (bundle/info['CFBundleExecutable']).read_bytes()
-    if any(token in binary for token in [b'demo-dispatcher', b'demo-driver-1', b'demo-driver-2']):
+    if any(token in binary for token in [b'demo-dispatcher', b'demo-driver-1', b'demo-driver-2', b'demo-dual']):
         raise ValueError('A public demo bearer token is present in the Release binary')
     if not info.get('CFBundleShortVersionString') or not info.get('CFBundleVersion'):
         raise ValueError('Version/build metadata is missing')

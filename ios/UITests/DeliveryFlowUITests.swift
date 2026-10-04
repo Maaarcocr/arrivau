@@ -6,6 +6,8 @@ final class DeliveryFlowUITests: XCTestCase {
     private var app: XCUIApplication!
     private var apiURL: URL!
     private let shopName = "Pizzeria Pachino Demo"
+    private let dualToken = "demo-dual"
+    private let dualDriverID = "dual-1"
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -194,6 +196,224 @@ final class DeliveryFlowUITests: XCTestCase {
         try verifyPendingDeliveryCanBeReopened()
     }
 
+    @MainActor
+    func testDualCapabilityAccountKeepsItsShiftAndRouteAcrossViewSwitches() throws {
+        // This fixture has its own team so the existing single-role lifecycle can run
+        // before or after this test without changing either test's delivery counts.
+        let legacyDeliveries = try readDeliveriesFromServer()
+        let legacyDrivers: [ServerDriver] = try readServer("v1/drivers", token: "demo-dispatcher")
+        let identity: ServerPrincipal = try readServer("v1/me", token: dualToken)
+        XCTAssertEqual(identity.id, dualDriverID)
+        XCTAssertEqual(Set(identity.roles), Set(["dispatcher", "driver"]))
+        XCTAssertEqual(identity.teamId, "demo-review")
+        XCTAssertEqual(identity.teamName, "Squadra revisione")
+        XCTAssertTrue(try readDeliveriesFromServer(token: dualToken).isEmpty, "Run against a fresh demo database")
+        let initialDriver = try readDriverFromServer(token: dualToken)
+        XCTAssertEqual(initialDriver.id, identity.id)
+        XCTAssertFalse(initialDriver.active)
+        XCTAssertNil(initialDriver.location)
+        XCTAssertNil(initialDriver.locationUpdatedAt)
+
+        // Authenticate once. Every change below uses the same account's view picker,
+        // never the Debug account chooser or another account's credentials.
+        login("dual")
+        assertDualAccountView("Centrale")
+        XCTAssertFalse(element("account_location_sharing").exists)
+        XCTAssertFalse(app.buttons["stop_account_location"].exists)
+        captureScreen("dual-account-centrale", showing: app.segmentedControls["role_picker"])
+        selectAccountView("Corriere")
+        waitForLabelContaining(app.buttons["shift_settings"], "Fuori turno")
+        assertRoutineDriverHome()
+        assertSharingSettings(foreground: "0", background: "0", enabled: false)
+        interruptAndResume()
+        assertDualAccountView("Corriere")
+        for _ in 0..<2 {
+            selectAccountView("Centrale")
+            selectAccountView("Corriere")
+            waitForLabelContaining(app.buttons["shift_settings"], "Fuori turno")
+            XCTAssertEqual(try readDriverFromServer(token: dualToken), initialDriver,
+                           "Choosing Corriere must not start a shift or share a location")
+        }
+
+        let startedAt = Int(Date().timeIntervalSince1970)
+        tap(app.buttons["toggle_shift"])
+        waitForLabelContaining(app.buttons["shift_settings"], "In turno")
+        try waitForServerLocation(since: startedAt, token: dualToken)
+        tap(app.buttons["shift_settings"])
+        assertSwitch(app.switches["share_location"], value: "1")
+        assertSwitch(app.switches["background_location"], value: "0")
+        setSwitch(app.switches["background_location"], to: true)
+        tap(app.buttons["close_shift_settings"])
+        interruptAndResume()
+        assertSharingSettings(foreground: "1", background: "1")
+        selectAccountView("Centrale")
+        assertAccountSharingVisible()
+        interruptAndResume()
+        assertDualAccountView("Centrale")
+        assertAccountSharingVisible()
+        let retainedDriver = try readDriverFromServer(token: dualToken)
+        XCTAssertEqual(retainedDriver.id, identity.id)
+        XCTAssertTrue(retainedDriver.active, "Switching views must retain the same driver's active shift")
+        selectAccountView("Corriere")
+        waitForLabelContaining(app.buttons["shift_settings"], "In turno")
+        assertSharingSettings(foreground: "1", background: "1")
+        XCTAssertFalse(app.buttons["resume_location"].exists,
+                       "Same-account view changes preserve explicitly enabled location sharing")
+        selectAccountView("Centrale")
+        tap(app.buttons["stop_account_location"])
+        waitUntilAbsent(app.buttons["stop_account_location"])
+        waitUntilAbsent(element("account_location_sharing"))
+        selectAccountView("Corriere")
+        assertPausedDualDriver()
+        // Refresh the explicit opt-in before assignment: a slow simulator must not
+        // depend on the initial sample remaining within the server's freshness window.
+        let assignmentLocationAt = Int(Date().timeIntervalSince1970)
+        tap(app.buttons["resume_location"])
+        waitUntilAbsent(app.buttons["resume_location"])
+        try waitForServerLocation(since: assignmentLocationAt, token: dualToken)
+        assertSharingSettings(foreground: "1", background: "0")
+        selectAccountView("Centrale")
+        assertAccountSharingVisible()
+
+        // A dual-capability account may assign itself, but cannot see demo-team's
+        // drivers or deliveries. Address selection and all writes use the real API.
+        let teamDrivers: [ServerDriver] = try readServer("v1/drivers", token: dualToken)
+        XCTAssertEqual(teamDrivers.map(\.id), [dualDriverID])
+        tap(app.buttons["create_delivery"])
+        assertEmptyDeliveryForm()
+        selectAddress("choose_pickup", query: "Pizzeria", expected: shopName)
+        selectAddress("choose_dropoff", query: "Garibaldi", expected: "Via Garibaldi 8")
+        tap(app.buttons["submit_delivery"])
+        waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
+        let assignSelf = app.buttons["assign_\(dualDriverID)"]
+        XCTAssertTrue(assignSelf.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["assign_driver-1"].exists)
+        XCTAssertFalse(app.buttons["assign_driver-2"].exists)
+        let created = try readDeliveriesFromServer(token: dualToken)
+        XCTAssertEqual(created.count, 1)
+        let delivery = try XCTUnwrap(created.first)
+        XCTAssertEqual(delivery.shopName, shopName)
+        XCTAssertEqual(delivery.status, "pending")
+        assertFixtureAddresses(delivery)
+        tap(assignSelf)
+        waitUntilAbsent(app.buttons["done_delivery"])
+        let deliveryRow = app.buttons["delivery_\(delivery.id)"]
+        waitForLabelContaining(deliveryRow, "Assegnata")
+        try assertServerStatus(delivery.id, "assigned", token: dualToken)
+        let assigned = try XCTUnwrap(readDeliveriesFromServer(token: dualToken).first)
+        XCTAssertEqual(assigned.driverId, identity.id, "Assignment must belong to the authenticated driver's own identity")
+        try assertDualRoute(delivery.id, kinds: ["pickup", "dropoff"])
+        tap(app.buttons["stop_account_location"])
+        waitUntilAbsent(app.buttons["stop_account_location"])
+        waitUntilAbsent(element("account_location_sharing"))
+        let pausedDriver = try readDriverFromServer(token: dualToken)
+
+        // The picker stays accessible from a pushed job. Changing views must reset
+        // that navigation stack instead of resurfacing a stale detail on return.
+        tap(deliveryRow)
+        waitForLabel(app.staticTexts["delivery_status"], "Assegnata")
+        selectAccountView("Corriere")
+        waitUntilAbsent(app.staticTexts["delivery_status"])
+        assertPausedDualDriver()
+        XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["confirm_dropoff"].exists)
+        waitForLabelContaining(app.staticTexts["next_stop_title"], shopName)
+        let pickupTitle = app.staticTexts["next_stop_title"].label
+        captureScreen("dual-account-corriere", showing: app.staticTexts["next_stop_title"])
+        for _ in 0..<2 {
+            selectAccountView("Centrale")
+            waitForLabelContaining(deliveryRow, "Assegnata")
+            interruptAndResume()
+            assertDualAccountView("Centrale")
+            selectAccountView("Corriere")
+            interruptAndResume()
+            assertPausedDualDriver()
+            waitForLabel(app.staticTexts["next_stop_title"], pickupTitle)
+            XCTAssertTrue(app.buttons["confirm_pickup"].exists)
+            XCTAssertFalse(app.buttons["confirm_dropoff"].exists)
+            try assertDualRoute(delivery.id, kinds: ["pickup", "dropoff"])
+            XCTAssertEqual(try readDriverFromServer(token: dualToken), pausedDriver,
+                           "Repeated switching and foregrounding must not silently restore either location opt-in")
+        }
+
+        // Completing work remains possible with sharing paused. A view switch must
+        // not rewind the committed next stop or restore the old pickup action.
+        tap(app.buttons["confirm_pickup"])
+        XCTAssertTrue(app.buttons["confirm_dropoff"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["confirm_pickup"].exists)
+        try assertServerStatus(delivery.id, "picked_up", token: dualToken)
+        try assertDualRoute(delivery.id, kinds: ["dropoff"])
+        selectAccountView("Centrale")
+        waitForLabelContaining(deliveryRow, "In consegna")
+        selectAccountView("Corriere")
+        assertPausedDualDriver()
+        XCTAssertTrue(app.buttons["confirm_dropoff"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["confirm_pickup"].exists)
+
+        // Resuming is explicit and restores foreground sharing only, even though
+        // background sharing had been enabled earlier in this same login.
+        let resumedAt = Int(Date().timeIntervalSince1970)
+        tap(app.buttons["resume_location"])
+        waitUntilAbsent(app.buttons["resume_location"])
+        try waitForServerLocation(since: resumedAt, token: dualToken)
+        assertSharingSettings(foreground: "1", background: "0")
+        let returnedAt = Int(Date().timeIntervalSince1970)
+        interruptAndResume()
+        XCTAssertTrue(app.buttons["confirm_dropoff"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["confirm_pickup"].exists)
+        XCTAssertFalse(app.buttons["resume_location"].exists)
+        try waitForServerLocation(since: returnedAt, token: dualToken)
+        try assertDualRoute(delivery.id, kinds: ["dropoff"])
+        selectAccountView("Centrale")
+        assertAccountSharingVisible()
+        let centraleReturnedAt = Int(Date().timeIntervalSince1970)
+        interruptAndResume()
+        assertAccountSharingVisible()
+        try waitForServerLocation(since: centraleReturnedAt, token: dualToken)
+        selectAccountView("Corriere")
+        assertSharingSettings(foreground: "1", background: "0")
+        XCTAssertFalse(app.buttons["resume_location"].exists)
+        XCTAssertTrue(app.buttons["confirm_dropoff"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["confirm_pickup"].exists)
+
+        tap(app.buttons["confirm_dropoff"])
+        XCTAssertTrue(app.staticTexts["empty_route"].waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["confirm_pickup"].exists)
+        XCTAssertFalse(app.buttons["confirm_dropoff"].exists)
+        try assertServerStatus(delivery.id, "delivered", token: dualToken)
+        try assertDualRoute(delivery.id, kinds: [])
+        tap(app.buttons["shift_settings"])
+        tap(app.buttons["toggle_shift"])
+        waitUntilAbsent(app.buttons["close_shift_settings"])
+        waitForLabelContaining(app.buttons["shift_settings"], "Fuori turno")
+        assertSharingSettings(foreground: "0", background: "0", enabled: false)
+        XCTAssertFalse(try readDriverFromServer(token: dualToken).active)
+        let finalIdentity: ServerPrincipal = try readServer("v1/me", token: dualToken)
+        XCTAssertEqual(finalIdentity, identity)
+        XCTAssertEqual(try readDeliveriesFromServer(), legacyDeliveries,
+                       "The review-team lifecycle must not add or change demo-team deliveries")
+        let finalLegacyDrivers: [ServerDriver] = try readServer("v1/drivers", token: "demo-dispatcher")
+        XCTAssertEqual(finalLegacyDrivers, legacyDrivers,
+                       "Switching views must never start, stop or locate a legacy demo driver")
+
+        switchRole()
+        XCTAssertTrue(app.buttons["login_dual"].exists, "Logout still returns to the Debug account chooser")
+        XCTAssertFalse(element("role_picker").exists)
+    }
+
+    func testSingleCapabilityAccountsHaveNoInSessionRolePicker() {
+        for account in ["dispatcher", "driver1", "driver2"] {
+            login(account)
+            XCTAssertFalse(element("role_picker").exists, "Only multi-capability accounts may switch views")
+            if account == "dispatcher" {
+                XCTAssertFalse(app.buttons["shift_settings"].exists)
+            } else {
+                XCTAssertFalse(app.buttons["create_delivery"].exists)
+            }
+            switchRole()
+        }
+    }
+
     func testAddressSearchCancellationAndStaleResults() {
         login("dispatcher")
         tap(app.buttons["create_delivery"])
@@ -287,6 +507,8 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.alerts.firstMatch.exists, "Fresh isolated pilot login must not be blocked by a restoration error")
         XCTAssertFalse(app.buttons["login_dispatcher"].exists)
         XCTAssertFalse(app.buttons["login_driver1"].exists)
+        XCTAssertFalse(app.buttons["login_dual"].exists)
+        XCTAssertFalse(element("role_picker").exists)
         replace(app.textFields["login_username"], with: "pilot-test")
         let password = app.secureTextFields["login_password"]
         tap(password)
@@ -363,20 +585,36 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons[button].label.contains(expected))
     }
 
-    private struct ServerCoordinate: Decodable { let lat: Double; let lng: Double }
-    private struct ServerDriver: Decodable {
+    private struct ServerCoordinate: Decodable, Equatable { let lat: Double; let lng: Double }
+    private struct ServerPrincipal: Decodable, Equatable {
+        let id: String
+        let roles: [String]
+        let teamId: String
+        let teamName: String
+    }
+    private struct ServerDriver: Decodable, Equatable {
+        let id: String
         let active: Bool
         let location: ServerCoordinate?
         let locationUpdatedAt: Int?
     }
-    private struct ServerDelivery: Decodable {
+    private struct ServerDelivery: Decodable, Equatable {
         let id: String
         let shopName: String
         let status: String
+        let driverId: String?
         let pickupAddress: String
         let pickup: ServerCoordinate
         let dropoffAddress: String
         let dropoff: ServerCoordinate
+    }
+    private struct ServerRoute: Decodable {
+        struct Stop: Decodable {
+            let deliveryId: String
+            let kind: String
+        }
+        let driverId: String
+        let stops: [Stop]
     }
 
     /// Keep UI tests synchronous: XCTest's stop-on-failure unwinds the current test,
@@ -401,6 +639,7 @@ final class DeliveryFlowUITests: XCTestCase {
     private func readServer<T: Decodable>(_ path: String, token: String) throws -> T {
         var request = URLRequest(url: apiURL.appendingPathComponent(path))
         request.timeoutInterval = 5
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let completed = XCTestExpectation(description: "Read \(path) from the real API")
         let responseBox = ServerResponse()
@@ -428,17 +667,24 @@ final class DeliveryFlowUITests: XCTestCase {
         return try decoder.decode(T.self, from: data)
     }
 
-    private func readDriverFromServer() throws -> ServerDriver {
-        try readServer("v1/shift", token: "demo-driver-1")
+    private func readDriverFromServer(token: String = "demo-driver-1") throws -> ServerDriver {
+        try readServer("v1/shift", token: token)
     }
 
-    private func readDeliveriesFromServer() throws -> [ServerDelivery] {
-        try readServer("v1/deliveries", token: "demo-dispatcher")
+    private func readDeliveriesFromServer(token: String = "demo-dispatcher") throws -> [ServerDelivery] {
+        try readServer("v1/deliveries", token: token)
     }
 
-    private func assertServerStatus(_ id: String, _ status: String) throws {
-        let deliveries = try readDeliveriesFromServer()
+    private func assertServerStatus(_ id: String, _ status: String, token: String = "demo-dispatcher") throws {
+        let deliveries = try readDeliveriesFromServer(token: token)
         XCTAssertEqual(deliveries.first { $0.id == id }?.status, status)
+    }
+
+    private func assertDualRoute(_ deliveryID: String, kinds: [String]) throws {
+        let route: ServerRoute = try readServer("v1/route", token: dualToken)
+        XCTAssertEqual(route.driverId, dualDriverID)
+        XCTAssertEqual(route.stops.map(\.deliveryId), Array(repeating: deliveryID, count: kinds.count))
+        XCTAssertEqual(route.stops.map(\.kind), kinds, "View changes must retain the committed order of remaining stops")
     }
 
     private func assertFixtureAddresses(_ delivery: ServerDelivery) {
@@ -450,10 +696,10 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(delivery.dropoff.lng, 15.1, accuracy: 0.000001)
     }
 
-    private func waitForServerLocation(since timestamp: Int) throws {
+    private func waitForServerLocation(since timestamp: Int, token: String = "demo-driver-1") throws {
         let deadline = Date().addingTimeInterval(15)
         while Date() < deadline {
-            let driver = try readDriverFromServer()
+            let driver = try readDriverFromServer(token: token)
             if let location = driver.location, let updated = driver.locationUpdatedAt, updated >= timestamp {
                 XCTAssertTrue(driver.active)
                 XCTAssertEqual(location.lat, 36.7163, accuracy: 0.000001)
@@ -478,8 +724,51 @@ final class DeliveryFlowUITests: XCTestCase {
 
     private func login(_ role: String) {
         tap(app.buttons["login_\(role)"])
-        let destination = role == "dispatcher" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
+        let destination = role == "dispatcher" || role == "dual" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
         XCTAssertTrue(destination.waitForExistence(timeout: 20), "Check the running Rust API and fresh database")
+    }
+
+    private func assertDualAccountView(_ title: String) {
+        let picker = app.segmentedControls["role_picker"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        XCTAssertTrue(picker.buttons[title].isSelected)
+        waitForLabelContaining(app.staticTexts["team_identity"], "Squadra revisione")
+        XCTAssertFalse(app.buttons["login_dual"].exists, "Changing views must not log out or ask for another account")
+        XCTAssertFalse(app.buttons["login_dispatcher"].exists)
+        XCTAssertFalse(app.buttons["login_driver1"].exists)
+    }
+
+    private func selectAccountView(_ title: String) {
+        tap(app.segmentedControls["role_picker"].buttons[title])
+        let destination = title == "Centrale" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
+        XCTAssertTrue(destination.waitForExistence(timeout: 15))
+        assertDualAccountView(title)
+    }
+
+    private func assertSharingSettings(foreground: String, background: String, enabled: Bool = true) {
+        tap(app.buttons["shift_settings"])
+        assertSwitch(app.switches["share_location"], value: foreground)
+        assertSwitch(app.switches["background_location"], value: background)
+        XCTAssertEqual(app.switches["share_location"].isEnabled, enabled)
+        XCTAssertEqual(app.switches["background_location"].isEnabled, enabled && foreground == "1")
+        tap(app.buttons["close_shift_settings"])
+    }
+
+    private func assertPausedDualDriver() {
+        assertDualAccountView("Corriere")
+        waitForLabelContaining(app.buttons["shift_settings"], "In turno")
+        XCTAssertTrue(app.buttons["resume_location"].waitForExistence(timeout: 10))
+        XCTAssertFalse(element("account_location_sharing").exists)
+        XCTAssertFalse(app.buttons["stop_account_location"].exists)
+        assertSharingSettings(foreground: "0", background: "0")
+        XCTAssertFalse(app.buttons["toggle_shift"].exists, "Changing views must retain the existing active shift")
+    }
+
+    private func assertAccountSharingVisible() {
+        XCTAssertTrue(element("account_location_sharing").waitForExistence(timeout: 10),
+                      "Explicitly enabled tracking must remain visible in either account view")
+        XCTAssertTrue(app.buttons["stop_account_location"].exists)
+        XCTAssertTrue(app.buttons["stop_account_location"].isEnabled)
     }
 
     private func interruptAndResume() {
@@ -585,4 +874,3 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed)
     }
 }
-

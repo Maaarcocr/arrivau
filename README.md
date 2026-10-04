@@ -1,6 +1,6 @@
 # Arrivau
 
-A Rust API and native Italian SwiftUI app for a **supervised, single-fleet delivery pilot** around Pachino. One app supports dispatcher and driver accounts. The server owns roles, assignments, shift state and routes.
+A Rust API and native Italian SwiftUI app for a **supervised, team-isolated delivery pilot** around Pachino. One app supports dispatcher, driver and dual-role accounts. Each account belongs to a private team (Squadra). The server owns roles, assignments, shift state and routes.
 
 The code now has an explicit production/pilot mode with individual passwords, expiring/revocable sessions, HTTPS app configuration and persistent SQLite. It remains a small prototype: route times are approximate, notifications require the foreground app, and background location must be checked on real devices. It is not ready for unsupervised dispatch or a broad public launch.
 
@@ -9,13 +9,15 @@ The code now has an explicit production/pilot mode with individual passwords, ex
 Follow [the pilot runbook](docs/pilot-runbook.md) for:
 
 1. Deploying one API process behind HTTPS with a fresh persistent database
-2. Provisioning one dispatcher account and separate driver accounts
+2. Provisioning team-scoped dispatcher, driver or dual-role accounts
 3. Configuring a signed iPhone build with your endpoint, team and bundle ID
 4. Running the two-phone delivery and interruption checklist
 
 [The TestFlight guide](docs/testflight.md) includes an archive-only command and the explicit upload handoff. [Manual GitHub Actions signing/upload](docs/testflight-ci.md) is also prepared for building without a connected Mac; it requires owner-supplied signing assets and an explicit upload choice. No server, Apple account, credentials or TestFlight build is created automatically. The owner supplies hosting and Apple signing/access.
 
 Deployment templates: `deploy/Dockerfile`, `deploy/arrivau.service`, `deploy/pilot.env.example`, `deploy/Caddyfile.example`. Read [API configuration](api/README.md) before using them. Keep account files, password hashes, sessions and databases out of Git/logs.
+
+For an existing pilot or an isolated Apple review account, follow [Teams and App Review](docs/teams-and-review.md). Deploy the backward-compatible backend migration first, retain the original fleet ID and data, then use the updated app for dual-role view switching.
 
 ## What is included
 
@@ -33,7 +35,7 @@ For development only, use the [official Rust toolchain](https://www.rust-lang.or
 ./scripts/api-dev.sh
 ```
 
-The demo binds to `127.0.0.1:8080` and writes `arrivau-demo.sqlite3` locally. `ARRIVAU_DB_PATH` chooses another demo database. Public binding is rejected in demo mode; the three demo bearer strings are intentionally public and never authenticate in production. Database mode/fleet checks keep demo and pilot data separate.
+The demo binds to `127.0.0.1:8080` and writes `arrivau-demo.sqlite3` locally. `ARRIVAU_DB_PATH` chooses another demo database. Public binding is rejected in demo mode; the demo bearer strings are intentionally public and never authenticate in production. Database mode/fleet checks keep demo and pilot data separate.
 
 On a Mac with Xcode 26+ and XcodeGen:
 
@@ -75,7 +77,7 @@ The CI also builds the Release configuration for a generic physical iOS device w
 
 ## Pilot limits and safety
 
-- Individual operator-provisioned accounts, one fleet and one server process. No self-service signup/reset, multitenancy, audit-log service, billing or customer marketplace
+- Individual operator-provisioned accounts, one team per account and one server process. Server-enforced team isolation; no self-service signup/reset, public team administration, audit-log service, billing or customer marketplace
 - SQLite survives process restart on a persistent local disk; the operator owns backups, restore tests, retention, security and monitoring. Do not scale replicas or use network storage
 - Dispatcher assigns manually. Only the assigned driver can confirm pickup/drop-off, in committed stop order; driver isolation is enforced server-side
 - Route suggestions use Haversine distance × 1.3 at 25 km/h. They are not road routing, traffic-aware or globally optimal; safety, food handling and driving decisions remain with people

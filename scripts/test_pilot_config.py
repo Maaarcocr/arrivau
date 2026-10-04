@@ -62,9 +62,11 @@ class PilotConfigurationTests(unittest.TestCase):
                 bundle_module.verify(bundle)
             (bundle/'Assets.car').write_bytes(b'compiled asset fixture')
             self.assertTrue(bundle_module.verify(bundle))
-            (bundle/'Arrivau').write_bytes(b'demo-dispatcher')
-            with self.assertRaises(ValueError):
-                bundle_module.verify(bundle)
+            for token in (b'demo-dispatcher', b'demo-driver-1', b'demo-driver-2', b'demo-dual'):
+                with self.subTest(token=token):
+                    (bundle/'Arrivau').write_bytes(b'prefix ' + token + b' suffix')
+                    with self.assertRaises(ValueError):
+                        bundle_module.verify(bundle)
 
     def test_privacy_manifest(self):
         manifest = plistlib.loads((ROOT/'ios/Resources/PrivacyInfo.xcprivacy').read_bytes())

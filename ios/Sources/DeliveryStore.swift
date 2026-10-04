@@ -3,13 +3,21 @@ import Combine
 
 @MainActor
 final class DeliveryStore: ObservableObject {
-    var role: UserRole? { principal?.serverRole }
+    @Published private(set) var role: UserRole?
+    var availableRoles: [UserRole] { principal?.availableRoles ?? [] }
+    var canSwitchRole: Bool { availableRoles.count > 1 }
+    /// Dual accounts receive the team's dispatcher data; their driver screen shows only their work.
+    var deliveries: [Delivery] {
+        role == .driver ? availableDeliveries.filter { $0.driverId == principal?.id } : availableDeliveries
+    }
     @Published private(set) var principal: Principal?
-    @Published private(set) var deliveries: [Delivery] = []
+    @Published private var availableDeliveries: [Delivery] = []
     @Published private(set) var drivers: [Driver] = []
     @Published private(set) var currentDriver: Driver?
     @Published private(set) var route: DriverRoute?
     @Published private(set) var pendingCreation: PendingCreation?
+    @Published private(set) var legacyPendingCreation: PendingCreation?
+    var legacyCreationNeedsReview: Bool { legacyPendingCreation != nil }
     @Published private(set) var createOutcomeUncertain = false
     @Published private(set) var isMutating = false
     @Published private(set) var isRefreshing = false
@@ -45,12 +53,23 @@ final class DeliveryStore: ObservableObject {
     private var revocationTasks: [UUID: Task<Void, Never>] = [:]
     private var sessionId = UUID()
     private var refreshId = UUID()
+    private var viewId = UUID()
     private enum ActionKind: Equatable { case assignment(String), status(DeliveryStatus) }
     private struct PendingAction {
         let kind: ActionKind
         let key: String
     }
     private var pendingActions: [String: PendingAction] = [:]
+
+    /// Immutable confirmation context: an old sheet cannot clear another session/team's recovery.
+    struct LegacyCreationReview {
+        fileprivate let sessionId: UUID
+        fileprivate let viewId: UUID
+        fileprivate let currentScope: String
+        fileprivate let legacyScope: String
+        let pending: PendingCreation
+    }
+
 
     init(session: URLSession = APIClient.secureSession, deterministicLocation: Bool? = nil,
          mode: ConnectionMode? = nil, storage: SessionStorage? = nil) {
@@ -164,7 +183,9 @@ final class DeliveryStore: ObservableObject {
             let api = APIClient(baseURL: try APIConfiguration.validatedURL(apiURL, mode: .demo), token: selectedRole.token, session: urlSession)
             let user = try await api.me()
             guard sessionId == attempt, !Task.isCancelled else { return }
-            guard user.role == (selectedRole == .dispatcher ? "dispatcher" : "driver"),
+            let expectedRole: UserRole = selectedRole == .dispatcher || selectedRole == .dual ? .dispatcher : .driver
+            guard user.supports(expectedRole),
+                  selectedRole != .dual || user.supports(.driver),
                   selectedRole.driverId == nil || user.id == selectedRole.driverId else {
                 throw APIError(message: "L’API ha restituito un’identità demo inattesa.")
             }
@@ -176,20 +197,43 @@ final class DeliveryStore: ObservableObject {
     #endif
 
     private func install(_ api: APIClient, user: Principal, expiresAt: Int?) throws {
-        let scope = "\(api.baseURL.absoluteString)|\(user.id)"
-        let pending = try storage.loadCreation(scope: scope)
+        let scope = CreationScope.current(endpoint: api.baseURL.absoluteString, user: user)
+        let pending = user.supports(.dispatcher) ? try storage.loadCreation(scope: scope) : nil
+        let legacyScope = CreationScope.legacy(endpoint: api.baseURL.absoluteString, accountId: user.id)
+        let legacy = user.supports(.dispatcher) && user.teamId != nil ? try storage.loadCreation(scope: legacyScope) : nil
         client = api
         apiURL = api.baseURL.absoluteString
         principal = user
+        role = user.serverRole
+        viewId = UUID()
         creationScope = scope
+        legacyPendingCreation = legacy
         pendingCreation = pending
         createOutcomeUncertain = pending != nil
         sessionExpiresAt = expiresAt
         errorMessage = nil
         canRetryRestore = false
+        locationTask?.cancel(); locationTask = nil
+        location.stop()
         locationSharing = false
         backgroundLocationSharing = false
+        availableDeliveries = []; drivers = []; currentDriver = nil; route = nil
+        pendingActions = [:]; lastSyncedAt = nil; syncErrorMessage = nil; locationErrorMessage = nil
         scheduleExpiry()
+    }
+
+    /// Select an already authorized capability without changing account, team or bearer.
+    /// View changes do not alter an explicit location opt-in, end the shift or discard the own-driver route.
+    @discardableResult
+    func switchRole(to selectedRole: UserRole) -> Bool {
+        guard validateSession(), !isMutating, let principal, principal.supports(selectedRole),
+              role != selectedRole else { return false }
+        viewId = UUID()
+        refreshId = UUID()
+        isRefreshing = false
+        role = selectedRole
+        errorMessage = nil; syncErrorMessage = nil; lastSyncedAt = nil
+        return true
     }
 
     /// Local privacy controls stop immediately, even if server revocation cannot reach the network.
@@ -224,6 +268,7 @@ final class DeliveryStore: ObservableObject {
 
     private func invalidateSession(message: String?) {
         sessionId = UUID()
+        viewId = UUID()
         refreshId = UUID()
         pollTask?.cancel(); pollTask = nil
         locationTask?.cancel(); locationTask = nil
@@ -231,10 +276,10 @@ final class DeliveryStore: ObservableObject {
         location.stop()
         locationSharing = false
         backgroundLocationSharing = false
-        principal = nil; client = nil; currentDriver = nil
-        deliveries = []; drivers = []; route = nil
+        principal = nil; role = nil; client = nil; currentDriver = nil
+        availableDeliveries = []; drivers = []; route = nil
         errorMessage = message; syncErrorMessage = nil; locationErrorMessage = nil
-        pendingCreation = nil; creationScope = nil; pendingActions = [:]
+        pendingCreation = nil; creationScope = nil; pendingActions = [:]; legacyPendingCreation = nil
         createOutcomeUncertain = false
         sessionExpiresAt = nil
         lastSyncedAt = nil; isRefreshing = false; isMutating = false; isRestoringSession = false
@@ -303,15 +348,23 @@ final class DeliveryStore: ObservableObject {
                 let fetchedJobs = try await jobs
                 guard session == sessionId, refreshId == requestId, !Task.isCancelled else { return }
                 drivers = people
-                deliveries = fetchedJobs
+                availableDeliveries = fetchedJobs
+                if principal?.supports(.driver) == true,
+                   let ownDriver = people.first(where: { $0.id == principal?.id }) {
+                    currentDriver = ownDriver
+                    if !ownDriver.active { setLocationSharing(false) }
+                }
             } else {
                 async let planned = api.route()
                 let driver = try await api.shift()
                 let (fetchedJobs, fetchedRoute) = try await (jobs, planned)
                 guard session == sessionId, refreshId == requestId, !Task.isCancelled else { return }
+                guard driver.id == principal?.id, fetchedRoute.driverId == principal?.id else {
+                    throw APIError(message: "Il server ha restituito un profilo corriere non valido per questo account.")
+                }
                 currentDriver = driver
                 if !driver.active { setLocationSharing(false) }
-                deliveries = fetchedJobs
+                availableDeliveries = fetchedJobs
                 route = fetchedRoute
                 synchronizeLocation()
             }
@@ -327,7 +380,8 @@ final class DeliveryStore: ObservableObject {
     }
 
     func create(_ delivery: NewDelivery) async -> Delivery? {
-        guard validateSession(), !isMutating, role == .dispatcher, let scope = creationScope else { return nil }
+        guard validateSession(), !isMutating, role == .dispatcher, principal?.supports(.dispatcher) == true,
+              !legacyCreationNeedsReview, let scope = creationScope else { return nil }
         if let validation = delivery.validationError { errorMessage = validation; return nil }
         if let pendingCreation, pendingCreation.delivery != delivery {
             errorMessage = "Verifica prima la creazione in sospeso. Riprovarla userà la stessa richiesta, senza duplicarla."
@@ -366,8 +420,39 @@ final class DeliveryStore: ObservableObject {
             errorMessage = "Consegna verificata, ma il recupero locale non è stato aggiornato. Riprova la stessa richiesta per completare la verifica."
         }
     }
+    func prepareLegacyCreationReview() -> LegacyCreationReview? {
+        guard validateSession(), !isMutating, role == .dispatcher,
+              let user = principal, user.supports(.dispatcher), user.teamId != nil,
+              let currentScope = creationScope, let pending = legacyPendingCreation, let api = client else { return nil }
+        return LegacyCreationReview(sessionId: sessionId, viewId: viewId, currentScope: currentScope,
+            legacyScope: CreationScope.legacy(endpoint: api.baseURL.absoluteString, accountId: user.id), pending: pending)
+    }
+
+    /// Called only after the user explicitly confirms they checked the original server outcome.
+    /// This deletes one local recovery record, never server-side work and never retries a creation.
+    @discardableResult
+    func clearLegacyCreationAfterReview(_ review: LegacyCreationReview) -> Bool {
+        guard validateSession(), !isMutating, role == .dispatcher, principal?.supports(.dispatcher) == true,
+              sessionId == review.sessionId, viewId == review.viewId, creationScope == review.currentScope,
+              legacyPendingCreation == review.pending else { return false }
+        do {
+            guard try storage.loadCreation(scope: review.legacyScope) == review.pending else {
+                errorMessage = "La richiesta salvata è cambiata. Esci e accedi di nuovo prima di verificarla; non è stato rimosso alcun dato."
+                return false
+            }
+            try storage.clearCreation(scope: review.legacyScope)
+            legacyPendingCreation = nil
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = "La richiesta precedente resta protetta e le nuove creazioni sono ancora sospese. Sblocca l’iPhone e riprova a rimuovere il recupero dopo averne verificato l’esito."
+            return false
+        }
+    }
+
     func assign(deliveryId: String, driverId: String) async -> Bool {
-        guard !isMutating, let current = deliveries.first(where: { $0.id == deliveryId }),
+        guard !isMutating, role == .dispatcher, principal?.supports(.dispatcher) == true,
+              let current = deliveries.first(where: { $0.id == deliveryId }),
               current.status == .pending || current.status == .assigned else { return false }
         if current.status == .assigned && current.driverId == driverId { return true }
         guard let key = actionKey(for: deliveryId, kind: .assignment(driverId)) else { return false }
@@ -381,8 +466,9 @@ final class DeliveryStore: ObservableObject {
     }
     func completeNextStop(_ delivery: Delivery) async {
         // A second tap from an old view must never advance the following stop.
-        guard !isMutating,
+        guard !isMutating, role == .driver, principal?.supports(.driver) == true,
               let current = deliveries.first(where: { $0.id == delivery.id }),
+              current.driverId == principal?.id,
               current.status == delivery.status else { return }
         guard let next = DeliveryAction.nextStatus(delivery: current, route: route, now: Int(Date().timeIntervalSince1970)) else {
             errorMessage = "Segui la prima tappa del percorso e attendi che la consegna sia pronta per il ritiro."
@@ -437,14 +523,16 @@ final class DeliveryStore: ObservableObject {
 
     /// This single, explicitly labeled action opts into foreground location only after the server starts the shift.
     func startShiftAndShareLocation() async {
-        guard !isMutating, let driver = currentDriver, !driver.active else { return }
+        guard !isMutating, role == .driver, principal?.supports(.driver) == true,
+              let driver = currentDriver, driver.id == principal?.id, !driver.active else { return }
         let _: Driver? = await mutate({ try await $0.shift(active: true, capacity: driver.capacity) }) { result in
             self.currentDriver = result
             if result.active { self.setLocationSharing(true) }
         }
     }
     func setShift(active: Bool, capacity: Int) async {
-        guard !isMutating, currentDriver?.active != active else { return }
+        guard !isMutating, role == .driver, principal?.supports(.driver) == true,
+              currentDriver?.id == principal?.id, currentDriver?.active != active else { return }
         let _: Driver? = await mutate({ try await $0.shift(active: active, capacity: capacity) }, onFailure: { error in
             if !active, error is URLError || error is CancellationError || (error as? APIError)?.mutationOutcomeUncertain == true {
                 self.setLocationSharing(false)
@@ -457,41 +545,43 @@ final class DeliveryStore: ObservableObject {
         }
     }
     private func applyConfirmedDelivery(_ delivery: Delivery) {
-        if let index = deliveries.firstIndex(where: { $0.id == delivery.id }) { deliveries[index] = delivery }
-        else { deliveries.append(delivery) }
+        if let index = availableDeliveries.firstIndex(where: { $0.id == delivery.id }) { availableDeliveries[index] = delivery }
+        else { availableDeliveries.append(delivery) }
     }
     func suggestions(for deliveryId: String) async -> [Suggestion]? {
-        guard validateSession(), let api = client else { return nil }
+        guard validateSession(), role == .dispatcher, principal?.supports(.dispatcher) == true,
+              let api = client else { return nil }
         let session = sessionId
+        let view = viewId
         do {
             let suggestions = try await api.suggestions(deliveryId: deliveryId)
-            return session == sessionId && !Task.isCancelled ? suggestions : nil
+            return session == sessionId && view == viewId && !Task.isCancelled ? suggestions : nil
         } catch {
             let failure = error as NSError
             guard !(error is CancellationError), !Task.isCancelled,
                   !(failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled) else { return nil }
-            if session == sessionId, !handleUnauthorized(error) { errorMessage = ItalianPresentation.errorMessage(error) }
+            if session == sessionId, view == viewId, !handleUnauthorized(error) { errorMessage = ItalianPresentation.errorMessage(error) }
             return nil
         }
     }
     func setLocationSharing(_ value: Bool) {
         guard validateSession() else { return }
-        locationSharing = value && role == .driver && currentDriver?.active == true
+        locationSharing = value && role == .driver && principal?.supports(.driver) == true && currentDriver?.active == true
         if !locationSharing { backgroundLocationSharing = false; locationErrorMessage = nil }
         synchronizeLocation()
     }
     func setBackgroundLocationSharing(_ value: Bool) {
         guard validateSession() else { return }
-        backgroundLocationSharing = value && locationSharing && currentDriver?.active == true
+        backgroundLocationSharing = value && role == .driver && locationSharing && currentDriver?.active == true
         synchronizeLocation()
     }
     private var mayShareLocation: Bool {
-        (foreground || backgroundLocationSharing) && locationSharing && role == .driver && currentDriver?.active == true
+        (foreground || backgroundLocationSharing) && locationSharing && principal?.supports(.driver) == true && currentDriver?.active == true
     }
     private func synchronizeLocation() {
         if !mayShareLocation { locationTask?.cancel(); locationTask = nil }
         location.configure(
-            enabled: locationSharing && role == .driver && currentDriver?.active == true,
+            enabled: locationSharing && principal?.supports(.driver) == true && currentDriver?.active == true,
             foreground: foreground, allowBackground: backgroundLocationSharing
         )
     }

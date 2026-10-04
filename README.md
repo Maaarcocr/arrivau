@@ -105,3 +105,9 @@ The CI also builds the Release configuration for a generic physical iOS device w
 - Physical-device and background/network/battery checks must pass before using real customer work. Start with synthetic deliveries and inform participants about stored location/address data
 
 The HTTP contract is independent of SwiftUI, so a future dispatcher web client can share it after its own security/UI work.
+
+## License
+
+Arrivau's original code and documentation are proprietary, with all rights reserved.
+See [LICENSE](LICENSE). Public visibility does not grant an open-source license;
+GitHub's viewing and forking rights and third-party licenses still apply.

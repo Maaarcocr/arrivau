@@ -80,7 +80,7 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["submit_delivery"])
         waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
         XCTAssertFalse(app.buttons["submit_delivery"].exists, "The created delivery must replace its form")
-        waitForLabel(app.staticTexts["delivery_readiness"], "Da definire")
+        waitForReadinessValue("Da definire")
         XCTAssertFalse(app.buttons["assign_driver-1"].exists, "Creating an order must not ask for a driver")
         XCTAssertFalse(element("no_suggestions").exists)
         let created = try readDeliveriesFromServer()
@@ -95,11 +95,11 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["estimate_readiness"])
         XCTAssertTrue(element("readiness_minutes").waitForExistence(timeout: 5))
         tap(app.buttons["cancel_readiness"])
-        waitForLabel(app.staticTexts["delivery_readiness"], "Da definire")
+        waitForReadinessValue("Da definire")
         XCTAssertEqual(try readDeliveriesFromServer().first?.readinessRevision, 0)
         tap(app.buttons["estimate_readiness"])
         tap(app.buttons["save_readiness"])
-        waitForLabelContaining(app.staticTexts["delivery_readiness"], "(stima)")
+        waitForReadinessValue(prefix: "Prevista alle ", suffix: "(stima)")
         waitForLabelContaining(element("automatic_assignment_status"), "Assegnazione prevista quando pronta")
         let estimated = try XCTUnwrap(readDeliveriesFromServer().first)
         XCTAssertEqual(estimated.status, "pending")
@@ -110,7 +110,7 @@ final class DeliveryFlowUITests: XCTestCase {
         reveal(readyNow)
         readyNow.doubleTap()
         waitForLabel(app.staticTexts["delivery_status"], "Assegnata")
-        waitForLabelContaining(app.staticTexts["delivery_readiness"], "(confermata)")
+        waitForReadinessValue(prefix: "Pronta dalle ", suffix: "(confermata)")
         let assignedAutomatically = try XCTUnwrap(readDeliveriesFromServer().first)
         XCTAssertEqual(assignedAutomatically.driverId, "driver-1")
         XCTAssertEqual(assignedAutomatically.readinessRevision, 2)
@@ -311,7 +311,7 @@ final class DeliveryFlowUITests: XCTestCase {
         selectAddress("choose_dropoff", query: "Garibaldi", expected: "Via Garibaldi 8")
         tap(app.buttons["submit_delivery"])
         waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
-        waitForLabel(app.staticTexts["delivery_readiness"], "Da definire")
+        waitForReadinessValue("Da definire")
         XCTAssertFalse(app.buttons["assign_\(dualDriverID)"].exists)
         let created = try readDeliveriesFromServer(token: dualToken)
         XCTAssertEqual(created.count, 1)
@@ -571,7 +571,7 @@ final class DeliveryFlowUITests: XCTestCase {
         // Repeated creation taps must not create two jobs while the sheet advances.
         submit.doubleTap()
         waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
-        waitForLabel(app.staticTexts["delivery_readiness"], "Da definire")
+        waitForReadinessValue("Da definire")
         XCTAssertFalse(element("no_suggestions").exists)
         XCTAssertFalse(app.buttons["assign_driver-1"].exists)
         XCTAssertFalse(app.buttons["submit_delivery"].exists)
@@ -586,7 +586,7 @@ final class DeliveryFlowUITests: XCTestCase {
         for _ in 0..<2 {
             tap(app.buttons["delivery_\(pending.id)"])
             waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
-            waitForLabel(app.staticTexts["delivery_readiness"], "Da definire")
+            waitForReadinessValue("Da definire")
             XCTAssertFalse(element("no_suggestions").exists)
             XCTAssertFalse(app.buttons["assign_driver-1"].exists)
             XCTAssertFalse(app.buttons["submit_delivery"].exists)
@@ -945,6 +945,32 @@ final class DeliveryFlowUITests: XCTestCase {
         let current = field.value as? String ?? ""
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
         if !value.isEmpty { field.typeText(value) }
+    }
+
+    /// LabeledContent exposes readiness as one label/value pair, regardless of
+    /// the OS-specific accessibility element type. Keep unknown-state matching exact.
+    private func waitForReadinessValue(_ value: String, file: StaticString = #filePath, line: UInt = #line) {
+        let readiness = element("delivery_readiness")
+        let expected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND label == %@ AND value == %@", "Disponibilità", value),
+            object: readiness)
+        XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed,
+                       readinessDiagnostic(readiness), file: file, line: line)
+    }
+
+    private func waitForReadinessValue(prefix: String, suffix: String, file: StaticString = #filePath, line: UInt = #line) {
+        let readiness = element("delivery_readiness")
+        let expected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND label == %@ AND value BEGINSWITH %@ AND value ENDSWITH %@",
+                                   "Disponibilità", prefix, suffix),
+            object: readiness)
+        XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed,
+                       readinessDiagnostic(readiness), file: file, line: line)
+    }
+
+    private func readinessDiagnostic(_ readiness: XCUIElement) -> String {
+        guard readiness.exists else { return "Readiness field is unavailable" }
+        return "Readiness label: \(readiness.label); value: \(String(describing: readiness.value))"
     }
 
     private func waitForLabel(_ element: XCUIElement, _ label: String) {

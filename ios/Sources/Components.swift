@@ -43,9 +43,13 @@ struct DeliveryFacts: View {
     var body: some View {
         LabeledContent("Ritiro", value: delivery.pickupAddress)
         LabeledContent("Destinazione", value: delivery.dropoffAddress)
-        LabeledContent("Disponibilità") {
-            Text(delivery.readinessTitle).accessibilityIdentifier("delivery_readiness")
-        }
+        LabeledContent("Disponibilità", value: delivery.readinessTitle)
+            // Expose one semantic field: SwiftUI may otherwise combine the child Text
+            // with the title differently across OS versions and accessibility queries.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Disponibilità")
+            .accessibilityValue(delivery.readinessTitle)
+            .accessibilityIdentifier("delivery_readiness")
         if delivery.canChangeReadiness, let target = delivery.pickupTargetAt {
             LabeledContent("Obiettivo ritiro", value: "Entro le \(target.epochDate.italianTime)")
         }

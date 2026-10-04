@@ -242,7 +242,13 @@ final class PilotSessionTests: XCTestCase {
 
     func testHiddenSuggestionsCannotSignOutAfterRepeatedViewChanges() async {
         useDualAccount()
+        // Suggestions now require a locally known, eligible delivery. Seed it before
+        // login so this test still exercises a real delayed unauthorized response.
+        let pending = teamDelivery(id: "pending", owner: nil, status: .pending)
+        backend.withState { $0.jobs = [pending] }
         await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertEqual(store.deliveries, [pending])
+        XCTAssertTrue(pending.hasKnownReadiness)
         let started = expectation(description: "Old suggestions sent")
         let release = DispatchSemaphore(value: 0)
         defer { release.signal() }
@@ -257,6 +263,9 @@ final class PilotSessionTests: XCTestCase {
         release.signal()
         let result = await old.value
         XCTAssertNil(result)
+        XCTAssertEqual(backend.withState {
+            $0.requests.filter { $0.method == "GET" && $0.path == "/v1/deliveries/pending/suggestions" }.count
+        }, 1, "The stale 401 must actually have reached the transport")
         XCTAssertEqual(store.role, .dispatcher)
         XCTAssertEqual(store.principal?.id, "reviewer")
         XCTAssertNil(store.errorMessage)

@@ -1,105 +1,143 @@
-# Manual TestFlight from GitHub-hosted macOS
+# Publish Arrivau to TestFlight from GitHub
 
-This route uses GitHub's Mac runner; you do **not** need a connected Mac to run the build. An owner must still provide valid Apple signing assets and deliberately configure the repository. Nothing in this change creates credentials, sets secrets, accepts agreements or uploads a build.
+Do these steps on Linux. You need OpenSSL, GNU `base64`, and a browser. GitHub's macOS runner builds, signs, and uploads the app. You do not need a Mac or Xcode installed. For later uploads, repeat step 7 with a new build number.
 
-The workflow is `.github/workflows/testflight.yml`. It runs **only by manual dispatch from `main`**, defaults to `archive`, and requires the separate repository opt-in `TESTFLIGHT_SIGNING_ENABLED=true`. Selecting `upload` explicitly authorizes that run to send its new build to App Store Connect; it does not enroll testers or release the app publicly. An `archive` run validates signed packaging and then deletes its temporary archive/IPA; no signed binary artifact is retained.
+Already done: Apple Developer membership, the Arrivau app record, bundle ID `com.rudilosso.arrivau`, and the API key named **Arrivau TestFlight CI**. Use those existing items.
 
-## 1. Owner prerequisites
+## 1. Check the workflow is ready
 
-- Apple Developer Program membership (owner reports it acquired), access to the correct team and its ten-character team ID
-- A registered explicit App ID/bundle identifier, with a matching App Store Connect app record
-- A valid **Apple Distribution** signing certificate **and its private key**, exported together as a password-protected `.p12`
-- An **App Store Connect distribution** provisioning profile for that exact app/team and certificate. Development, ad hoc/device-list, wildcard and enterprise profiles are rejected
-- For `upload` only: an App Store Connect **team API key** `.p8`, key ID and issuer ID. Developer is the least upload role listed by Apple; do not grant Admin just for this workflow. Team API keys cannot be restricted to a single app and cover all apps in the account within their role, so review that access before creating one
-- The intended HTTPS API origin. `https://arrivau.rudilosso.com` is the proposed deployment origin, **not a verified live service**. Complete the backend HTTPS/health/auth checks before inviting testers
+The **Manual TestFlight** workflow is on `main`; [PR #2](https://github.com/Maaarcocr/arrivau/pull/2) is merged. Before uploading, check that the normal CI checks on `main` are green in the repository's **Actions** tab.
 
-Apple instructions: [certificate overview](https://developer.apple.com/help/account/certificates/certificates-overview/), [App Store provisioning profile](https://developer.apple.com/help/account/provisioning-profiles/create-an-app-store-provisioning-profile/), [App Store Connect API access](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api/). Creating these credentials is a separate owner-controlled security action. Do not send the private key, `.p12`, password or `.p8` in chat or commit them.
+## 2. Make the signing files on Linux
 
-### If you do not already have a `.p12` and do not have a Mac
-
-An exportable certificate/private-key pair is required; an Apple account alone is insufficient, and a cloud-managed certificate without an exportable key is not a `.p12`. You can prepare a standard PKCS#10 CSR with trusted OpenSSL on your own Linux/Windows computer, submit **only the CSR** through Apple's Certificates page, then package the downloaded public certificate with your locally retained private key. This is a manual alternative to Apple's [Keychain Access CSR instructions](https://developer.apple.com/help/account/certificates/create-a-certificate-signing-request).
-
-These commands are **for the owner to run later**, in a private directory outside the repository, after choosing to create signing credentials. They have not been run by this task. Passwords are requested interactively:
+If needed, install `openssl` and `coreutils` using your distribution's package manager. Run these commands in your terminal, outside the repository. Do not repeat this block if `distribution.key.pem` already exists.
 
 ```sh
 umask 077
-mkdir arrivau-signing
-cd arrivau-signing
-openssl genpkey -algorithm RSA -aes-256-cbc -pkeyopt rsa_keygen_bits:2048 -out distribution.key.pem
-openssl req -new -key distribution.key.pem -out distribution.certSigningRequest
+mkdir -p "$HOME/arrivau-signing"
+chmod 700 "$HOME/arrivau-signing"
+cd "$HOME/arrivau-signing"
+openssl genpkey -algorithm RSA -aes-256-cbc \
+  -pkeyopt rsa_keygen_bits:2048 -out distribution.key.pem
+openssl req -new -sha256 -key distribution.key.pem \
+  -subj "/CN=Arrivau Distribution" -out distribution.certSigningRequest
 ```
 
-In Apple Developer → Certificates, create an Apple Distribution certificate using `distribution.certSigningRequest`; download its `.cer` into that private directory. Keep the private `.key.pem` local. Then:
+Choose a strong key passphrase when prompted; enter it again for the second command. Save it in your password manager.
+
+1. Open [Apple Developer](https://developer.apple.com/account/) and select team **2R27Z5A8V6**.
+2. Go to **Certificates, Identifiers & Profiles → Certificates → +**.
+3. Choose **Apple Distribution**, then **Continue**.
+4. Upload **distribution.certSigningRequest** from your signing folder, then **Continue** and **Download**.
+5. Move the downloaded `.cer` into `~/arrivau-signing` and rename it **distribution.cer**.
+
+The CSR is public and goes to Apple. Keep the original PEM private-key file on Linux. **The P12 contains a copy of that private key and goes into this repository's GitHub Actions secrets so its macOS runner can sign the app.**
+
+Make the password-protected `.p12` that GitHub needs:
 
 ```sh
+umask 077
+cd "$HOME/arrivau-signing"
 openssl x509 -inform DER -in distribution.cer -out distribution.cert.pem
-openssl pkcs12 -export -inkey distribution.key.pem -in distribution.cert.pem -name 'Arrivau Apple Distribution' -out distribution.p12
+openssl pkcs12 -export -inkey distribution.key.pem -in distribution.cert.pem \
+  -name "Arrivau Apple Distribution" \
+  -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+  -out distribution.p12
 ```
 
-OpenSSL 3 uses newer PKCS#12 encryption defaults, and Apple import compatibility can vary. If CI fails specifically while importing the certificate, first verify the P12 password and certificate/private-key pair locally. For an identified MAC-verification compatibility error, an owner can make a separately named compatibility export with OpenSSL 3 using `openssl pkcs12 -export -legacy -descert -inkey distribution.key.pem -in distribution.cert.pem -out distribution-legacy.p12`, then securely replace the P12 secret. This uses older encryption for the transfer container; keep it password-protected and short-lived. Do not assume every import failure is this issue or print private material to diagnose it. References: [Apple DTS compatibility discussion](https://developer.apple.com/forums/thread/723242), [OpenSSL PKCS#12 options](https://docs.openssl.org/3.5/man1/openssl-pkcs12/).
+Enter the key passphrase, then choose a strong, nonempty **Export Password**. Save that export password: it becomes `APPLE_DISTRIBUTION_P12_PASSWORD` in step 5.
 
-Protect and back up the encrypted key/P12 and its password in your password manager. Generate the App Store profile in Apple's portal using the same certificate and bundle ID. If Apple's account role or certificate limits block creation, resolve those in the owner account; do not revoke an existing certificate blindly. The first signed CI run is still required to verify certificate/profile compatibility and trust chain.
+Check the P12 locally with `openssl pkcs12 -in distribution.p12 -info -noout`, entering its export password. It must finish without an error; this does not test Apple's import yet.
 
-## 2. Minimal repository setup
+The explicit P12 options use older container encryption for Apple's import compatibility; keep the file private. A `.cer` alone will not work. [OpenSSL options](https://docs.openssl.org/3.5/man1/openssl-pkcs12/) · [Apple compatibility guidance](https://developer.apple.com/forums/thread/723242)
 
-In this repository, open **Settings → Secrets and variables → Actions**. Store credentials as **repository Actions secrets**, not source files or ordinary variables. Base64 is encoding, not encryption; its output must go directly into the corresponding secret. GitHub's [secrets instructions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets) cover secure browser entry and `gh secret set NAME < file`.
+## 3. Create the matching provisioning profile
 
-Required secrets for `archive` and `upload`:
+1. Open [Apple Developer](https://developer.apple.com/account/) with the same team.
+2. Go to **Certificates, Identifiers & Profiles → Profiles → +**.
+3. Under **Distribution**, select **App Store Connect**, then **Continue**.
+4. Select the existing App ID whose bundle ID is **com.rudilosso.arrivau**, then **Continue**.
+5. Select the **Apple Distribution certificate you created in step 2**, then **Continue**.
+6. Name the profile **Arrivau TestFlight CI**, click **Generate**, then **Download**.
+7. Move the downloaded `.mobileprovision` file into `~/arrivau-signing` and rename it **profile.mobileprovision**.
 
-| Name | Value |
+This profile must match both the app and the certificate. [Apple's profile instructions](https://developer.apple.com/help/account/provisioning-profiles/create-an-app-store-provisioning-profile/)
+
+## 4. Download the API key that already exists
+
+1. Open [App Store Connect](https://appstoreconnect.apple.com/).
+2. Go to **Users and Access → Integrations → App Store Connect API → Team Keys**.
+3. Find **Arrivau TestFlight CI**, key ID **AF34359496**.
+4. Click **Download API Key** and confirm the download.
+5. Move **AuthKey_AF34359496.p8** into `~/arrivau-signing`.
+
+Apple allows one download. Keep a secure backup of this key and the password-protected `.p12`; do not send either file or the password in chat, and never commit them. [Apple API key guidance](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api/)
+
+## 5. Add six GitHub secrets
+
+Open the [Arrivau repository](https://github.com/Maaarcocr/arrivau), then **Settings → Secrets and variables → Actions → Secrets → New repository secret**.
+
+On Linux, create three private text files. These commands do not print their contents:
+
+```sh
+umask 077
+cd "$HOME/arrivau-signing"
+chmod 600 distribution.p12 profile.mobileprovision AuthKey_AF34359496.p8
+base64 -w0 distribution.p12 > distribution.p12.b64
+base64 -w0 profile.mobileprovision > profile.mobileprovision.b64
+base64 -w0 AuthKey_AF34359496.p8 > api-key.b64
+```
+
+Open each `.b64` file in a **local text editor**, copy its entire contents, and paste into the matching GitHub secret. Enter each name exactly, then click **Add secret**:
+
+| Secret name | Value |
 | --- | --- |
-| `APPLE_DISTRIBUTION_P12_BASE64` | Base64 of the certificate plus private key `.p12` |
-| `APPLE_DISTRIBUTION_P12_PASSWORD` | Its nonempty export password |
-| `APPLE_APP_STORE_PROFILE_BASE64` | Base64 of the matching `.mobileprovision` |
+| `APPLE_DISTRIBUTION_P12_BASE64` | Contents of `distribution.p12.b64` |
+| `APPLE_APP_STORE_PROFILE_BASE64` | Contents of `profile.mobileprovision.b64` |
+| `ASC_PRIVATE_KEY_BASE64` | Contents of `api-key.b64` |
+| `APPLE_DISTRIBUTION_P12_PASSWORD` | The exact export password from step 2 |
+| `ASC_KEY_ID` | `AF34359496` |
+| `ASC_ISSUER_ID` | `df98e0f8-a632-4d80-913d-df129f32b12b` |
 
-Additional secrets required only for `upload`:
+Base64 is still secret data. Paste it only into GitHub's secret fields, never chat or an online encoder/editor. Use **repository secrets**, not environment secrets. Afterward, copy harmless text to replace the clipboard contents and delete the three temporary `.b64` files. Keep your signing files securely backed up. [GitHub's secret setup instructions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
 
-| Name | Value |
+## 6. Add four GitHub variables
+
+On the same **Actions** settings page, select **Variables → New repository variable**. Add exactly:
+
+| Variable name | Value |
 | --- | --- |
-| `ASC_PRIVATE_KEY_BASE64` | Base64 of the team API private key `.p8` |
-| `ASC_KEY_ID` | Its Apple key identifier |
-| `ASC_ISSUER_ID` | Its issuer UUID |
+| `ARRIVAU_TEAM_ID` | `2R27Z5A8V6` |
+| `ARRIVAU_BUNDLE_ID` | `com.rudilosso.arrivau` |
+| `ARRIVAU_API_URL` | `https://arrivau.rudilosso.com` |
+| `TESTFLIGHT_SIGNING_ENABLED` | `true` |
 
-Base64-encode locally with a trusted tool without pasting output into chat; GitHub secrets have a 48 KiB value limit. The app's simple App Store profile should normally fit. Do not work around a size limit by committing signing material. Remove local transfer copies after secure storage, according to your backup policy.
+Leave `TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL` unset.
 
-Set these **repository Actions variables** (non-secret):
+## 7. Tell GitHub to publish the build
 
-| Name | Value |
-| --- | --- |
-| `ARRIVAU_TEAM_ID` | Actual ten-character team ID |
-| `ARRIVAU_BUNDLE_ID` | Your registered app identifier, replacing `dev.arrivau.app` |
-| `ARRIVAU_API_URL` | Verified HTTPS root origin, without a path/query/userinfo |
-| `TESTFLIGHT_SIGNING_ENABLED` | `true` only after the setup and access review are complete |
-| `TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL` | Optional; see the next section |
+In the repository, open **Actions → Manual TestFlight → Run workflow**.
 
-The baseline uses repository secrets and does not require Enterprise environments. Private-repository Actions usage/minutes and spending limits still apply. Limit repository write/admin access to trusted people: anyone able to change workflows can potentially access repository secrets. Protect `main` and workflow/script changes where your plan supports it; manual dispatch is not a substitute for repository access control.
+Set:
+- **Branch:** `main`
+- **action:** `upload`
+- **build_number:** `1` for the first upload; use a new higher integer for every later upload, up to `9999`
 
-## 3. Optional environment approval gate
+Click **Run workflow** and wait for it to succeed. Select **upload** explicitly: the default **archive** only checks signing and does not publish.
 
-If your GitHub plan supports it, first create an environment named `testflight`, restrict deployments to `main`, configure actual required reviewers and the intended bypass/self-review policy, then set repository variable `TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL=true`.
+GitHub builds and uploads Arrivau version **0.2.0** to Apple. A green run means the upload command succeeded; Apple still needs to process the build.
 
-The workflow's approval-only job must succeed before signing starts. This optional gate **does not isolate the repository secrets inside the environment**. Naming an environment does not create a required-reviewer rule; without an actual rule GitHub can start the job immediately. Configure and verify the rule before enabling this option. Do not enable an unsupported gate and expect a prompt.
+## 8. Install it through TestFlight
 
-GitHub currently limits required-reviewer environment gates for private repositories to Enterprise; private environment secrets require Pro/Team/Enterprise. Repository Actions secrets are the baseline here. Do not change repository visibility or buy a plan just to use this prototype without a separate decision. See [GitHub environment availability and protections](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments).
+1. Open [Arrivau → TestFlight](https://appstoreconnect.apple.com/teams/df98e0f8-a632-4d80-913d-df129f32b12b/apps/6819019743/testflight) and wait for the new build to finish processing.
+2. If Apple shows **Missing Compliance**, open it and answer the encryption questions accurately.
+3. Click **+** beside **Internal Testing**, create a group named **Arrivau**, and open it.
+4. Click **Add Builds**, select the new build, click **Next**, fill in **What to Test**, and click **Add**.
+5. Click **Invite Testers**, select your own App Store Connect account, then **Add**.
+6. Install **TestFlight** from the iPhone App Store, accept the invitation, and tap **Install** for Arrivau.
 
-## 4. First run: signed archive validation
+Done when Arrivau installs from TestFlight on your iPhone. [Apple's internal-testing instructions](https://developer.apple.com/help/app-store-connect/test-a-beta-version/add-internal-testers)
 
-After this follow-on PR is reviewed and merged:
+If a GitHub run fails, share its run link and failing step name. Keep private keys, passwords, and encoded files out of messages.
 
-1. Confirm `main` points to the code you intend to sign and its ordinary verification CI is green
-2. Open **Actions → Manual TestFlight → Run workflow** and select branch `main`
-3. Select action **archive** and supply a new integer build number from `1` to `9999`. The marketing version remains `0.2.0`; each uploaded build must have a new number
-4. If enabled, approve the configured environment gate after checking the source SHA and action
-5. Inspect the result. The workflow validates inputs and profile metadata, imports the supplied signing identity into a temporary keychain, builds and verifies a Release archive, and exports an App Store IPA. Cleanup runs on normal exits, failures and handled cancellation; no credentials or binaries are uploaded as artifacts. Hard runner termination can prevent cleanup hooks, with destruction of the GitHub-hosted ephemeral VM as the final boundary
-
-A passing `archive` run establishes that the provided signing assets work in CI; it is not an upload or physical-device result. No Apple credential/profile creation or automatic provisioning is requested. A failure reports a non-sensitive stage; review signing assets through their secure account/settings locations rather than posting credentials in an issue.
-
-## 5. Upload only when explicitly ready
-
-Run the same workflow from `main` with action **upload** and a fresh build number. This rebuilds/signs/verifies and then invokes Apple's uploader using the supplied API key. It does not run on PRs or pushes, and an `archive` run never uploads. Upload sends the signed app and its embedded endpoint/metadata to Apple.
-
-A successful uploader response means Apple accepted the transfer, not that processing or beta review is complete. Check the App Store Connect build, answer export-compliance/privacy questions accurately, supply beta test instructions/contact, and add the build to the intended TestFlight group. External testing may need Beta App Review. Then test on both physical iPhones, including signed Keychain persistence and locked/background location. Apple: [upload builds](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/) and [TestFlight overview](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/).
-
-## Verification boundary
-
-This workflow and its scripts can be checked statically and with a fake-tool test harness without exposing real credentials. Those checks do not prove Apple signing, API permissions, certificate trust, upload, processing or device behavior. Until an owner-configured `archive` and then authorized `upload` have succeeded, describe this as **prepared CI signing/upload code**, not a published app.
+_Checked against PR #2 at commit `cc12b0dd093295972ca9f835a2e820090602d093`, 4 October 2026._

@@ -38,6 +38,9 @@ protocol SessionStorage {
     func loadCreation(scope: String) throws -> PendingCreation?
     func saveCreation(_ value: PendingCreation, scope: String) throws
     func clearCreation(scope: String) throws
+    func loadRestaurant(scope: String) throws -> PendingRestaurant?
+    func saveRestaurant(_ value: PendingRestaurant, scope: String) throws
+    func clearRestaurant(scope: String) throws
 }
 
 struct KeychainSessionStorage: SessionStorage {
@@ -48,6 +51,10 @@ struct KeychainSessionStorage: SessionStorage {
     func loadCreation(scope: String) throws -> PendingCreation? { try read("creation:\(scope)") }
     func saveCreation(_ value: PendingCreation, scope: String) throws { try write(value, account: "creation:\(scope)") }
     func clearCreation(scope: String) throws { try remove("creation:\(scope)") }
+
+    func loadRestaurant(scope: String) throws -> PendingRestaurant? { try read("restaurant:\(scope)") }
+    func saveRestaurant(_ value: PendingRestaurant, scope: String) throws { try write(value, account: "restaurant:\(scope)") }
+    func clearRestaurant(scope: String) throws { try remove("restaurant:\(scope)") }
 
     private func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
@@ -90,11 +97,15 @@ struct KeychainSessionStorage: SessionStorage {
 final class MemorySessionStorage: SessionStorage {
     var savedSession: SavedSession?
     var creations: [String: PendingCreation] = [:]
+    var pendingRestaurants: [String: PendingRestaurant] = [:]
     func loadSession() throws -> SavedSession? { savedSession }
     func saveSession(_ value: SavedSession) throws { savedSession = value }
     func clearSession() throws { savedSession = nil }
     func loadCreation(scope: String) throws -> PendingCreation? { creations[scope] }
     func saveCreation(_ value: PendingCreation, scope: String) throws { creations[scope] = value }
     func clearCreation(scope: String) throws { creations[scope] = nil }
+    func loadRestaurant(scope: String) throws -> PendingRestaurant? { pendingRestaurants[scope] }
+    func saveRestaurant(_ value: PendingRestaurant, scope: String) throws { pendingRestaurants[scope] = value }
+    func clearRestaurant(scope: String) throws { pendingRestaurants[scope] = nil }
 }
 #endif

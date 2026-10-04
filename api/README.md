@@ -152,7 +152,7 @@ its public fixture tokens cannot truly be revoked and must never leave loopback.
 
 ## Durable retry contract
 
-`POST /v1/deliveries`, `POST /v1/deliveries/{id}/assign`, and
+`POST /v1/restaurants`, `POST /v1/deliveries`, `POST /v1/deliveries/{id}/readiness`, `POST /v1/deliveries/{id}/assign`, and
 `POST /v1/deliveries/{id}/status` accept `Idempotency-Key` with 8–128 ASCII letters,
 digits, dot, underscore or hyphen. A fresh UUID per intended action is recommended.
 Persist and resend the same key **and exact request** after a timeout or disconnect.
@@ -205,3 +205,7 @@ legacy migration/restart, dual-role self-assignment, startup
 misconfiguration, and durable/conflicting create/assignment/completion retries.
 Physical-iPhone behavior and a real TLS deployment require the separate operator
 acceptance checklist; a passing Rust test suite does not establish those outcomes.
+
+## Restaurants and automatic readiness dispatch
+
+New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version3 prevents unsafe older-backend rollback; take a verified backup before upgrading. This change retains the approximate travel model.

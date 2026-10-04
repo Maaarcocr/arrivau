@@ -47,13 +47,19 @@ struct DriverView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("\(index + 1). \(stop.title)").font(.headline)
                                 Text(stop.address)
-                                Text("Arrivo previsto alle \(stop.arrivalAt.epochDate.italianTime)")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                if route.estimatesAvailable {
+                                    Text("Arrivo previsto alle \(stop.arrivalAt.epochDate.italianTime)")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                             }.padding(.vertical, 4).accessibilityIdentifier("route_stop_\(index)")
                         }
-                        Text("Circa \(route.travelSeconds / 60) min di viaggio · fine alle \(route.finishAt.epochDate.italianTime)")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text("Tempi indicativi, senza traffico in tempo reale.").font(.caption).foregroundStyle(.secondary)
+                        if route.estimatesAvailable {
+                            Text("Circa \(route.travelSeconds / 60) min di viaggio · fine alle \(route.finishAt.epochDate.italianTime)")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("Tempi indicativi, senza traffico in tempo reale.").font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("Posizione non disponibile; orari da verificare").font(.caption).foregroundStyle(.orange)
+                        }
                     }
                 }
             }
@@ -114,13 +120,29 @@ struct DriverView: View {
                         .font(.title2.bold()).accessibilityIdentifier("next_stop_title")
                     Text(stop.address).font(.title3)
                 }
+                if !route.estimatesAvailable {
+                    Text("Posizione non disponibile; orari da verificare")
+                        .font(.subheadline).foregroundStyle(.orange).accessibilityIdentifier("route_estimates_unavailable")
+                }
                 DirectionsButton(stop: stop)
                     .buttonStyle(.bordered)
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     let nextStatus = DeliveryAction.nextStatus(delivery: delivery, route: route, now: Int(context.date.timeIntervalSince1970))
                     VStack(alignment: .leading, spacing: 8) {
-                        if stop.kind == .pickup && context.date < delivery.readyAt.epochDate {
-                            Text("Pronta alle \(delivery.readyAt.epochDate.italianTime)")
+                        if stop.kind == .pickup {
+                            Text(delivery.readinessTitle)
+                                .font(.subheadline).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("driver_readiness")
+                            if route.estimatesAvailable {
+                                Text("Ritiro previsto alle \(stop.arrivalAt.epochDate.italianTime)")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            if let target = delivery.pickupTargetAt {
+                                Text("Obiettivo ritiro entro le \(target.epochDate.italianTime)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        } else if let deadline = delivery.onboardDeadlineAt {
+                            Text("Tempo a bordo fino alle \(deadline.epochDate.italianTime)")
                                 .font(.subheadline).foregroundStyle(.secondary)
                         }
                         Button {
@@ -134,7 +156,12 @@ struct DriverView: View {
                         .accessibilityIdentifier(stop.kind == .pickup ? "confirm_pickup" : "confirm_dropoff")
                     }
                 }
-                if !route.feasible {
+                ForEach(route.localizedNotices, id: \.self) { notice in
+                    Label(notice, systemImage: "clock.badge.exclamationmark")
+                        .font(.footnote).foregroundStyle(.orange)
+                        .accessibilityIdentifier("route_notice")
+                }
+                if !route.feasible || !route.warnings.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Controlla i tempi del percorso", systemImage: "exclamationmark.triangle.fill")
                             .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)

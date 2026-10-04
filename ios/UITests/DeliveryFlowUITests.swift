@@ -68,9 +68,9 @@ final class DeliveryFlowUITests: XCTestCase {
         // Expanding timing repeatedly must not change the selected addresses or submit state.
         for iteration in 0..<2 {
             tap(app.buttons["delivery_timing"])
-            XCTAssertTrue(element("ready_at").waitForExistence(timeout: 5))
-            XCTAssertTrue(element("deadline_at").exists)
-            if iteration == 0 { captureScreen("07-delivery-timing", showing: element("ready_at")) }
+            XCTAssertFalse(element("ready_at").exists, "Creation must never ask when food is ready")
+            XCTAssertTrue(element("deadline_at").waitForExistence(timeout: 5))
+            if iteration == 0 { captureScreen("07-delivery-timing", showing: element("deadline_at")) }
             tap(app.buttons["delivery_timing"])
             waitUntilAbsent(element("ready_at"))
             waitUntilAbsent(element("deadline_at"))
@@ -80,17 +80,48 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["submit_delivery"])
         waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
         XCTAssertFalse(app.buttons["submit_delivery"].exists, "The created delivery must replace its form")
-        XCTAssertFalse(app.buttons["suggest_drivers"].exists, "Suggestions must load without another action")
-        XCTAssertTrue(app.buttons["done_delivery"].exists)
-        XCTAssertTrue(app.buttons["assign_driver-1"].waitForExistence(timeout: 15))
-        captureScreen("05-driver-assignment", showing: app.buttons["assign_driver-1"])
+        waitForReadinessValue("Da definire")
+        XCTAssertFalse(app.buttons["assign_driver-1"].exists, "Creating an order must not ask for a driver")
+        XCTAssertFalse(element("no_suggestions").exists)
         let created = try readDeliveriesFromServer()
         XCTAssertEqual(created.count, 1, "The happy path creates exactly one delivery")
         let delivery = try XCTUnwrap(created.first)
         XCTAssertEqual(delivery.shopName, shopName)
         XCTAssertEqual(delivery.status, "pending")
+        XCTAssertEqual(delivery.readinessState, "unknown")
+        XCTAssertEqual(delivery.readinessRevision, 0)
         assertFixtureAddresses(delivery)
-        tap(app.buttons["assign_driver-1"])
+        // Cancelling the estimate sheet leaves the server and unknown state untouched.
+        tap(app.buttons["estimate_readiness"])
+        XCTAssertTrue(element("readiness_minutes").waitForExistence(timeout: 5))
+        tap(app.buttons["cancel_readiness"])
+        waitForReadinessValue("Da definire")
+        XCTAssertEqual(try readDeliveriesFromServer().first?.readinessRevision, 0)
+        tap(app.buttons["estimate_readiness"])
+        tap(app.buttons["save_readiness"])
+        waitForReadinessValue(prefix: "Prevista alle ", suffix: "(stima)")
+        waitForAutomaticAssignmentValue("Assegnazione prevista quando pronta")
+        let estimated = try XCTUnwrap(readDeliveriesFromServer().first)
+        XCTAssertEqual(estimated.status, "pending")
+        XCTAssertEqual(estimated.readinessState, "estimated")
+        XCTAssertGreaterThan(estimated.readyAt, Int(Date().timeIntervalSince1970), "The real API must retain the future estimate")
+        XCTAssertNil(estimated.driverId)
+        // Ready now triggers server assignment. No driver-selection button is needed.
+        let readyNow = app.buttons["ready_now"]
+        reveal(readyNow)
+        readyNow.doubleTap()
+        // Reading the lower automatic-state section may have scrolled these
+        // fields outside the lazy List viewport. Bring each exact field back.
+        reveal(app.staticTexts["delivery_status"])
+        waitForLabel(app.staticTexts["delivery_status"], "Assegnata")
+        reveal(element("delivery_readiness"))
+        waitForReadinessValue(prefix: "Pronta dalle ", suffix: "(confermata)")
+        let assignedAutomatically = try XCTUnwrap(readDeliveriesFromServer().first)
+        XCTAssertEqual(assignedAutomatically.driverId, "driver-1")
+        XCTAssertEqual(assignedAutomatically.readinessRevision, 2)
+        XCTAssertFalse(app.buttons["assign_driver-1"].exists)
+        captureScreen("05-driver-assignment", showing: app.staticTexts["delivery_status"])
+        tap(app.buttons["done_delivery"])
         waitUntilAbsent(app.buttons["done_delivery"])
         let deliveryRow = app.buttons["delivery_\(delivery.id)"]
         waitForLabelContaining(deliveryRow, "Assegnata")
@@ -285,17 +316,20 @@ final class DeliveryFlowUITests: XCTestCase {
         selectAddress("choose_dropoff", query: "Garibaldi", expected: "Via Garibaldi 8")
         tap(app.buttons["submit_delivery"])
         waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
-        let assignSelf = app.buttons["assign_\(dualDriverID)"]
-        XCTAssertTrue(assignSelf.waitForExistence(timeout: 15))
-        XCTAssertFalse(app.buttons["assign_driver-1"].exists)
-        XCTAssertFalse(app.buttons["assign_driver-2"].exists)
+        waitForReadinessValue("Da definire")
+        XCTAssertFalse(app.buttons["assign_\(dualDriverID)"].exists)
         let created = try readDeliveriesFromServer(token: dualToken)
         XCTAssertEqual(created.count, 1)
         let delivery = try XCTUnwrap(created.first)
         XCTAssertEqual(delivery.shopName, shopName)
         XCTAssertEqual(delivery.status, "pending")
+        XCTAssertEqual(delivery.readinessState, "unknown")
         assertFixtureAddresses(delivery)
-        tap(assignSelf)
+        tap(app.buttons["ready_now"])
+        waitForLabel(app.staticTexts["delivery_status"], "Assegnata")
+        XCTAssertFalse(app.buttons["assign_driver-1"].exists)
+        XCTAssertFalse(app.buttons["assign_driver-2"].exists)
+        tap(app.buttons["done_delivery"])
         waitUntilAbsent(app.buttons["done_delivery"])
         let deliveryRow = app.buttons["delivery_\(delivery.id)"]
         waitForLabelContaining(deliveryRow, "Assegnata")
@@ -419,6 +453,8 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["create_delivery"])
         assertEmptyDeliveryForm()
         tap(app.buttons["choose_pickup"])
+        tap(app.buttons["add_restaurant"])
+        tap(app.buttons["restaurant_address"])
         let search = app.textFields["address_search"]
         XCTAssertTrue(search.waitForExistence(timeout: 5))
         replace(search, with: "Pizzeria")
@@ -440,14 +476,20 @@ final class DeliveryFlowUITests: XCTestCase {
         replace(search, with: "")
         waitUntilAbsent(app.buttons["address_result_0"])
         tap(app.buttons["cancel_address"])
+        tap(app.buttons["cancel_restaurant"])
+        tap(app.buttons["cancel_restaurant_picker"])
         assertEmptyDeliveryForm()
 
         selectAddress("choose_pickup", query: "Pizzeria", expected: shopName)
         let selectedPickup = app.buttons["choose_pickup"].label
         tap(app.buttons["choose_pickup"])
+        tap(app.buttons["add_restaurant"])
+        tap(app.buttons["restaurant_address"])
         replace(app.textFields["address_search"], with: "Garibaldi")
         waitForLabelContaining(app.buttons["address_result_0"], "Via Garibaldi 8")
         tap(app.buttons["cancel_address"])
+        tap(app.buttons["cancel_restaurant"])
+        tap(app.buttons["cancel_restaurant_picker"])
         XCTAssertEqual(app.buttons["choose_pickup"].label, selectedPickup, "Cancel must preserve the selected address")
         XCTAssertFalse(app.buttons["submit_delivery"].isEnabled)
 
@@ -483,7 +525,7 @@ final class DeliveryFlowUITests: XCTestCase {
             tap(app.buttons["create_delivery"])
             assertEmptyDeliveryForm()
             tap(app.buttons["choose_pickup"])
-            tap(app.buttons["cancel_address"])
+            tap(app.buttons["cancel_restaurant_picker"])
             tap(app.buttons["cancel_delivery"])
             waitUntilAbsent(app.buttons["cancel_delivery"])
             XCTAssertTrue(app.buttons["create_delivery"].isHittable)
@@ -534,7 +576,9 @@ final class DeliveryFlowUITests: XCTestCase {
         // Repeated creation taps must not create two jobs while the sheet advances.
         submit.doubleTap()
         waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
-        XCTAssertTrue(element("no_suggestions").waitForExistence(timeout: 15))
+        waitForReadinessValue("Da definire")
+        XCTAssertFalse(element("no_suggestions").exists)
+        XCTAssertFalse(app.buttons["assign_driver-1"].exists)
         XCTAssertFalse(app.buttons["submit_delivery"].exists)
         XCTAssertFalse(app.buttons["cancel_delivery"].exists)
         let after = try readDeliveriesFromServer()
@@ -547,13 +591,26 @@ final class DeliveryFlowUITests: XCTestCase {
         for _ in 0..<2 {
             tap(app.buttons["delivery_\(pending.id)"])
             waitForLabel(app.staticTexts["delivery_status"], "Da assegnare")
-            XCTAssertTrue(element("no_suggestions").waitForExistence(timeout: 15))
+            waitForReadinessValue("Da definire")
+            XCTAssertFalse(element("no_suggestions").exists)
+            XCTAssertFalse(app.buttons["assign_driver-1"].exists)
             XCTAssertFalse(app.buttons["submit_delivery"].exists)
             XCTAssertFalse(app.buttons["suggest_drivers"].exists)
             backToDeliveries()
         }
         let reopened = try readDeliveriesFromServer()
         XCTAssertEqual(Set(reopened.map(\.id)), Set(after.map(\.id)), "Reopening a created job must retain its ID")
+        tap(app.buttons["delivery_\(pending.id)"])
+        tap(app.buttons["ready_now"])
+        waitForAutomaticAssignmentValue("In attesa di un corriere")
+        let waitingReason = element("dispatch_waiting_reason")
+        reveal(waitingReason)
+        XCTAssertTrue(waitingReason.waitForExistence(timeout: 10))
+        let waiting = try XCTUnwrap(readDeliveriesFromServer().first { $0.id == pending.id })
+        XCTAssertEqual(waiting.status, "pending")
+        XCTAssertEqual(waiting.readinessState, "ready")
+        XCTAssertEqual(waiting.dispatchWaitingReason, "no_active_driver")
+        backToDeliveries()
     }
 
     private func assertEmptyDeliveryForm() {
@@ -563,7 +620,8 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["submit_delivery"].isEnabled)
         XCTAssertEqual(app.textFields.count, 0, "Routine creation should use address selections, not raw text or coordinates")
         XCTAssertEqual(app.steppers.count, 0, "Capacity and load tuning should not be routine form controls")
-        XCTAssertFalse(element("ready_at").exists, "Custom timing should start collapsed")
+        XCTAssertEqual(app.buttons["submit_delivery"].label, "Crea consegna")
+        XCTAssertFalse(element("ready_at").exists, "Creation must never ask when food is ready")
         XCTAssertFalse(element("deadline_at").exists)
     }
 
@@ -576,6 +634,10 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func selectAddress(_ button: String, query: String, expected: String) {
+        if button == "choose_pickup" {
+            selectRestaurant(query: query, expected: expected)
+            return
+        }
         tap(app.buttons[button])
         replace(app.textFields["address_search"], with: query)
         let result = app.buttons["address_result_0"]
@@ -583,6 +645,33 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(result)
         waitUntilAbsent(app.textFields["address_search"])
         XCTAssertTrue(app.buttons[button].label.contains(expected))
+    }
+
+    private func selectRestaurant(query: String, expected: String) {
+        tap(app.buttons["choose_pickup"])
+        let saved = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "restaurant_", expected)).firstMatch
+        if saved.waitForExistence(timeout: 3) {
+            tap(saved)
+        } else {
+            tap(app.buttons["add_restaurant"])
+            tap(app.buttons["restaurant_address"])
+            replace(app.textFields["address_search"], with: query)
+            waitForLabelContaining(app.buttons["address_result_0"], expected)
+            tap(app.buttons["address_result_0"])
+            waitUntilAbsent(app.textFields["address_search"])
+            XCTAssertEqual(app.textFields["restaurant_name"].value as? String, expected)
+            let save = app.buttons["save_restaurant"]
+            reveal(save)
+            save.doubleTap()
+        }
+        waitUntilAbsent(app.buttons["cancel_restaurant_picker"])
+        XCTAssertTrue(app.buttons["choose_pickup"].label.contains(expected))
+        // Reopening chooses the stored record rather than asking for the address again.
+        tap(app.buttons["choose_pickup"])
+        XCTAssertTrue(saved.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "restaurant_", expected)).count, 1)
+        tap(saved)
+        waitUntilAbsent(app.buttons["cancel_restaurant_picker"])
     }
 
     private struct ServerCoordinate: Decodable, Equatable { let lat: Double; let lng: Double }
@@ -603,6 +692,10 @@ final class DeliveryFlowUITests: XCTestCase {
         let shopName: String
         let status: String
         let driverId: String?
+        let readinessState: String
+        let readyAt: Int
+        let readinessRevision: Int
+        let dispatchWaitingReason: String?
         let pickupAddress: String
         let pickup: ServerCoordinate
         let dropoffAddress: String
@@ -860,6 +953,51 @@ final class DeliveryFlowUITests: XCTestCase {
         let current = field.value as? String ?? ""
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count))
         if !value.isEmpty { field.typeText(value) }
+    }
+
+    /// The automatic-assignment section can be outside List's realized viewport
+    /// after saving an estimate. Reveal its semantic row before matching exact state.
+    private func waitForAutomaticAssignmentValue(_ value: String, file: StaticString = #filePath, line: UInt = #line) {
+        let assignment = element("automatic_assignment_status")
+        reveal(assignment)
+        let expected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND label == %@ AND value == %@", "Assegnazione", value),
+            object: assignment)
+        XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed,
+                       assignmentDiagnostic(assignment), file: file, line: line)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "automatic_assignment_status").count, 1,
+                       "Automatic assignment must expose one semantic field", file: file, line: line)
+    }
+
+    private func assignmentDiagnostic(_ assignment: XCUIElement) -> String {
+        guard assignment.exists else { return "Assignment field is unavailable" }
+        return "Assignment label: \(assignment.label); value: \(String(describing: assignment.value))"
+    }
+
+    /// LabeledContent exposes readiness as one label/value pair, regardless of
+    /// the OS-specific accessibility element type. Keep unknown-state matching exact.
+    private func waitForReadinessValue(_ value: String, file: StaticString = #filePath, line: UInt = #line) {
+        let readiness = element("delivery_readiness")
+        let expected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND label == %@ AND value == %@", "Disponibilità", value),
+            object: readiness)
+        XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed,
+                       readinessDiagnostic(readiness), file: file, line: line)
+    }
+
+    private func waitForReadinessValue(prefix: String, suffix: String, file: StaticString = #filePath, line: UInt = #line) {
+        let readiness = element("delivery_readiness")
+        let expected = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND label == %@ AND value BEGINSWITH %@ AND value ENDSWITH %@",
+                                   "Disponibilità", prefix, suffix),
+            object: readiness)
+        XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed,
+                       readinessDiagnostic(readiness), file: file, line: line)
+    }
+
+    private func readinessDiagnostic(_ readiness: XCUIElement) -> String {
+        guard readiness.exists else { return "Readiness field is unavailable" }
+        return "Readiness label: \(readiness.label); value: \(String(describing: readiness.value))"
     }
 
     private func waitForLabel(_ element: XCUIElement, _ label: String) {

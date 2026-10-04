@@ -242,7 +242,13 @@ final class PilotSessionTests: XCTestCase {
 
     func testHiddenSuggestionsCannotSignOutAfterRepeatedViewChanges() async {
         useDualAccount()
+        // Suggestions now require a locally known, eligible delivery. Seed it before
+        // login so this test still exercises a real delayed unauthorized response.
+        let pending = teamDelivery(id: "pending", owner: nil, status: .pending)
+        backend.withState { $0.jobs = [pending] }
         await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertEqual(store.deliveries, [pending])
+        XCTAssertTrue(pending.hasKnownReadiness)
         let started = expectation(description: "Old suggestions sent")
         let release = DispatchSemaphore(value: 0)
         defer { release.signal() }
@@ -257,6 +263,9 @@ final class PilotSessionTests: XCTestCase {
         release.signal()
         let result = await old.value
         XCTAssertNil(result)
+        XCTAssertEqual(backend.withState {
+            $0.requests.filter { $0.method == "GET" && $0.path == "/v1/deliveries/pending/suggestions" }.count
+        }, 1, "The stale 401 must actually have reached the transport")
         XCTAssertEqual(store.role, .dispatcher)
         XCTAssertEqual(store.principal?.id, "reviewer")
         XCTAssertNil(store.errorMessage)
@@ -800,6 +809,11 @@ final class PilotSessionTests: XCTestCase {
 }
 
 private final class FaultingPilotStorage: SessionStorage {
+    private var restaurants: [String: PendingRestaurant] = [:]
+    func loadRestaurant(scope: String) throws -> PendingRestaurant? { restaurants[scope] }
+    func saveRestaurant(_ value: PendingRestaurant, scope: String) throws { restaurants[scope] = value }
+    func clearRestaurant(scope: String) throws { restaurants[scope] = nil }
+
     let base: MemorySessionStorage
     var failCreationLoad = false
     var failCreationSave = false
@@ -965,7 +979,7 @@ private final class PilotSessionBackend {
                     delivery = Delivery(id: "created-\(state.committedCreates)", shopName: input.shopName,
                                         pickupAddress: input.pickupAddress, pickup: input.pickup,
                                         dropoffAddress: input.dropoffAddress, dropoff: input.dropoff,
-                                        readyAt: input.readyAt, deadlineAt: input.deadlineAt,
+                                        readyAt: input.readyAt ?? 0, deadlineAt: input.deadlineAt,
                                         loadUnits: input.loadUnits, maxRideSeconds: input.maxRideSeconds,
                                         status: .pending, driverId: nil, createdAt: 1, pickedUpAt: nil, deliveredAt: nil)
                     state.creations[scope] = delivery

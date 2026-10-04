@@ -4,6 +4,30 @@ The phone-pilot changes add authentication/session/role negative tests, endpoint
 
 Never established by CI: owner-hosted HTTPS, persistent-volume deployment/restore, signed physical-iPhone behavior, background GPS while locked/terminated, Apple signing, TestFlight processing or beta review. The manual checklist is in [pilot-runbook.md](pilot-runbook.md).
 
+## Local readiness and restaurant verification (2026-10-04)
+
+The readiness/automatic-dispatch/saved-restaurant changes passed local Rust formatting,
+Clippy with warnings denied, all 58 Rust tests, and 44 Python/script tests. The
+real-process HTTP smoke also passed both the legacy manual flow and the new saved
+restaurant → unknown readiness → estimate → ready-now → automatic assignment →
+pickup/dropoff flow. The API implementation reviewed was local commit `9d12486`.
+
+The tests include future-ETA dispatch by the server timer after restart without
+mobile polling, team/role/revocation rejection, immutable restaurant pickup
+snapshots, idempotent retries, all-late assignment, a full car delivering first,
+no-GPS assignment with unavailable ETAs, fixed-cohort queue fairness under new
+arrivals, and pickup-anchored cumulative detour limits. Read-only independent API
+and iOS reviews found no remaining confirmed blocker in their reviewed scope.
+
+All 19 Swift source/test files passed structural parsing. This is **not** an Apple
+SDK type-check, simulator run, screenshot review or unsigned Release build. Those
+stages had not run at this local checkpoint. The exact published head must pass
+native CI before merge. Pay particular attention to restaurant-sheet
+closure, unavailable-ETA presentation, and notices on otherwise feasible routes.
+
+No hosting deployment, database migration on a live system, TestFlight upload or
+physical-device test was performed.
+
 ## Historical demo verification
 
 # Verification record

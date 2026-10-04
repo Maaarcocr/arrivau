@@ -50,6 +50,8 @@ final class ItalianPresentationTests: XCTestCase {
             ("Onboard load exceeds capacity", "Il carico a bordo supera la capacità.")
         ]
         let prefixes = [
+            ("Readiness is unknown for ", "Disponibilità da definire per la consegna "),
+            ("Onboard delivery delay exceeded for ", "Tempo a bordo superato per la consegna "),
             ("Duplicate stop for ", "Tappa duplicata per la consegna "),
             ("Invalid route reference ", "Riferimento non valido nel percorso: "),
             ("Duplicate pickup for ", "Ritiro duplicato per la consegna "),
@@ -68,6 +70,11 @@ final class ItalianPresentationTests: XCTestCase {
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: APIClient.encoder().encode(route)) as? [String: Any])
         XCTAssertEqual(body["warnings"] as? [String], cases.map { $0.0 })
         XCTAssertNil(body["localized_warnings"])
+    }
+
+    func testRouteNoticesNeverEchoUnrecognizedServerText() {
+        XCTAssertEqual(ItalianPresentation.routeNotice("Pickup target missed for delivery-1"), "Ritiro previsto oltre l’obiettivo di 10 minuti dalla disponibilità.")
+        XCTAssertEqual(ItalianPresentation.routeNotice("Unexpected English detail"), "Controlla con la centrale l’orario previsto per il ritiro.")
     }
 
     func testUnknownOrMalformedWarningsCannotEchoEnglishOrUserText() {
@@ -114,6 +121,10 @@ final class ItalianPresentationTests: XCTestCase {
             ("Pickup is not the next route stop", "Il ritiro non è la prossima tappa del percorso."),
             ("Delivery is not ready for pickup", "La consegna non è ancora pronta per il ritiro."),
             ("Pickup would exceed driver capacity", "Il ritiro supererebbe la capacità del corriere."),
+            ("Ready-in minutes must be between 0 and 120", "Indica un numero di minuti compreso tra 0 e 120."),
+            ("Readiness cannot change after pickup", "La disponibilità non può cambiare dopo il ritiro."),
+            ("Readiness changed; refresh the delivery and try again", "La disponibilità è cambiata. Aggiorna la consegna e riprova."),
+            ("Set readiness before choosing a driver", "Indica quando sarà pronta prima di scegliere un corriere."),
             ("Suggestions are only available before pickup", "I suggerimenti sono disponibili solo prima del ritiro.")
         ]
         for (raw, expected) in cases { XCTAssertEqual(ItalianPresentation.serverError(raw, statusCode: 409), expected, raw) }

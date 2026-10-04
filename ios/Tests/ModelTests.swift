@@ -56,6 +56,90 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(delivery.pickedUpAt)
         XCTAssertEqual(delivery.pickup, .pachino)
     }
+    func testReadinessCompatibilityAndKnownTimestampGuards() throws {
+        let legacy = try APIClient.decoder().decode(Delivery.self, from: Fixtures.delivery)
+        XCTAssertEqual(legacy.readinessState, .estimated)
+        XCTAssertEqual(legacy.readinessRevision, 0)
+        XCTAssertNil(legacy.readinessUpdatedAt)
+        XCTAssertNil(legacy.onboardDeadlineAt)
+        XCTAssertNil(legacy.dispatchWaitingReason)
+        let route = try APIClient.decoder().decode(DriverRoute.self, from: Fixtures.route)
+        for state in [ReadinessState.unknown, .estimated, .ready] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Fixtures.delivery) as? [String: Any])
+            object["readiness_state"] = state.rawValue
+            object["readiness_revision"] = 3
+            object["readiness_updated_at"] = 1_790_873_900
+            object["onboard_deadline_at"] = 1_790_875_800
+            let delivery = try APIClient.decoder().decode(Delivery.self, from: JSONSerialization.data(withJSONObject: object))
+            XCTAssertEqual(delivery.readinessState, state)
+            XCTAssertEqual(delivery.readinessRevision, 3)
+            XCTAssertEqual(delivery.readinessUpdatedAt, 1_790_873_900)
+            XCTAssertEqual(delivery.onboardDeadlineAt, 1_790_875_800)
+            XCTAssertEqual(DeliveryAction.nextStatus(delivery: delivery, route: route, now: delivery.readyAt + 1), state == .unknown ? nil : .pickedUp)
+            XCTAssertNil(DeliveryAction.nextStatus(delivery: delivery, route: route, now: delivery.readyAt - 1))
+            XCTAssertEqual(delivery.pickupTargetAt, state == .unknown ? nil : delivery.readyAt + 600)
+            XCTAssertEqual(try APIClient.decoder().decode(Delivery.self, from: APIClient.encoder().encode(delivery)), delivery)
+            if state == .unknown { XCTAssertEqual(delivery.readinessTitle, "Da definire") }
+            if state == .estimated {
+                XCTAssertTrue(delivery.readinessTitle.contains("stima"), "An elapsed forecast never becomes confirmed")
+                XCTAssertFalse(delivery.readinessTitle.contains("confermata"))
+            }
+            if state == .ready { XCTAssertTrue(delivery.readinessTitle.contains("confermata")) }
+        }
+    }
+    func testNewCreationOmitsUnknownReadinessButDecodesLegacyRecovery() throws {
+        let original = Fixtures.newDelivery
+        let draft = NewDelivery(shopName: original.shopName, pickupAddress: original.pickupAddress,
+                                pickup: original.pickup, dropoffAddress: original.dropoffAddress, dropoff: original.dropoff,
+                                readyAt: nil, deadlineAt: original.deadlineAt, loadUnits: 1, maxRideSeconds: 1800)
+        XCTAssertNil(draft.validationError)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: APIClient.encoder().encode(draft)) as? [String: Any])
+        XCTAssertNil(body["ready_at"])
+        XCTAssertNil(body["restaurant_id"], "Legacy recovery hashes must omit a missing restaurant ID")
+        XCTAssertEqual(try APIClient.decoder().decode(NewDelivery.self, from: APIClient.encoder().encode(draft)), draft)
+        XCTAssertEqual(try APIClient.decoder().decode(NewDelivery.self, from: APIClient.encoder().encode(original)), original)
+    }
+    func testSoftNoticesDecodeWithoutChangingFeasibilityOrHardWarnings() throws {
+        let legacy = try APIClient.decoder().decode(DriverRoute.self, from: Fixtures.route)
+        XCTAssertEqual(legacy.notices, [])
+        XCTAssertTrue(legacy.estimatesAvailable)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Fixtures.route) as? [String: Any])
+        object["notices"] = ["Pickup target missed for delivery-1"]
+        let route = try APIClient.decoder().decode(DriverRoute.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertTrue(route.feasible)
+        XCTAssertEqual(route.warnings, [])
+        XCTAssertEqual(route.localizedNotices, ["Ritiro previsto oltre l’obiettivo di 10 minuti dalla disponibilità."])
+        XCTAssertEqual(try APIClient.decoder().decode(DriverRoute.self, from: APIClient.encoder().encode(route)), route)
+    }
+    func testUnavailableEstimatesAndPendingReasonsDecodeWithItalianPresentation() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Fixtures.route) as? [String: Any])
+        object["estimates_available"] = false
+        let route = try APIClient.decoder().decode(DriverRoute.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertFalse(route.estimatesAvailable)
+        XCTAssertFalse(route.stops.isEmpty, "Missing GPS must not discard committed stops")
+        var job = try XCTUnwrap(JSONSerialization.jsonObject(with: Fixtures.delivery) as? [String: Any])
+        for (reason, expected) in [("no_active_driver", "Nessun corriere in turno"), ("capacity_or_route_limit", "al completo"), ("Future English reason", "Assegnazione in attesa")] {
+            job["dispatch_waiting_reason"] = reason
+            let delivery = try APIClient.decoder().decode(Delivery.self, from: JSONSerialization.data(withJSONObject: job))
+            XCTAssertTrue(try XCTUnwrap(delivery.localizedDispatchWaitingReason).contains(expected))
+            XCTAssertFalse(try XCTUnwrap(delivery.localizedDispatchWaitingReason).contains("English"))
+        }
+    }
+    func testSavedRestaurantBecomesExactCreationSnapshotAndID() throws {
+        let restaurant = Restaurant(id: "restaurant-1", name: "Pizzeria", address: "Via Roma 1", coordinate: .pachino, createdAt: 1000)
+        XCTAssertEqual(try APIClient.decoder().decode(Restaurant.self, from: APIClient.encoder().encode(restaurant)), restaurant)
+        let draft = NewDelivery(shopName: restaurant.name, pickupAddress: restaurant.address, pickup: restaurant.coordinate,
+                                dropoffAddress: "Via Garibaldi 8", dropoff: .pachino, readyAt: nil,
+                                deadlineAt: 2000, loadUnits: 1, maxRideSeconds: 1800, restaurantId: restaurant.id)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: APIClient.encoder().encode(draft)) as? [String: Any])
+        XCTAssertEqual(body["restaurant_id"] as? String, restaurant.id)
+        XCTAssertEqual(body["shop_name"] as? String, restaurant.name)
+        XCTAssertEqual(body["pickup_address"] as? String, restaurant.address)
+        XCTAssertNil(body["ready_at"])
+        XCTAssertNil(draft.validationError)
+        XCTAssertNotNil(NewRestaurant(name: " ", address: "Via Roma", coordinate: .pachino).validationError)
+        XCTAssertNotNil(NewRestaurant(name: "Pizzeria", address: "Via Roma", coordinate: Coordinate(lat: 91, lng: 0)).validationError)
+    }
     func testNextStopCannotSkipPickupOrReadyTime() throws {
         let delivery = try APIClient.decoder().decode(Delivery.self, from: Fixtures.delivery)
         let route = try APIClient.decoder().decode(DriverRoute.self, from: Fixtures.route)

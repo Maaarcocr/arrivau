@@ -43,6 +43,33 @@ final class APIClientTests: XCTestCase {
         let result = try await client.create(Fixtures.newDelivery)
         XCTAssertEqual(result.id, "delivery-1")
     }
+    func testRestaurantAPIUsesCanonicalPlaceAndRetryKey() async throws {
+        let restaurant = Restaurant(id: "restaurant-1", name: "Pizzeria", address: "Via Roma 1", coordinate: .pachino, createdAt: 1000)
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/restaurants")
+            if request.httpMethod == "GET" { return (200, try APIClient.encoder().encode([restaurant])) }
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), "restaurant-retry")
+            let payload = try APIClient.decoder().decode(NewRestaurant.self, from: Self.body(of: request))
+            XCTAssertEqual(payload, NewRestaurant(name: restaurant.name, address: restaurant.address, coordinate: restaurant.coordinate))
+            return (201, try APIClient.encoder().encode(restaurant))
+        }
+        let saved = try await client.createRestaurant(NewRestaurant(name: restaurant.name, address: restaurant.address, coordinate: restaurant.coordinate), idempotencyKey: "restaurant-retry")
+        XCTAssertEqual(saved, restaurant)
+        let listed = try await client.restaurants()
+        XCTAssertEqual(listed, [restaurant])
+    }
+    func testReadinessPostsExactRevisionAndIdempotencyKey() async throws {
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/deliveries/delivery-1/readiness")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), "readiness-retry-key")
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Int])
+            XCTAssertEqual(payload, ["ready_in_minutes": 10, "expected_revision": 7])
+            return (200, Fixtures.delivery)
+        }
+        let result = try await client.readiness(deliveryId: "delivery-1", update: ReadinessUpdate(readyInMinutes: 10, expectedRevision: 7), idempotencyKey: "readiness-retry-key")
+        XCTAssertEqual(result.id, "delivery-1")
+    }
     func testServerConflictIsShownWithoutSilentRetry() async throws {
         var count = 0
         StubURLProtocol.handler = { _ in

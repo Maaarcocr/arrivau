@@ -18,7 +18,7 @@ pub fn open(
     db.busy_timeout(Duration::from_secs(5))?;
     db.execute_batch("PRAGMA foreign_keys=ON;")?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 2 {
+    if version > 3 {
         return Err(ApiError::bad_request(
             "Database schema is newer than this server",
         ));
@@ -53,6 +53,12 @@ pub fn open(
            response TEXT NOT NULL CHECK(json_valid(response)), PRIMARY KEY(principal_id,key)
          );"
     )?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS restaurants (
+        id TEXT PRIMARY KEY, team_id TEXT NOT NULL,
+        body TEXT NOT NULL CHECK(json_valid(body))
+    ); CREATE INDEX IF NOT EXISTS restaurants_team ON restaurants(team_id,id);",
+    )?;
     let marker: Option<String> = tx
         .query_row("SELECT value FROM deployment WHERE key='mode'", [], |r| {
             r.get(0)
@@ -83,7 +89,7 @@ pub fn open(
             |r| r.get(0),
         )
         .optional()?;
-    if version == 2 && mapping.is_none() {
+    if version >= 2 && mapping.is_none() {
         return Err(ApiError::bad_request(
             "Team schema is missing its legacy/default team mapping",
         ));
@@ -106,7 +112,7 @@ pub fn open(
             rows.collect::<Result<_, _>>()?
         };
         if !columns.iter().any(|c| c == "team_id") {
-            if version == 2 {
+            if version >= 2 {
                 return Err(ApiError::bad_request(
                     "Team schema is incomplete; restore a verified backup",
                 ));
@@ -129,6 +135,7 @@ pub fn open(
          INSERT OR IGNORE INTO account_teams(account_id,team_id) SELECT principal_id,team_id FROM idempotency;
          CREATE INDEX IF NOT EXISTS drivers_team ON drivers(team_id,id);
          CREATE INDEX IF NOT EXISTS deliveries_team ON deliveries(team_id,driver_id,status);
+         CREATE INDEX IF NOT EXISTS deliveries_team_status ON deliveries(team_id,status);
          CREATE INDEX IF NOT EXISTS routes_team ON route_stops(team_id,driver_id,position);
          CREATE INDEX IF NOT EXISTS idempotency_team ON idempotency(team_id,principal_id,key);
          CREATE INDEX IF NOT EXISTS sessions_team ON sessions(team_id,account_id);"
@@ -203,10 +210,46 @@ pub fn open(
             [legacy_team],
         )?;
     }
-    tx.execute_batch("PRAGMA user_version=2;")?;
+    // Older servers cannot interpret unknown readiness safely; fail their
+    // existing future-schema guard rather than allow a semantic downgrade.
+    tx.execute_batch("PRAGMA user_version=3;")?;
     tx.commit()?;
     db.execute_batch("PRAGMA journal_mode=WAL;")?;
     Ok(db)
+}
+
+pub fn restaurants(db: &Connection, team_id: &str) -> ApiResult<Vec<Restaurant>> {
+    let mut stmt = db.prepare("SELECT body FROM restaurants WHERE team_id=?1 ORDER BY rowid")?;
+    let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
+    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+}
+
+pub fn restaurant(db: &Connection, team_id: &str, id: &str) -> ApiResult<Restaurant> {
+    let body: Option<String> = db
+        .query_row(
+            "SELECT body FROM restaurants WHERE id=?1 AND team_id=?2",
+            params![id, team_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    serde_json::from_str(&body.ok_or_else(|| ApiError::not_found("Restaurant not found"))?)
+        .map_err(Into::into)
+}
+
+pub fn save_restaurant(db: &Connection, team_id: &str, restaurant: &Restaurant) -> ApiResult<()> {
+    db.execute(
+        "INSERT INTO restaurants(id,team_id,body) VALUES (?1,?2,?3)",
+        params![restaurant.id, team_id, serde_json::to_string(restaurant)?],
+    )?;
+    Ok(())
+}
+
+pub fn delivery_teams(db: &Connection) -> ApiResult<Vec<String>> {
+    let mut stmt = db.prepare(
+        "SELECT DISTINCT team_id FROM deliveries WHERE status='pending' ORDER BY team_id",
+    )?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect::<Result<_, _>>().map_err(Into::into)
 }
 
 pub fn drivers(db: &Connection, team_id: &str) -> ApiResult<Vec<Driver>> {
@@ -240,6 +283,14 @@ pub fn save_driver(db: &Connection, team_id: &str, driver: &Driver) -> ApiResult
 
 pub fn deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
     let mut stmt = db.prepare("SELECT body FROM deliveries WHERE team_id=?1 ORDER BY rowid")?;
+    let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
+    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+}
+
+/// Planning never needs completed history. Keep every outstanding job, including
+/// pending ones, while avoiding repeated JSON deserialization of archived work.
+pub fn planning_deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
+    let mut stmt = db.prepare("SELECT body FROM deliveries WHERE team_id=?1 AND status IN ('pending','assigned','picked_up') ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
     rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
 }

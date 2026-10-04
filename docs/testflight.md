@@ -1,6 +1,6 @@
 # Archive and TestFlight handoff
 
-For building without a connected Mac, use the new [manual GitHub Actions signing/upload guide](testflight-ci.md). Its default action validates an archive; upload is a separate explicit selection after secure owner setup. The instructions below remain an optional local-Xcode route.
+**For the Linux owner setup, follow the [GitHub TestFlight checklist](testflight-ci.md).** The rest of this page is a local Xcode reference for developers.
 
 This repository prepares an archive workflow. **Nothing here automatically uploads a build.** Do not put Apple IDs, account passwords, App Store Connect keys, certificates or provisioning profiles in chat or Git. Use Xcode's account UI or a separately approved secure credential setup.
 

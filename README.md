@@ -13,9 +13,25 @@ Follow [the pilot runbook](docs/pilot-runbook.md) for:
 3. Configuring a signed iPhone build with your endpoint, team and bundle ID
 4. Running the two-phone delivery and interruption checklist
 
-[The TestFlight guide](docs/testflight.md) includes an archive-only command and the explicit upload handoff. [Manual GitHub Actions signing/upload](docs/testflight-ci.md) is also prepared for building without a connected Mac; it requires owner-supplied signing assets and an explicit upload choice. No server, Apple account, credentials or TestFlight build is created automatically. The owner supplies hosting and Apple signing/access.
+Use the [TestFlight publishing steps](#publish-to-testflight) for the configured GitHub-hosted build workflow. Complete the backend and physical-device checks before using real customer work.
 
 Deployment templates: `deploy/Dockerfile`, `deploy/arrivau.service`, `deploy/pilot.env.example`, `deploy/Caddyfile.example`. Read [API configuration](api/README.md) before using them. Keep account files, password hashes, sessions and databases out of Git/logs.
+
+## Publish to TestFlight
+
+Use [Actions → Manual TestFlight](https://github.com/Maaarcocr/arrivau/actions/workflows/testflight.yml) with the existing repository signing secrets and Actions variables:
+
+1. Check that `main` contains the intended changes and its ordinary verification CI is green
+2. Choose **Run workflow**, branch **main**, and a build number from **1–9999** that has not already been uploaded for the current app version (`0.2.0`)
+3. Choose **archive** to verify signing and packaging without uploading, or **upload** to send the signed build to App Store Connect. If enabled, approve the configured `testflight` environment gate after reviewing the source SHA and action
+4. After upload, check processing in App Store Connect, resolve any export-compliance/privacy questions accurately, and add the processed build to the intended TestFlight group. External testing may require Beta App Review
+5. Install on both pilot phones and complete the [delivery](docs/pilot-runbook.md#5-run-one-supervised-delivery) and [interruption/device checks](docs/pilot-runbook.md#6-required-interruptiondevice-checks)
+
+The workflow requires `TESTFLIGHT_SIGNING_ENABLED=true` and runs only by manual dispatch from `main`. It uses the configured `ARRIVAU_TEAM_ID`, `ARRIVAU_BUNDLE_ID` and HTTPS `ARRIVAU_API_URL`; no credentials belong in Git, chat or logs. Signing credentials and temporary binaries are cleaned up, and an archive run retains no IPA artifact. Keep signing assets current through the repository's protected settings.
+
+For an optional local Mac archive, run `./scripts/archive-ios.sh` with the same team, bundle and API settings plus `ARRIVAU_BUILD_NUMBER`. This command archives only; it does not upload.
+
+A successful upload confirms transfer to Apple, not completed processing, tester access or public release. Check the [workflow](.github/workflows/testflight.yml), [Apple upload guidance](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/) and [TestFlight overview](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/) when troubleshooting. Hosted HTTPS, backups and real-device behavior are covered by the [pilot runbook](docs/pilot-runbook.md).
 
 ## What is included
 

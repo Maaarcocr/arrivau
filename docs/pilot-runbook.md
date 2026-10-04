@@ -58,7 +58,7 @@ There is no automatic data-retention/deletion service or audit trail. Decide ret
 
 ## 4. iPhone and TestFlight preparation
 
-Read [the TestFlight guide](testflight.md). You will provide the HTTPS URL, Apple Developer team, a registered bundle identifier and App Store Connect app record. Xcode 26+ is required by Apple's current upload rules; the app still targets iOS 17+. The repository contains an opaque 1024px icon, privacy manifest, Release transport restrictions, version/build settings and an archive-only script.
+Use the [TestFlight publishing steps](../README.md#publish-to-testflight) for the configured signing/upload workflow. Verify the build's HTTPS API origin and privacy disclosures against the deployed service. The app targets iOS 17+; the repository includes an opaque 1024px icon, privacy manifest and Release transport restrictions.
 
 The app opens an Italian login screen. Enter your service's exact HTTPS origin and the assigned username/password. The server returns the role; there is no role picker in the normal pilot flow. Release builds cannot use demo credentials or HTTP. The first login may need network access for Apple Maps place search later.
 

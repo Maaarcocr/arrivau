@@ -280,10 +280,11 @@ final class DeliveryFlowUITests: XCTestCase {
 
     func testPilotLoginHasNoRoleChooserAndRejectsHTTP() {
         app.terminate()
-        app.launchArguments = ["-AppleLanguages", "(it)", "-AppleLocale", "it_IT"]
+        app.launchArguments = ["--pilot-uitesting", "-AppleLanguages", "(it)", "-AppleLocale", "it_IT"]
         app.launchEnvironment["ARRIVAU_API_URL"] = "http://api.example.com"
         app.launch()
         XCTAssertTrue(app.textFields["login_username"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.alerts.firstMatch.exists, "Fresh isolated pilot login must not be blocked by a restoration error")
         XCTAssertFalse(app.buttons["login_dispatcher"].exists)
         XCTAssertFalse(app.buttons["login_driver1"].exists)
         replace(app.textFields["login_username"], with: "pilot-test")

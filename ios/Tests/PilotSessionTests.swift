@@ -26,6 +26,9 @@ final class PilotSessionTests: XCTestCase {
 
     override func tearDown() async throws {
         stores.forEach { $0.logout() }
+        // URLSession throws an Objective-C exception if a queued logout task tries to
+        // create its request after invalidation. Join every store's revocations first.
+        for value in stores { await value.awaitPendingRevocations() }
         stores.removeAll()
         store = nil
         session.invalidateAndCancel()

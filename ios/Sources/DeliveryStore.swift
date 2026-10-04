@@ -42,6 +42,7 @@ final class DeliveryStore: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var locationTask: Task<Void, Never>?
     private var expiryTask: Task<Void, Never>?
+    private var revocationTasks: [UUID: Task<Void, Never>] = [:]
     private var sessionId = UUID()
     private var refreshId = UUID()
     private enum ActionKind: Equatable { case assignment(String), status(DeliveryStatus) }
@@ -55,10 +56,13 @@ final class DeliveryStore: ObservableObject {
          mode: ConnectionMode? = nil, storage: SessionStorage? = nil) {
         urlSession = session
         #if DEBUG
-        isUITesting = deterministicLocation ?? ProcessInfo.processInfo.arguments.contains("--uitesting")
-        self.mode = mode ?? ((isUITesting || ProcessInfo.processInfo.arguments.contains("--demo")) ? .demo : .pilot)
+        let pilotUITesting = ProcessInfo.processInfo.arguments.contains("--pilot-uitesting")
+        isUITesting = deterministicLocation ?? (!pilotUITesting && ProcessInfo.processInfo.arguments.contains("--uitesting"))
+        self.mode = mode ?? (pilotUITesting ? .pilot : ((isUITesting || ProcessInfo.processInfo.arguments.contains("--demo")) ? .demo : .pilot))
         if let storage { self.storage = storage }
-        else if self.mode == .demo { self.storage = MemorySessionStorage() }
+        // Unsigned simulator UI tests exercise the real pilot screen and HTTPS policy,
+        // but cannot depend on signing-dependent Keychain entitlements or persisted user state.
+        else if self.mode == .demo || pilotUITesting { self.storage = MemorySessionStorage() }
         else { self.storage = KeychainSessionStorage() }
         let configuredURL = ProcessInfo.processInfo.environment["ARRIVAU_API_URL"]
             ?? Bundle.main.object(forInfoDictionaryKey: "ARRIVAU_API_URL") as? String ?? ""
@@ -199,7 +203,9 @@ final class DeliveryStore: ObservableObject {
         invalidateSession(message: nil)
         let signedOut = sessionId
         guard revoke, let previous else { return }
-        Task { [weak self] in
+        let revocationId = UUID()
+        revocationTasks[revocationId] = Task { [weak self] in
+            defer { self?.revocationTasks[revocationId] = nil }
             do { try await previous.revokeSession() }
             catch {
                 guard (error as? APIError)?.isUnauthorized != true,
@@ -207,6 +213,13 @@ final class DeliveryStore: ObservableObject {
                 self.errorMessage = "Sei uscito da questo iPhone e la posizione è ferma. La revoca sul server non è confermata: chiedi al responsabile di revocare la sessione; altrimenti resterà valida fino alla scadenza."
             }
         }
+    }
+
+    /// Owners of an injected transport must join outstanding logout work before disposing it.
+    /// Local sign-out remains synchronous so GPS and private views stop without waiting for network I/O.
+    func awaitPendingRevocations() async {
+        let pending = Array(revocationTasks.values)
+        for task in pending { await task.value }
     }
 
     private func invalidateSession(message: String?) {

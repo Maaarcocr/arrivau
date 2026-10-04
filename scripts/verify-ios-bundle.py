@@ -10,7 +10,7 @@ def verify(path):
     if 'NSAppTransportSecurity' in info:
         raise ValueError('Release must not contain insecure transport exceptions')
     if info.get('UIDeviceFamily') != [1]:
-        raise ValueError('The current supervised pilot must target iPhone only')
+        raise ValueError(f"The current supervised pilot must target iPhone only; actual UIDeviceFamily={info.get('UIDeviceFamily')!r}")
     icon = info.get('CFBundleIcons', {}).get('CFBundlePrimaryIcon', {})
     if icon.get('CFBundleIconName') != 'AppIcon' or not (bundle/'Assets.car').is_file():
         raise ValueError('Compiled AppIcon is missing from the actual application bundle')

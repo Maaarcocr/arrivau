@@ -30,3 +30,8 @@ xcuserdata/
 *.p8
 *.ipa
 *.xcarchive/
+
+# Owner-managed signing preparation must stay outside Git
+/arrivau-signing/
+*.key.pem
+*.certSigningRequest

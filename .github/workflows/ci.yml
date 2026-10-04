@@ -52,6 +52,8 @@ jobs:
           brew install xcodegen
           xcodegen --version
           xcrun simctl list devices available
+      - name: Inspect manual TestFlight CLI compatibility (no credentials)
+        run: ./scripts/check-testflight-tools.sh
       - name: Build Release for a real iOS device (unsigned)
         run: |
           (cd ios && xcodegen generate)

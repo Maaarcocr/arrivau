@@ -2,7 +2,7 @@
 
 The normal app now signs in to a configured HTTPS pilot service using individual credentials and server-assigned roles. It securely stores expiring sessions in the Keychain, restores them only after server verification, revokes on reachable logout, and clears private state/GPS on signout or expiry. Release has no demo chooser or fixture tokens.
 
-Start with [the pilot runbook](../docs/pilot-runbook.md) and [TestFlight/signing guide](../docs/testflight.md). `ARRIVAU_API_URL` is a non-secret build setting embedded in Info.plist; when blank, the login screen asks for the HTTPS root origin. Set your own team and registered bundle ID when archiving. `scripts/archive-ios.sh` validates configuration and only builds an archive.
+Start with [the pilot runbook](../docs/pilot-runbook.md) and [TestFlight publishing steps](../README.md#publish-to-testflight). `ARRIVAU_API_URL` is a non-secret build setting embedded in Info.plist; when blank, the login screen asks for the HTTPS root origin. `scripts/archive-ios.sh` validates configuration and only builds a local archive.
 
 For simulator development, launch the Debug app with `--demo`. `--uitesting` implies the isolated loopback demo. These flags and environment fixture overrides are compiled out of Release. The older detailed workflow below describes this explicit demo/test mode; physical phones use the pilot login.
 

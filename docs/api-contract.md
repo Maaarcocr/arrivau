@@ -77,4 +77,14 @@ Invitation secrets are cryptorandom 32-byte values stored only as SHA-256 hashes
 
 Limits: 20 issuance attempts per dispatcher/hour; 100 unexpired pending invites and 100 invited accounts including disabled identities per team; 60 redemption attempts/minute overall and 10 per token/username per five minutes, persisted across restart. Usernames are globally unique. Use ingress rate limiting/timeouts too.
 
-Do not automatically replay uncertain redemption after transport failure/cancellation/lost response. The account may already exist: use normal login with the same username/password and server. Links are bearer secrets; share privately, never log them or request bodies. App links cannot change the API origin. Account deletion remains a separate release gate, described in `invites.md`; offline disabling is not deletion.
+Do not automatically replay uncertain redemption after transport failure/cancellation/lost response. The account may already exist: use normal login with the same username/password and server. Links are bearer secrets; share privately, never log them or request bodies. App links cannot change the API origin. Invite-created drivers may delete their account using the preview/confirmation contract below; offline disabling is a separate operation that retains history.
+
+
+## Invited-account hard deletion
+
+The server adds optional `can_delete_account:true` to actual invite-created principals. Omission means unsupported; configured/demo accounts are not self-deletable. This display capability never replaces endpoint authorization.
+
+- `GET /v1/account/deletion-preview` (authenticated invited driver) → `{"delivery_count":3,"active_delivery_count":1,"confirmation":"<64-hex snapshot>"}`. Counts and the snapshot cover that account's currently linked deliveries within its team
+- `DELETE /v1/account` (authenticated invited driver) body `{"password":"<current password>","confirmation":"<reviewed snapshot>"}` → 204 after an atomic hard delete. No user ID, team ID or extra fields accepted. Password confirmation failure 403, invalid/revoked session 401, changed preview 409, throttling 429. A stale preview requires rereading and explicit reconfirmation
+
+Password verification shares the bounded Argon2 pool. Final identity/session/team/snapshot checks run under the deletion transaction, so changing assignments/status/readiness cannot silently expand the reviewed action. The full record scope and intentionally preserved shared data are documented in `invites.md`. Deleted-account tokens immediately stop authenticating; repeating deletion with them cannot perform a new action. A lost response is uncertain: never automatically replay a destructive request or claim success without confirmation.

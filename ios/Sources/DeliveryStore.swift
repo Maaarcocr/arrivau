@@ -15,6 +15,14 @@ final class DeliveryStore: ObservableObject {
     @Published private(set) var inviteErrorMessage: String?
     @Published private(set) var isRedeemingInvite = false
     @Published private(set) var principal: Principal?
+    var canDeleteAccount: Bool { !isDemo && principal?.canDeleteAccount == true }
+    @Published private(set) var isReviewingAccountDeletion = false
+    @Published private(set) var isLoadingAccountDeletion = false
+    @Published private(set) var isDeletingAccount = false
+    @Published private(set) var accountDeletionReview: AccountDeletionReview?
+    @Published private(set) var accountDeletionError: String?
+    @Published var accountDeletionNotice: String?
+    private var accountDeletionReadId = UUID()
     @Published private var availableDeliveries: [Delivery] = []
     @Published private(set) var restaurants: [Restaurant] = []
     @Published private(set) var pendingRestaurant: PendingRestaurant?
@@ -85,6 +93,122 @@ final class DeliveryStore: ObservableObject {
         fileprivate let currentScope: String
         fileprivate let legacyScope: String
         let pending: PendingCreation
+    }
+
+    /// Bound to one session and one displayed snapshot. Cancel/reopen invalidates it.
+    struct AccountDeletionReview: Equatable {
+        fileprivate let sessionId: UUID
+        let id: UUID
+        let preview: AccountDeletionPreview
+    }
+
+    func beginAccountDeletionReview() async {
+        guard validateSession(), canDeleteAccount, !isMutating, !isReviewingAccountDeletion else { return }
+        isReviewingAccountDeletion = true
+        await loadAccountDeletionReview()
+    }
+
+    func cancelAccountDeletionReview() {
+        guard !isDeletingAccount else { return }
+        resetAccountDeletionReview()
+    }
+
+    private func resetAccountDeletionReview() {
+        accountDeletionReadId = UUID()
+        isReviewingAccountDeletion = false
+        isLoadingAccountDeletion = false
+        isDeletingAccount = false
+        accountDeletionReview = nil
+        accountDeletionError = nil
+    }
+
+    func loadAccountDeletionReview(preservingError: Bool = false) async {
+        guard validateSession(), canDeleteAccount, isReviewingAccountDeletion,
+              !isMutating, !isLoadingAccountDeletion, let api = client else { return }
+        let session = sessionId
+        let request = UUID()
+        accountDeletionReadId = request
+        accountDeletionReview = nil
+        isLoadingAccountDeletion = true
+        if !preservingError { accountDeletionError = nil }
+        defer { if session == sessionId, request == accountDeletionReadId { isLoadingAccountDeletion = false } }
+        do {
+            let preview = try await api.accountDeletionPreview()
+            guard session == sessionId, request == accountDeletionReadId, isReviewingAccountDeletion,
+                  !Task.isCancelled else { return }
+            accountDeletionReview = AccountDeletionReview(sessionId: session, id: request, preview: preview)
+        } catch {
+            guard session == sessionId, request == accountDeletionReadId, !Task.isCancelled else { return }
+            if !handleUnauthorized(error) {
+                accountDeletionError = "Impossibile verificare i dati da eliminare. \(ItalianPresentation.errorMessage(error))"
+            }
+        }
+    }
+
+    /// Only the explicit destructive confirmation calls this. Nothing is persisted or retried.
+    @discardableResult
+    func deleteAccount(password: String, review: AccountDeletionReview) async -> Bool {
+        guard validateSession(), canDeleteAccount, isReviewingAccountDeletion,
+              !isMutating, !isLoadingAccountDeletion, !Task.isCancelled,
+              !password.isEmpty, password.utf8.count <= 1024,
+              review.sessionId == sessionId, accountDeletionReview == review,
+              let api = client else { return false }
+        let session = sessionId
+        isMutating = true
+        isDeletingAccount = true
+        accountDeletionError = nil
+        // Do not let an old refresh or location upload repopulate the account during deletion.
+        refreshId = UUID(); isRefreshing = false
+        setLocationSharing(false)
+        do {
+            try await api.deleteAccount(password: password, confirmation: review.preview.confirmation)
+            guard session == sessionId else { return false }
+            finishAccountDeletionLocally(message: "Account eliminato definitivamente. Le consegne collegate e i dati dell’account sono stati rimossi. La condivisione della posizione è ferma.")
+            return true
+        } catch {
+            guard session == sessionId else { return false }
+            if handleUnauthorized(error) { return false }
+            let failure = error as? APIError
+            let uncertain = error is URLError || error is CancellationError
+                || failure?.mutationOutcomeUncertain == true || (300..<400).contains(failure?.statusCode ?? 0)
+            if uncertain {
+                finishAccountDeletionLocally(message: "Non è possibile confermare se l’account è stato eliminato. Sei uscito da questo iPhone e la condivisione della posizione è ferma. La richiesta non verrà ripetuta automaticamente. Prova ad accedere per verificare se l’account esiste ancora; se non riesci, chiedi al responsabile di verificarlo.")
+                return false
+            }
+            isMutating = false
+            isDeletingAccount = false
+            if failure?.statusCode == 409 {
+                accountDeletionReview = nil
+                accountDeletionError = "Le consegne collegate sono cambiate. Rileggi il riepilogo aggiornato, reinserisci la password e conferma di nuovo."
+                await loadAccountDeletionReview(preservingError: true)
+            } else if failure?.statusCode == 429 {
+                accountDeletionError = "Troppi tentativi di eliminazione. Attendi qualche minuto e reinserisci la password prima di riprovare."
+            } else {
+                accountDeletionError = ItalianPresentation.errorMessage(error)
+            }
+            return false
+        }
+    }
+
+    private func finishAccountDeletionLocally(message: String) {
+        var recoveryCleared = true
+        if let user = principal, let api = client {
+            let scopes = Set([CreationScope.current(endpoint: api.baseURL.absoluteString, user: user),
+                              CreationScope.legacy(endpoint: api.baseURL.absoluteString, accountId: user.id)])
+            for scope in scopes {
+                do { try storage.clearCreation(scope: scope) } catch { recoveryCleared = false }
+                do { try storage.clearRestaurant(scope: scope) } catch { recoveryCleared = false }
+            }
+        }
+        uncertainInviteTokens = []
+        inviteOutcomeUncertain = false
+        invalidateSession(message: nil)
+        let cleanupWarning = errorMessage
+        errorMessage = nil
+        accountDeletionNotice = message
+        if !recoveryCleared || cleanupWarning != nil {
+            accountDeletionNotice = message + " Non è stato possibile rimuovere tutti i dati protetti da questo iPhone. Sblocca il dispositivo e chiedi assistenza per la pulizia locale."
+        }
     }
 
 
@@ -391,6 +515,8 @@ final class DeliveryStore: ObservableObject {
         client = api
         apiURL = api.baseURL.absoluteString
         principal = user
+        resetAccountDeletionReview()
+        accountDeletionNotice = nil
         role = user.serverRole
         viewId = UUID()
         creationScope = scope
@@ -461,6 +587,7 @@ final class DeliveryStore: ObservableObject {
     }
 
     private func invalidateSession(message: String?, preservingInvite: Bool = false) {
+        resetAccountDeletionReview()
         // A cold-launch invite survives rejection of an older saved session. Explicit logout,
         // cancellation and invalidation of an active account still discard the invitation.
         let queuedInvite = preservingInvite && !isRedeemingInvite ? pendingInvite : nil
@@ -537,7 +664,7 @@ final class DeliveryStore: ObservableObject {
     }
 
     func refresh(force: Bool = false) async {
-        guard validateSession(), let api = client, let selectedRole = role, force || (!isRefreshing && !isMutating) else { return }
+        guard validateSession(), !isDeletingAccount, let api = client, let selectedRole = role, force || (!isRefreshing && !isMutating) else { return }
         let session = sessionId
         let requestId = UUID()
         refreshId = requestId
@@ -903,7 +1030,7 @@ final class DeliveryStore: ObservableObject {
     }
     func setLocationSharing(_ value: Bool) {
         guard validateSession() else { return }
-        locationSharing = value && role == .driver && principal?.supports(.driver) == true && currentDriver?.active == true
+        locationSharing = value && !isDeletingAccount && role == .driver && principal?.supports(.driver) == true && currentDriver?.active == true
         if !locationSharing { backgroundLocationSharing = false; locationErrorMessage = nil }
         synchronizeLocation()
     }
@@ -975,5 +1102,4 @@ final class DeliveryStore: ObservableObject {
         }
     }
 }
-
 

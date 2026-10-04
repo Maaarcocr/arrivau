@@ -179,5 +179,12 @@ final class ItalianPresentationTests: XCTestCase {
         XCTAssertEqual(draft(ride: 59).validationError, "Il tempo massimo di trasporto deve essere compreso tra 1 e 120 minuti.")
         XCTAssertNil(draft(ready: 2, deadline: 2).validationError)
     }
+    func testDeletedRequestExplainsDiscardInsteadOfRetry() {
+        let message = ItalianPresentation.serverError("Idempotency-Key refers to deleted data; discard this saved request", statusCode: 409)
+        XCTAssertTrue(message.contains("dati eliminati"))
+        XCTAssertTrue(message.contains("Scartala"))
+        XCTAssertFalse(message.contains("Idempotency-Key"))
+    }
+
 }
 

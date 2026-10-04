@@ -892,7 +892,7 @@ async fn existing_pilot_database_additive_upgrade_preserves_driver_and_session()
     server.close().await;
     // Simulate the exact pre-invite schema, keeping existing pilot data in place.
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("DROP TABLE invites; DROP TABLE invited_accounts; PRAGMA user_version=3;")
+    db.execute_batch("DROP TABLE invites; DROP TABLE invited_accounts; DROP TABLE idempotency_retired; PRAGMA user_version=3;")
         .unwrap();
     drop(db);
     let server = Server::start(&path, clock, config()).await;

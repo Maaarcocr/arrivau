@@ -213,6 +213,68 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(called)
         task.cancel()
     }
+
+    func testDeletionPreviewIsAuthenticatedReadWithoutIdentityOrBody() async throws {
+        let snapshot = String(repeating: "a", count: 64)
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/account/deletion-preview")
+            XCTAssertNil(request.url?.query)
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer demo-driver-1")
+            XCTAssertTrue(try Self.body(of: request).isEmpty)
+            return (200, try JSONSerialization.data(withJSONObject: ["delivery_count": 4, "active_delivery_count": 2, "confirmation": snapshot]))
+        }
+        let result = try await client.accountDeletionPreview()
+        XCTAssertEqual(result.deliveryCount, 4)
+        XCTAssertEqual(result.activeDeliveryCount, 2)
+        XCTAssertEqual(result.confirmation, snapshot)
+    }
+
+    func testDeletionPostsOnlyPasswordAndDisplayedSnapshotAndAcceptsEmpty204() async throws {
+        let snapshot = String(repeating: "b", count: 64)
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/account")
+            XCTAssertNil(request.url?.query)
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer demo-driver-1")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Idempotency-Key"))
+            XCTAssertFalse(request.httpShouldHandleCookies)
+            XCTAssertEqual(request.cachePolicy, .reloadIgnoringLocalCacheData)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: String])
+            XCTAssertEqual(body, ["password": "  test-only-password  ", "confirmation": snapshot])
+            return (204, Data())
+        }
+        try await client.deleteAccount(password: "  test-only-password  ", confirmation: snapshot)
+    }
+
+    func testDeletionNeverTreatsUnexpectedSuccessStatusAsCompleted() async throws {
+        for status in [200, 201, 202] {
+            StubURLProtocol.handler = { _ in (status, Data()) }
+            do {
+                try await client.deleteAccount(password: "test-only-password", confirmation: String(repeating: "a", count: 64))
+                XCTFail("Only 204 confirms immediate deletion")
+            } catch { XCTAssertTrue(try XCTUnwrap(error as? APIError).mutationOutcomeUncertain) }
+        }
+    }
+
+    func testDeletionErrorsPreserveStatusWithoutAutomaticRetry() async throws {
+        for status in [401, 403, 409, 429, 500] {
+            var count = 0
+            StubURLProtocol.handler = { _ in count += 1; return (status, Data(#"{"error":"Password confirmation failed"}"#.utf8)) }
+            do {
+                try await client.deleteAccount(password: "test-only-password", confirmation: String(repeating: "a", count: 64))
+                XCTFail("Expected deletion error")
+            } catch {
+                let failure = try XCTUnwrap(error as? APIError)
+                XCTAssertEqual(failure.statusCode, status)
+                XCTAssertEqual(failure.mutationOutcomeUncertain, status >= 500)
+                XCTAssertEqual(failure.isUnauthorized, status == 401)
+            }
+            XCTAssertEqual(count, 1)
+        }
+    }
+
     private static func body(of request: URLRequest) throws -> Data {
         if let data = request.httpBody { return data }
         guard let stream = request.httpBodyStream else { return Data() }

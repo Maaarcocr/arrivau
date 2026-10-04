@@ -28,13 +28,15 @@ closure, unavailable-ETA presentation, and notices on otherwise feasible routes.
 No hosting deployment, database migration on a live system, TestFlight upload or
 physical-device test was performed.
 
-## Team-scoped invitation draft
+## Team-scoped invitation checkpoint
 
 The invitation changes add real HTTP/SQLite checks for additive schema v4, configured-account compatibility, server-controlled team/driver capability, dual-capability issuers, foreign-team revoke/identity rejection, immutable account/session bindings, replay/concurrent redemption, username races, session-insert rollback, expiry during hashing, persistent rate limits and live-disable races. Default local verification on Rust 1.99.0 passed formatting, warnings-as-errors Clippy, 84 Rust tests and 44 Python/script tests. The embedded-OSRM build also passed warnings-as-errors Clippy, 88 Rust tests and 2 deterministic native graph/HTTP tests using the pinned OSRM 6.0.0 toolchain; no external routing service was used.
 
-The iOS change adds 45 invite model/unit tests and 2 native form tests. Static Swift syntax/plist checks and independent read-only API/iOS review passed; native build/tests require the exact draft-PR head's macOS CI. Signed-device link dispatch/share-sheet behavior and deployed-HTTPS signup remain manual checks. Existing routing/readiness/team tests are retained, and public CI still withholds raw Xcode diagnostics/results.
+The invitation-only checkpoint added 45 invite model/unit tests and 2 native form tests. Full API/iOS CI, unsigned Release build, simulator unit/UI tests and the container build passed on head `ad9901dc33d6d4669f81574fadfee534560f1907` ([run](https://github.com/Maaarcocr/arrivau/actions/runs/37236188583)). Signed-device link dispatch/share-sheet behavior and deployed-HTTPS signup remain manual checks. Existing routing/readiness/team tests are retained, and public CI still withholds raw Xcode diagnostics/results.
 
-Passing CI does not remove the [account-deletion release gate](invites.md#app-store-release-gate). No merge, live invitation, production migration/deployment or TestFlight upload is part of this draft.
+The subsequently requested [hard-deletion flow](invites.md#account-deletion) adds schema v5 rollback protection and changes the head and requires its own final checks before merge. It covers explicit cancellation/confirmation, password and session validation, exact linked-record cleanup, retry reservations, team isolation and concurrent assignment/readiness/pickup/routing. Signed-device behavior and App Review acceptance are separate from CI. No live invitation, account deletion or production migration is performed by tests.
+
+The deletion-enabled schema-v5 source passed local default formatting/Clippy and 103 Rust tests, embedded-feature Clippy and 107 Rust tests, two actual OSRM synthetic-graph tests, and 44 Python/script tests. The iOS changes add 22 deletion regression tests plus an Italian retired-request-message regression; all 26 Swift files parse structurally. Final Apple build/simulator checks must be taken from the deletion-enabled commit, not the earlier invitation-only checkpoint. Independent read-only API/iOS review found no unresolved actionable issue after the schema-v5 downgrade guard.
 
 ## Historical demo verification
 

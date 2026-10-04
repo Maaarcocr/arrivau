@@ -81,7 +81,7 @@ Configure 1–100 accounts, including a dispatcher. IDs/usernames contain 1–64
 letters, digits, dot, underscore or hyphen, starting with a letter or digit;
 usernames must be lowercase. Session
 TTL must be 300–86400 seconds. Teams and capabilities come exclusively from this configuration.
-There is no open signup, role/team-selection endpoint, or password-reset endpoint. A configured account with dispatcher capability may issue one-use driver-only invitations for its own team; invited accounts are persisted in SQLite and must not be copied into this configuration. See [invitation operation and release gate](../docs/invites.md).
+There is no open signup, role/team-selection endpoint, or password-reset endpoint. A configured account with dispatcher capability may issue one-use driver-only invitations for its own team; invited accounts are persisted in SQLite and must not be copied into this configuration. See [invitation operation and account deletion](../docs/invites.md).
 
 ## Production-mode configuration
 
@@ -213,4 +213,4 @@ acceptance checklist; a passing Rust test suite does not establish those outcome
 
 ## Restaurants and automatic readiness dispatch
 
-New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version4 also protects invite-account state and prevents unsafe older-backend rollback; take a verified backup before upgrading. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.
+New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version 5 also protects invite-account state and prevents unsafe older-backend rollback; take a verified backup before upgrading. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.

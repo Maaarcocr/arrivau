@@ -61,6 +61,15 @@ struct RootView: View {
                             else { DriverView() }
                         }
                         .toolbar {
+                            if store.canDeleteAccount {
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button { Task { await store.beginAccountDeletionReview() } } label: {
+                                        Label("Account", systemImage: "gearshape")
+                                    }
+                                    .accessibilityIdentifier("account_settings")
+                                    .disabled(store.isMutating)
+                                }
+                            }
                             ToolbarItem(placement: .topBarTrailing) {
                                 Button { store.logout() } label: {
                                     Label(store.isDemo ? "Cambia account" : "Esci", systemImage: "person.crop.circle")
@@ -79,6 +88,10 @@ struct RootView: View {
             get: { store.isRestoringSession || store.canRetryRestore ? nil : store.pendingInvite },
             set: { if $0 == nil && !store.isRestoringSession { store.dismissInvite() } }
         )) { invitation in InviteSignupView().id(invitation.id) }
+        .sheet(isPresented: Binding(
+            get: { store.isReviewingAccountDeletion },
+            set: { if !$0 { store.cancelAccountDeletionReview() } }
+        )) { AccountDeletionView() }
         .alert("Operazione non riuscita", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
@@ -124,6 +137,12 @@ struct LoginView: View {
                         Text(store.isDemo ? "Demo locale · Debug" : "Prova pilota supervisionata")
                             .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     }.padding(.vertical, 16)
+                }
+                if let notice = store.accountDeletionNotice {
+                    Section("Eliminazione account") {
+                        Text(notice).accessibilityIdentifier("account_deletion_notice")
+                        Button("Ho capito") { store.accountDeletionNotice = nil }
+                    }
                 }
                 #if DEBUG
                 if store.isDemo { demoLogin }

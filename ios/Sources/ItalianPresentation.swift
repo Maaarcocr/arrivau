@@ -80,6 +80,11 @@ enum ItalianPresentation {
         "Method not allowed": "Questo tipo di richiesta non è consentito.",
         "Invite is invalid, expired or already used": "Invito non valido, scaduto o già utilizzato. Se hai già creato l’account, torna ad Accedi; altrimenti chiedi un nuovo invito al responsabile.",
         "Username is unavailable": "Questo nome utente non è disponibile. Scegline un altro.",
+        "Idempotency-Key refers to deleted data; discard this saved request": "Questa richiesta salvata riguarda dati eliminati. Scartala prima di creare una nuova consegna; non ripetere quella precedente.",
+        "Password confirmation failed": "Password attuale non corretta. Inseriscila di nuovo per confermare l’eliminazione.",
+        "Deletion preview changed; review again": "Le consegne collegate sono cambiate. Rileggi il riepilogo aggiornato e conferma di nuovo.",
+        "Self-service deletion is available only for invited driver accounts; configured accounts must be managed by the operator": "L’eliminazione è disponibile solo per i corrieri invitati. Per questo account contatta il responsabile.",
+        "A valid deletion preview confirmation is required": "Verifica di nuovo il riepilogo prima di confermare l’eliminazione.",
         "Invite not found": "Invito non trovato o non più disponibile.",
         "Driver not found": "Corriere non trovato.",
         "Delivery not found": "Consegna non trovata.",
@@ -178,4 +183,3 @@ extension Date {
     var italianTimeWithSeconds: String { ItalianPresentation.time(self, includesSeconds: true) }
     var italianDateTime: String { ItalianPresentation.dateTime(self) }
 }
-

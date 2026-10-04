@@ -1,10 +1,20 @@
-# Team-scoped driver invitations (draft)
+# Team-scoped driver invitations and account deletion
 
 This change prepares a separate app/API rollout. It does not deploy the API, upload a new app build, change the existing TestFlight build, create live invitations, or grant Apple beta access.
 
-## App Store release gate
+## Account deletion
 
-Apple requires apps supporting account creation to let users initiate account deletion in-app: [Offering account deletion in your app](https://developer.apple.com/support/offering-account-deletion-in-your-app/). This draft adds signup but does not yet add deletion or define operational-history retention. Logout and the operator disable command are not account deletion. Keep this change unpublished until the owner approves and implements a deletion/retention flow suitable for the pilot. This gate does not modify the already published TestFlight build.
+An invited driver can open **Elimina account**, review the linked-delivery count (including active deliveries), enter their current password and explicitly confirm irreversible deletion. A canceled dialog sends no deletion request. This is immediate hard deletion, not a delayed workflow or deactivation. If an assignment, readiness or delivery status changes after the preview, the server rejects the old confirmation and requires a fresh review.
+
+The confirmed transaction removes the invited account and password hash, its driver/profile/location row, every session, its immutable identity binding, all deliveries currently assigned to that driver (including completed and picked-up deliveries), related route stops on every affected route, and cached idempotency responses that reference the removed account/deliveries. Team-owned restaurants, other drivers, other teams and unrelated deliveries remain. The schema does not track delivery creators; deletion does not invent creator ownership or erase unrelated team records. Deleting an active delivery does not notify a restaurant/customer or recover a physical order: the confirmation warns that those deliveries will disappear.
+
+For surviving dispatchers' affected requests, only a one-way hash of their team/account/request-key tuple remains as an anti-replay reservation. It contains no deleted account/delivery IDs, request or response payload. The old response row is removed; replay returns a conflict instead of recreating a deleted order. Deleted-account request rows are removed outright because all of that account's sessions are revoked.
+
+Self-service deletion is available only to durable invite-created accounts. Operator-configured accounts remain in the separate protected auth file and cannot honestly be erased by this endpoint; the API rejects that operation and the app does not present the self-delete action for them. This does not claim that ending a session deletes an operator-managed identity.
+
+This implementation provides an in-app deletion path for accounts created by the invite flow, following [Apple's account-deletion guidance](https://developer.apple.com/support/offering-account-deletion-in-your-app/). It is not an assurance of App Review acceptance or legal compliance. The existing manual disable command is a separate recovery tool and intentionally retains history.
+
+Deletion removes records from the active database, not every historical copy or storage byte. Backups, SQLite WAL/free pages, previously exported data and other devices' cached displays are not remotely purged. Restoring an older backup can restore deleted data; the operator must reconcile deletions before reopening a restored service. This feature does not introduce an automatic backup-retention or forensic-erasure system.
 
 ## Smallest operator flow
 
@@ -21,11 +31,11 @@ No account can select its team or capabilities at signup. The API fixes invited 
 
 Back up the current persistent SQLite database (using the runbook's consistent backup procedure) and auth configuration before an intentional upgrade. Run the final commit's backend and native CI. Deploy the new API first, then distribute the new app, with explicit owner approval for each operational action. Older apps still use unchanged login/session and delivery contracts; new invitation actions require the new API.
 
-Schema v4 is additive: `invited_accounts` and `invites` tables/indexes are created if absent. All invited identities have a permanent `account_teams` binding; database triggers prevent relabeling invites, accounts or sessions across teams. The schema version intentionally blocks older servers from reopening an invited-account database. Configured identities/password hashes stay in the existing auth file; invited identities, salted password hashes and disabled status stay in the persistent database. No new credentials or invitation secrets are seeded. Existing driver, session, route and delivery records are retained. Do not replace or clear the deployed database, migrate from a demo DB, or add invited identities to the auth configuration.
+Schema v5 is additive: `invited_accounts`, `invites` and minimal anti-replay tables/indexes are created if absent. While an invited identity exists, it has an immutable `account_teams` binding; database triggers prevent relabeling invites, accounts or sessions across teams. Schema v5 prevents older binaries from ignoring the deletion anti-replay reservations and resurrecting erased orders. Configured identities/password hashes stay in the existing auth file; invited identities, salted password hashes and disabled status stay in the persistent database. No new credentials or invitation secrets are seeded. Existing driver, session, route and delivery records are retained. Do not replace or clear the deployed database, migrate from a demo DB, or add invited identities to the auth configuration.
 
 Startup fails closed if a configured account ID/username collides with an invited identity, including a disabled identity. Resolve the conflicting configuration; do not delete either person's history. Unchanged invited accounts and their sessions survive restart; removing a configured account still invalidates that account's sessions as before. Changing/removing the issuing configured account or its dispatcher capability permanently invalidates unconsumed invitations on restart; restoring the previous config does not resurrect those secrets. Invited accounts already created remain members of their original team. Removing that team from configuration disables their login and clears their sessions; re-adding the same team permits a new login without moving any history.
 
-Pre-invite binaries reject schema v4 rather than silently invalidating invited users or interpreting their data incorrectly. Plan an outage and compatible backup recovery rather than silently downgrading an active pilot. Any database restore must account for deliveries created after its snapshot. Keep SQLite private and backed up because it now also owns invited password hashes.
+Earlier binaries, including the invite-only draft, reject schema v5 rather than silently invalidating invited users or interpreting their data incorrectly. Plan an outage and compatible backup recovery rather than silently downgrading an active pilot. Any database restore must account for deliveries created after its snapshot. Keep SQLite private and backed up because it now also owns invited password hashes.
 
 ## Lost responses and retry
 
@@ -55,3 +65,12 @@ The container image also includes `/usr/local/bin/arrivau-disable-invited-accoun
 - Cancellation, repeated submission, logout and late network responses cannot install a stale session; lost responses explain normal-login recovery
 - Exercise link opening and pasted-code fallback on the signed device build, with the exact deployment origin; test cancel/back and opening a link while signed in
 - Verify external TestFlight access separately. A working Arrivau invitation is not an Apple testing invitation
+
+## Deletion checks
+
+- Wrong password, missing/stale confirmation and cancel leave all data intact
+- Only the authenticated invited account can delete itself; supplied user/team IDs and configured/demo accounts cannot widen the action
+- Total/active counts match the same team-bound snapshot consumed in the transaction
+- Completed, assigned and picked-up linked deliveries are removed consistently, with no dangling route stops or cached response resurrecting them
+- Assignment, readiness, pickup and automatic dispatch races either commit before the reviewed deletion or fail safely; unrelated team data stays intact
+- After success, sessions/GPS/private views clear; lost responses are reported as uncertain and are never automatically retried

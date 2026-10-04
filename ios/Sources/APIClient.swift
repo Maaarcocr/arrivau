@@ -94,6 +94,7 @@ struct APIClient {
     private struct LoginBody: Encodable { let username: String; let password: String }
     private struct InviteBody: Encodable { let name: String }
     private struct RedeemInviteBody: Encodable { let token: String; let username: String; let password: String }
+    private struct DeleteAccountBody: Encodable { let password: String; let confirmation: String }
     private struct ShiftBody: Encodable { let active: Bool; let capacity: Int }
     private struct AssignmentBody: Encodable { let driverId: String }
     private struct StatusBody: Encodable { let status: DeliveryStatus }
@@ -112,6 +113,11 @@ struct APIClient {
         // Even an accidentally authenticated caller must not send an existing bearer here.
         let anonymous = APIClient(baseURL: baseURL, token: "", session: session)
         return try await anonymous.post("v1/invites/redeem", body: RedeemInviteBody(token: token, username: username, password: password))
+    }
+    func accountDeletionPreview() async throws -> AccountDeletionPreview { try await get("v1/account/deletion-preview") }
+    func deleteAccount(password: String, confirmation: String) async throws {
+        let body = try Self.encoder().encode(DeleteAccountBody(password: password, confirmation: confirmation))
+        _ = try await response("v1/account", method: "DELETE", body: body, requiredStatus: 204)
     }
     func identity() async throws -> SessionIdentity { try await get("v1/session") }
     func revokeSession() async throws { _ = try await response("v1/session", method: "DELETE", body: nil) }
@@ -155,7 +161,7 @@ struct APIClient {
                            mutationOutcomeUncertain: method != "GET")
         }
     }
-    private func response(_ path: String, method: String, body: Data?, idempotencyKey: String? = nil) async throws -> Data {
+    private func response(_ path: String, method: String, body: Data?, idempotencyKey: String? = nil, requiredStatus: Int? = nil) async throws -> Data {
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = method
         request.httpBody = body
@@ -179,6 +185,9 @@ struct APIClient {
             let detail = (try? Self.decoder().decode(ErrorBody.self, from: data))?.error
             throw APIError(message: ItalianPresentation.serverError(detail, statusCode: http.statusCode),
                            mutationOutcomeUncertain: method != "GET" && http.statusCode >= 500, statusCode: http.statusCode)
+        }
+        if let requiredStatus, http.statusCode != requiredStatus {
+            throw APIError(message: "Il server non ha confermato il completamento dell’operazione.", mutationOutcomeUncertain: method != "GET")
         }
         return data
     }

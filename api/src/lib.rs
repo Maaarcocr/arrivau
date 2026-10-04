@@ -1,3 +1,4 @@
+mod account_deletion;
 pub mod auth;
 mod db;
 mod error;
@@ -364,6 +365,8 @@ struct Principal {
     roles: Vec<String>,
     team_id: String,
     team_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_delete_account: Option<bool>,
 }
 impl Principal {
     fn has_role(&self, role: &str) -> bool {
@@ -437,6 +440,7 @@ async fn authenticate(
                     roles,
                     team_id: team_id.into(),
                     team_name: team_name.into(),
+                    can_delete_account: None,
                 },
                 expires_at: None,
                 token_hash: None,
@@ -472,6 +476,8 @@ pub fn app(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/me", get(me))
         .route("/session", get(session_identity).delete(logout))
+        .route("/account/deletion-preview", get(account_deletion::preview))
+        .route("/account", axum::routing::delete(account_deletion::delete))
         .route("/drivers", get(list_drivers))
         .route("/invites", post(invites::issue))
         .route("/invites/{id}", axum::routing::delete(invites::revoke))
@@ -735,6 +741,9 @@ struct Idempotency {
     request_hash: String,
 }
 impl Idempotency {
+    fn scope_hash(team: &str, principal: &str, key: &str) -> String {
+        auth::digest(&serde_json::to_string(&(team, principal, key)).expect("strings serialize"))
+    }
     fn parse(headers: &HeaderMap, path: &str, body: &impl Serialize) -> ApiResult<Option<Self>> {
         let Some(value) = headers.get("idempotency-key") else {
             return Ok(None);
@@ -767,6 +776,20 @@ impl Idempotency {
         db: &Connection,
         principal: &Principal,
     ) -> ApiResult<Option<T>> {
+        let retired: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM idempotency_retired WHERE scope_hash=?1)",
+            [Self::scope_hash(
+                &principal.team_id,
+                &principal.id,
+                &self.key,
+            )],
+            |r| r.get(0),
+        )?;
+        if retired {
+            return Err(ApiError::conflict(
+                "Idempotency-Key refers to deleted data; discard this saved request",
+            ));
+        }
         let row: Option<(String, String)> = db
             .query_row(
                 "SELECT request_hash,response FROM idempotency WHERE principal_id=?1 AND key=?2 AND team_id=?3",
@@ -1791,6 +1814,7 @@ mod routing_snapshot_tests {
             roles: vec![role.into()],
             team_id: "demo".into(),
             team_name: "Demo".into(),
+            can_delete_account: None,
         }
     }
     fn headers(key: &str) -> HeaderMap {

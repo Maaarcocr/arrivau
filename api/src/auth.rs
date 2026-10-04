@@ -201,6 +201,7 @@ impl Account {
                 .find(|t| t.id == team_id)
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| team_id.into()),
+            can_delete_account: (!config.accounts.iter().any(|a| a.id == self.id)).then_some(true),
         }
     }
     pub(crate) fn fingerprint(&self, config: &ProductionConfig) -> String {

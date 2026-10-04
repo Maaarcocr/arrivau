@@ -95,6 +95,6 @@ Mutations use idempotency keys to make retries of a still-pending action safe. T
 - Database backups, service monitoring, certificate renewal, host security and retention are the operator's responsibility
 - Physical phones, signing, TestFlight processing/review, hosted TLS and real-world network behavior are not covered by CI
 
-## Invitation rollout gate
+## Invitation and deletion rollout
 
-Driver invitations are scoped to the issuer's Squadra and preserve existing dual-role accounts. See [invitations](invites.md) for additive schema v4, uncertain-response recovery, backups and operator disabling. Keep the draft unpublished until its account-deletion decision and native/device checks are resolved; invitation work does not authorize live migrations or a TestFlight upload.
+Driver invitations are scoped to the issuer's Squadra and preserve existing dual-role accounts. See [invitations](invites.md) for additive schema v5, uncertain-response recovery, backups and operator disabling. Invited-account deletion is irreversible and includes linked active deliveries after explicit confirmation. Run the final commit’s native/device checks; merging source does not deploy a live migration or upload a TestFlight build.

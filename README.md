@@ -35,9 +35,9 @@ For an optional local Mac archive, run `./scripts/archive-ios.sh` with the same 
 
 A successful upload confirms transfer to Apple, not completed processing, tester access or public release. Check the [workflow](.github/workflows/testflight.yml), [Apple upload guidance](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/) and [TestFlight overview](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/) when troubleshooting. Hosted HTTPS, backups and real-device behavior are covered by the [pilot runbook](docs/pilot-runbook.md).
 
-## Driver invitations (draft)
+## Driver invitations
 
-A dispatcher can privately share a one-use, 24-hour driver invitation for their own Squadra. The recipient opens the link or pastes its code and chooses their own username/password. Team and driver-only access come from the server; existing configured dual-role accounts are unchanged. This draft must stay unpublished until its [account-deletion release gate](docs/invites.md#app-store-release-gate) is resolved. See [rollout, team boundaries and recovery](docs/invites.md). Invitations do not install the app or grant TestFlight access.
+A dispatcher can privately share a one-use, 24-hour driver invitation for their own Squadra. The recipient opens the link or pastes its code and chooses their own username/password. Team and driver-only access come from the server; existing configured dual-role accounts are unchanged. Invite-created drivers can also [delete their account and linked records](docs/invites.md#account-deletion) after password verification and an explicit warning, including active deliveries. See [rollout, team boundaries and recovery](docs/invites.md). Invitations do not install the app or grant TestFlight access.
 
 ## What is included
 

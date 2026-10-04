@@ -18,9 +18,20 @@ pub fn open(
     db.busy_timeout(Duration::from_secs(5))?;
     db.execute_batch("PRAGMA foreign_keys=ON;")?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 4 {
+    if version > 5 {
         return Err(ApiError::bad_request(
             "Database schema is newer than this server",
+        ));
+    }
+    if version >= 5
+        && !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='idempotency_retired')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err(ApiError::bad_request(
+            "Deletion retry metadata is missing; restore a verified backup",
         ));
     }
     // All schema, legacy mappings and guards commit together; rejected upgrades leave data intact.
@@ -48,6 +59,7 @@ pub fn open(
          );
          CREATE INDEX IF NOT EXISTS sessions_account ON sessions(account_id,expires_at);
          CREATE TABLE IF NOT EXISTS login_limits (bucket TEXT PRIMARY KEY,attempts INTEGER NOT NULL,reset_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS idempotency_retired (scope_hash TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS idempotency (
            principal_id TEXT NOT NULL, key TEXT NOT NULL, request_hash TEXT NOT NULL,
            response TEXT NOT NULL CHECK(json_valid(response)), PRIMARY KEY(principal_id,key)
@@ -230,9 +242,9 @@ pub fn open(
             [legacy_team],
         )?;
     }
-    // Older servers cannot authenticate durable invited accounts safely; fail their
-    // existing future-schema guard rather than allow a semantic downgrade.
-    tx.execute_batch("PRAGMA user_version=4;")?;
+    // Invite-only v4 servers ignore retired retry keys and could resurrect erased
+    // deliveries after downgrade. Reject them through their future-schema guard.
+    tx.execute_batch("PRAGMA user_version=5;")?;
     tx.commit()?;
     db.execute_batch("PRAGMA journal_mode=WAL;")?;
     Ok(db)

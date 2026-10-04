@@ -1,14 +1,17 @@
 # Arrivau API v1
 
-Pilot API base: your configured HTTPS root origin. Isolated demo base: `http://127.0.0.1:8080`. JSON uses snake_case. Timestamps are UTC Unix seconds (integers), coordinates decimal degrees. IDs are strings. All routes except `GET /health` and `POST /v1/session` require `Authorization: Bearer <token>`.
+Pilot API base: your configured HTTPS root origin. Isolated demo base: `http://127.0.0.1:8080`. JSON uses snake_case. Timestamps are UTC Unix seconds (integers), coordinates decimal degrees. IDs are strings. All routes except `GET /health`, `POST /v1/session` and `POST /v1/invites/redeem` require `Authorization: Bearer <token>`.
 
 Demo-only principals (enabled explicitly by `ARRIVAU_DEMO=1`): token `demo-dispatcher` has dispatcher role; `demo-driver-1` / `demo-driver-2` have driver role and matching IDs `driver-1` / `driver-2`. The additional `demo-dual` token identifies `dual-1` with both capabilities in the separate `demo-review` team. These tokens never authenticate in production mode. The API fails closed unless an explicit demo or fully configured production mode is selected. Bind loopback by default; managed hosts require both trusted-TLS-proxy and nonloopback opt-ins. Never expose raw HTTP or use public fixture tokens outside local development.
 
 Response examples retain the legacy fields; identity responses also include the additive fields described below. API errors: `{"error":"human-readable reason"}` with suitable 400/401/403/404/409/422/429 status. Responses have `Cache-Control: no-store`; request bodies are bounded to 16 KiB.
 
-- `POST /v1/session` (production, no bearer): body `{"username":"dispatcher","password":"<private password>"}` → 201 `{"token":"<opaque bearer>","expires_at":1791117600,"user":{"id":"dispatcher-1","name":"Centrale","role":"dispatcher"}}`. Invalid credentials return generic 401; throttling returns 429. Accounts are configured offline; no signup endpoint
+- `POST /v1/session` (production, no bearer): body `{"username":"dispatcher","password":"<private password>"}` → 201 `{"token":"<opaque bearer>","expires_at":1791117600,"user":{"id":"dispatcher-1","name":"Centrale","role":"dispatcher"}}`. Invalid credentials return generic 401; throttling returns 429. Configured accounts and invite-created drivers use the same login endpoint
 - `GET /v1/session` (authenticated) → `{"expires_at":1791117600,"user":{"id":"dispatcher-1","name":"Centrale","role":"dispatcher"}}`. Demo expiry is null
 - `DELETE /v1/session` (authenticated) → 204; revokes that production token immediately. Expired/revoked tokens return 401
+- `POST /v1/invites` (production, dispatcher capability) body `{"name":"Nome corriere"}` → 201 `{"id":"<UUID>","token":"<64 lowercase hex>","expires_at":1791204000,"name":"Nome corriere","role":"driver","team_id":"pilot","team_name":"Squadra pilota"}`. Name trimmed, 1–240 UTF-8 bytes, no control characters. Team derives solely from the issuer session. Driver-only capability, no optional client role/team fields. Token returned once, expires exactly 24 hours after issuance
+- `DELETE /v1/invites/{id}` (production, dispatcher capability) → 204, idempotently revokes a pending invite within the caller's team using its non-secret UUID. A foreign-team/missing ID is a no-op; it never disables an already-created account
+- `POST /v1/invites/redeem` (production, public) body `{"token":"<invite secret>","username":"new.driver","password":"<chosen password>"}` → 201 with the login session response and server-derived `user.roles:["driver"]`, `user.team_id` and `user.team_name`. Username normalized lowercase/trimmed, 1–64 ASCII letters/digits/dots/underscores/hyphens, first character alphanumeric, raw username maximum 64 bytes; password 12–1024 UTF-8 bytes. The token determines display name and team. Invalid/used/revoked/expired token → 400; unavailable username → 409 leaves invite usable; extra fields → 400; throttling → 429. All invitation endpoints unavailable in demo mode
 - `GET /health` → `{"status":"ok"}`
 - `GET /v1/me` → `{"id":"dispatcher-1","name":"Dispatcher","role":"dispatcher"}` (driver principals use matching IDs and name `Driver 1` etc.)
 - `GET /v1/restaurants` (dispatcher) → own-team saved restaurants: `{id,name,address,coordinate,created_at}`
@@ -67,3 +70,21 @@ The native app persists an uncertain creation's exact body/key scoped to HTTPS o
 A legacy endpoint/account-only pending creation is quarantined when explicit team identity becomes available: the app shows its original details and blocks creation/retry until the user has verified the server outcome and deliberately clears that local recovery record. It never silently replays an unscoped request into a new team.
 
 Backend schema3 rejects unsafe downgrade to pre-readiness binaries. See [rollout and compatibility](readiness-and-dispatch.md#compatibility-and-rollout).
+
+## Invite-only signup and uncertain responses
+
+Invitation secrets are cryptorandom 32-byte values stored only as SHA-256 hashes. Redemption commits invite consumption, a team-bound driver/account, immutable identity binding and session atomically. Replays and concurrent redemption cannot create another account; signup shares the bounded Argon2 workers with login. Configured-account changes permanently invalidate outstanding invitations at restart. Existing invited accounts remain independent of their original issuer after redemption.
+
+Limits: 20 issuance attempts per dispatcher/hour; 100 unexpired pending invites and 100 invited accounts including disabled identities per team; 60 redemption attempts/minute overall and 10 per token/username per five minutes, persisted across restart. Usernames are globally unique. Use ingress rate limiting/timeouts too.
+
+Do not automatically replay uncertain redemption after transport failure/cancellation/lost response. The account may already exist: use normal login with the same username/password and server. Links are bearer secrets; share privately, never log them or request bodies. App links cannot change the API origin. Invite-created drivers may delete their account using the preview/confirmation contract below; offline disabling is a separate operation that retains history.
+
+
+## Invited-account hard deletion
+
+The server adds optional `can_delete_account:true` to actual invite-created principals. Omission means unsupported; configured/demo accounts are not self-deletable. This display capability never replaces endpoint authorization.
+
+- `GET /v1/account/deletion-preview` (authenticated invited driver) → `{"delivery_count":3,"active_delivery_count":1,"confirmation":"<64-hex snapshot>"}`. Counts and the snapshot cover that account's currently linked deliveries within its team
+- `DELETE /v1/account` (authenticated invited driver) body `{"password":"<current password>","confirmation":"<reviewed snapshot>"}` → 204 after an atomic hard delete. No user ID, team ID or extra fields accepted. Password confirmation failure 403, invalid/revoked session 401, changed preview 409, throttling 429. A stale preview requires rereading and explicit reconfirmation
+
+Password verification shares the bounded Argon2 pool. Final identity/session/team/snapshot checks run under the deletion transaction, so changing assignments/status/readiness cannot silently expand the reviewed action. The full record scope and intentionally preserved shared data are documented in `invites.md`. Deleted-account tokens immediately stop authenticating; repeating deletion with them cannot perform a new action. A lost response is uncertain: never automatically replay a destructive request or claim success without confirmation.

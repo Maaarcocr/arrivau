@@ -39,14 +39,17 @@ struct Principal: Codable, Equatable {
     let roles: [String]
     let teamId: String?
     let teamName: String?
+    /// Absent on older/configured accounts; only the server grants self-deletion.
+    let canDeleteAccount: Bool
 
     init(id: String, name: String, role: String, roles: [String]? = nil,
-         teamId: String? = nil, teamName: String? = nil) {
+         teamId: String? = nil, teamName: String? = nil, canDeleteAccount: Bool = false) {
         self.id = id; self.name = name; self.role = role
         self.roles = roles ?? [role]
         self.teamId = teamId; self.teamName = teamName
+        self.canDeleteAccount = canDeleteAccount
     }
-    private enum CodingKeys: String, CodingKey { case id, name, role, roles, teamId, teamName }
+    private enum CodingKeys: String, CodingKey { case id, name, role, roles, teamId, teamName, canDeleteAccount }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
@@ -56,6 +59,7 @@ struct Principal: Codable, Equatable {
         roles = values.contains(.roles) ? try values.decode([String].self, forKey: .roles) : [role]
         teamId = try values.decodeIfPresent(String.self, forKey: .teamId)
         teamName = try values.decodeIfPresent(String.self, forKey: .teamName)
+        canDeleteAccount = try values.decodeIfPresent(Bool.self, forKey: .canDeleteAccount) ?? false
         if values.contains(.teamId), teamId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
             throw DecodingError.dataCorruptedError(forKey: .teamId, in: values, debugDescription: "Team identity must be nonempty")
         }

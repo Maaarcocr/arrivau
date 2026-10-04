@@ -806,6 +806,306 @@ final class PilotSessionTests: XCTestCase {
         XCTAssertEqual(backend.withState { $0.createAttempts }, 0)
         XCTAssertTrue(storage.creations.isEmpty)
     }
+
+    private func useDeletableAccount() {
+        backend.withState {
+            $0.user = Principal(id: "invited-driver", name: "Corriere invitato", role: "driver",
+                                teamId: "team-a", teamName: "Squadra A", canDeleteAccount: true)
+            $0.active = true
+        }
+    }
+
+    private func deletionReview() async throws -> DeliveryStore.AccountDeletionReview {
+        useDeletableAccount()
+        await store.login(username: "invited-driver", password: "test-only-password")
+        await store.beginAccountDeletionReview()
+        return try XCTUnwrap(store.accountDeletionReview)
+    }
+
+    func testConfiguredAccountCannotOpenDeletionOrReadPreview() async {
+        await store.login(username: "dispatcher-a", password: "test-only-password")
+        XCTAssertFalse(store.canDeleteAccount)
+        await store.beginAccountDeletionReview()
+        XCTAssertFalse(store.isReviewingAccountDeletion)
+        XCTAssertNil(store.accountDeletionReview)
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.path.hasPrefix("/v1/account") } })
+    }
+
+    func testDeletionReviewCancelInvalidatesExactSnapshotWithoutSending() async throws {
+        let first = try await deletionReview()
+        XCTAssertTrue(store.canDeleteAccount)
+        XCTAssertTrue(first.preview.warning.contains("2 consegne"))
+        XCTAssertTrue(first.preview.warning.contains("attive da eliminare sono 1"))
+        store.cancelAccountDeletionReview()
+        XCTAssertFalse(store.isReviewingAccountDeletion)
+        XCTAssertNil(store.accountDeletionReview)
+        await store.beginAccountDeletionReview()
+        XCTAssertNotEqual(store.accountDeletionReview?.id, first.id)
+        let canceled = await store.deleteAccount(password: "test-only-password", review: first)
+        XCTAssertFalse(canceled)
+        let review = try XCTUnwrap(store.accountDeletionReview)
+        let emptyPassword = await store.deleteAccount(password: "", review: review)
+        XCTAssertFalse(emptyPassword)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 0)
+        XCTAssertNotNil(storage.savedSession)
+    }
+
+    func testFailedPreviewCannotDeleteAndMustBeReloaded() async throws {
+        useDeletableAccount()
+        await store.login(username: "invited-driver", password: "test-only-password")
+        backend.withState { $0.deletionPreviewStatus = 503 }
+        await store.beginAccountDeletionReview()
+        XCTAssertNil(store.accountDeletionReview)
+        XCTAssertNotNil(store.accountDeletionError)
+        XCTAssertFalse(store.isLoadingAccountDeletion)
+        backend.withState { $0.deletionPreviewStatus = 200 }
+        await store.loadAccountDeletionReview()
+        XCTAssertNotNil(store.accountDeletionReview)
+        XCTAssertNil(store.accountDeletionError)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 0)
+    }
+
+    func testCanceledDelayedPreviewCannotReopenSheetOrExposeSnapshot() async {
+        useDeletableAccount()
+        await store.login(username: "invited-driver", password: "test-only-password")
+        let started = expectation(description: "Preview started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.nextReadPath = "/v1/account/deletion-preview"
+            $0.nextReadGate = release; $0.onNextRead = { started.fulfill() }
+        }
+        let loading = Task { await store.beginAccountDeletionReview() }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(store.isLoadingAccountDeletion)
+        store.cancelAccountDeletionReview()
+        release.signal()
+        await loading.value
+        XCTAssertFalse(store.isReviewingAccountDeletion)
+        XCTAssertFalse(store.isLoadingAccountDeletion)
+        XCTAssertNil(store.accountDeletionReview)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 0)
+    }
+
+    func testDeletionSuccessStopsGPSImmediatelyClearsPrivateStateAndOnlyItsRecovery() async throws {
+        let review = try await deletionReview()
+        let user = try XCTUnwrap(store.principal)
+        let current = CreationScope.current(endpoint: endpoint, user: user)
+        let legacy = CreationScope.legacy(endpoint: endpoint, accountId: user.id)
+        let recovery = PendingCreation(idempotencyKey: "test-recovery", delivery: Fixtures.newDelivery)
+        let restaurant = PendingRestaurant(idempotencyKey: "test-restaurant", restaurant: NewRestaurant(name: "Test", address: "Test address", coordinate: .pachino))
+        for scope in [current, legacy, "different-account"] {
+            storage.creations[scope] = recovery
+            storage.pendingRestaurants[scope] = restaurant
+        }
+        store.setForeground(true)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        XCTAssertTrue(store.locationSharing)
+        let started = expectation(description: "Delete started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState { $0.deleteAccountGate = release; $0.onDeleteAccount = { started.fulfill() } }
+        let deleting = Task { await store.deleteAccount(password: "test-only-password", review: review) }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(store.isDeletingAccount)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+        store.setLocationSharing(true)
+        XCTAssertFalse(store.locationSharing)
+        store.cancelAccountDeletionReview()
+        XCTAssertTrue(store.isReviewingAccountDeletion, "An in-flight write cannot be represented as canceled")
+        let duplicate = await store.deleteAccount(password: "test-only-password", review: review)
+        XCTAssertFalse(duplicate)
+        release.signal()
+        let deleted = await deleting.value
+        XCTAssertTrue(deleted)
+        assertSignedOut(store)
+        XCTAssertNil(store.pendingCreation)
+        XCTAssertNil(store.legacyPendingCreation)
+        XCTAssertNil(store.pendingRestaurant)
+        XCTAssertTrue(store.restaurants.isEmpty)
+        XCTAssertNil(store.pendingInvite)
+        XCTAssertNil(store.accountDeletionReview)
+        XCTAssertFalse(store.isReviewingAccountDeletion)
+        XCTAssertFalse(store.isDeletingAccount)
+        XCTAssertEqual(storage.creations, ["different-account": recovery])
+        XCTAssertEqual(storage.pendingRestaurants, ["different-account": restaurant])
+        XCTAssertTrue(store.accountDeletionNotice?.hasPrefix("Account eliminato definitivamente.") == true)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+        let request = try XCTUnwrap(backend.withState { $0.requests.first { $0.path == "/v1/account" } })
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request.body) as? [String: String])
+        XCTAssertEqual(body, ["password": "test-only-password", "confirmation": review.preview.confirmation])
+        XCTAssertEqual(request.authorization, "Bearer pilot-token-1")
+        XCTAssertNil(request.idempotencyKey)
+    }
+
+    func testWrongDeletionPasswordKeepsSessionAndDoesNotRetry() async throws {
+        let review = try await deletionReview()
+        backend.withState { $0.deleteAccountStatus = 403; $0.deleteAccountError = "Password confirmation failed" }
+        let deleted = await store.deleteAccount(password: "incorrect-test-password", review: review)
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(store.principal?.id, "invited-driver")
+        XCTAssertNotNil(storage.savedSession)
+        XCTAssertEqual(store.accountDeletionReview, review)
+        XCTAssertEqual(store.accountDeletionError, "Password attuale non corretta. Inseriscila di nuovo per confermare l’eliminazione.")
+        XCTAssertNil(store.accountDeletionNotice)
+        XCTAssertFalse(store.isDeletingAccount)
+        XCTAssertFalse(store.isMutating)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+    }
+
+    func testDeletionUnauthorizedClearsSessionInsteadOfTreatingItAsWrongPassword() async throws {
+        let review = try await deletionReview()
+        backend.withState { $0.deleteAccountStatus = 401 }
+        let deleted = await store.deleteAccount(password: "test-only-password", review: review)
+        XCTAssertFalse(deleted)
+        assertSignedOut(store)
+        XCTAssertTrue(store.errorMessage?.contains("Sessione scaduta o revocata") == true)
+        XCTAssertNil(store.accountDeletionNotice)
+    }
+
+    func testDeletionConflictLoadsNewSnapshotButRequiresNewExplicitConfirmation() async throws {
+        let old = try await deletionReview()
+        backend.withState {
+            $0.deleteAccountStatus = 409
+            $0.deletionCount = 3; $0.activeDeletionCount = 2
+            $0.deletionConfirmation = String(repeating: "b", count: 64)
+        }
+        let first = await store.deleteAccount(password: "test-only-password", review: old)
+        XCTAssertFalse(first)
+        let fresh = try XCTUnwrap(store.accountDeletionReview)
+        XCTAssertNotEqual(old.id, fresh.id)
+        XCTAssertEqual(fresh.preview.deliveryCount, 3)
+        XCTAssertEqual(fresh.preview.activeDeliveryCount, 2)
+        XCTAssertTrue(store.accountDeletionError?.contains("conferma di nuovo") == true)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+        backend.withState { $0.deleteAccountStatus = 204 }
+        let stale = await store.deleteAccount(password: "test-only-password", review: old)
+        XCTAssertFalse(stale)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+        let confirmed = await store.deleteAccount(password: "test-only-password", review: fresh)
+        XCTAssertTrue(confirmed)
+        let bodies = try backend.withState { state in
+            try state.requests.filter { $0.path == "/v1/account" }.map {
+                try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: String])["confirmation"]
+            }
+        }
+        XCTAssertEqual(bodies, [old.preview.confirmation, fresh.preview.confirmation])
+    }
+
+    func testRateLimitedDeletionDoesNotRetryOrSignOut() async throws {
+        let review = try await deletionReview()
+        backend.withState { $0.deleteAccountStatus = 429 }
+        let deleted = await store.deleteAccount(password: "test-only-password", review: review)
+        XCTAssertFalse(deleted)
+        XCTAssertNotNil(store.principal)
+        XCTAssertNotNil(storage.savedSession)
+        XCTAssertTrue(store.accountDeletionError?.contains("Troppi tentativi di eliminazione") == true)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+    }
+
+    func testUncertainDeletionSignsOutWithoutClaimingSuccessOrRetrying() async throws {
+        let review = try await deletionReview()
+        backend.withState { $0.loseDeleteAccountResponse = true }
+        let deleted = await store.deleteAccount(password: "test-only-password", review: review)
+        XCTAssertFalse(deleted)
+        assertSignedOut(store)
+        XCTAssertTrue(store.accountDeletionNotice?.hasPrefix("Non è possibile confermare") == true)
+        XCTAssertNil(store.accountDeletionReview)
+        let retry = await store.deleteAccount(password: "test-only-password", review: review)
+        XCTAssertFalse(retry)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+    }
+
+
+    func testServerFailureDuringDeletionIsUncertainAndClearsLocalSession() async throws {
+        let review = try await deletionReview()
+        backend.withState { $0.deleteAccountStatus = 500 }
+        let deleted = await store.deleteAccount(password: "test-only-password", review: review)
+        XCTAssertFalse(deleted)
+        assertSignedOut(store)
+        XCTAssertTrue(store.accountDeletionNotice?.hasPrefix("Non è possibile confermare") == true)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+    }
+
+    func testDeletionLocalCleanupFailureIsDisclosedWithoutRestoringPrivateState() async throws {
+        useDeletableAccount()
+        let failing = FaultingPilotStorage(base: storage)
+        failing.failCreationClear = true
+        let candidate = makeStore(storage: failing)
+        await candidate.login(username: "invited-driver", password: "test-only-password")
+        await candidate.beginAccountDeletionReview()
+        let review = try XCTUnwrap(candidate.accountDeletionReview)
+        let deleted = await candidate.deleteAccount(password: "test-only-password", review: review)
+        XCTAssertTrue(deleted, "The server's confirmed deletion remains true despite a local cleanup failure")
+        assertSignedOut(candidate)
+        XCTAssertTrue(candidate.accountDeletionNotice?.contains("Non è stato possibile rimuovere tutti i dati protetti") == true)
+        XCTAssertNil(candidate.accountDeletionReview)
+    }
+
+    func testDelayedPreviewCannotExposeOldAccountAfterNewerLogin() async {
+        useDeletableAccount()
+        await store.login(username: "invited-driver", password: "test-only-password")
+        let started = expectation(description: "Old preview started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.nextReadPath = "/v1/account/deletion-preview"
+            $0.nextReadGate = release; $0.onNextRead = { started.fulfill() }
+        }
+        let loading = Task { await store.beginAccountDeletionReview() }
+        await fulfillment(of: [started], timeout: 5)
+        store.logout()
+        await store.awaitPendingRevocations()
+        backend.withState { $0.user = Principal(id: "another-account", name: "Altro account", role: "dispatcher") }
+        await store.login(username: "another-account", password: "test-only-password")
+        let saved = storage.savedSession
+        release.signal()
+        await loading.value
+        XCTAssertEqual(store.principal?.id, "another-account")
+        XCTAssertEqual(storage.savedSession, saved)
+        XCTAssertNil(store.accountDeletionReview)
+        XCTAssertFalse(store.isReviewingAccountDeletion)
+        XCTAssertNil(store.accountDeletionError)
+    }
+
+    func testLateSuccessfulDeletionCannotSignOutNewerLogin() async throws {
+        try await assertLateDeletionPreservesNewLogin(loseResponse: false)
+    }
+
+    func testLateUncertainDeletionCannotClearNewerLoginOrShowOldWarning() async throws {
+        try await assertLateDeletionPreservesNewLogin(loseResponse: true)
+    }
+
+    private func assertLateDeletionPreservesNewLogin(loseResponse: Bool) async throws {
+        let review = try await deletionReview()
+        let started = expectation(description: "Old session deletion started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.deleteAccountGate = release; $0.onDeleteAccount = { started.fulfill() }
+            $0.loseDeleteAccountResponse = loseResponse
+        }
+        let deletion = Task { await store.deleteAccount(password: "test-only-password", review: review) }
+        await fulfillment(of: [started], timeout: 5)
+        store.logout()
+        await store.awaitPendingRevocations()
+        backend.withState { $0.user = Principal(id: "another-account", name: "Altro account", role: "dispatcher") }
+        await store.login(username: "another-account", password: "test-only-password")
+        let saved = try XCTUnwrap(storage.savedSession)
+        release.signal()
+        let result = await deletion.value
+        XCTAssertFalse(result)
+        XCTAssertEqual(store.principal?.id, "another-account")
+        XCTAssertEqual(storage.savedSession, saved)
+        XCTAssertNil(store.accountDeletionReview)
+        XCTAssertNil(store.accountDeletionNotice)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertFalse(store.isDeletingAccount)
+        XCTAssertEqual(backend.withState { $0.deleteAccountCount }, 1)
+    }
 }
 
 private final class FaultingPilotStorage: SessionStorage {
@@ -901,6 +1201,16 @@ private final class PilotSessionBackend {
     var onNextRead: (() -> Void)?
     var createGate: DispatchSemaphore?
     var onCreate: (() -> Void)?
+    var deletionPreviewStatus = 200
+    var deletionCount = 2
+    var activeDeletionCount = 1
+    var deletionConfirmation = String(repeating: "a", count: 64)
+    var deleteAccountStatus = 204
+    var deleteAccountError = "Test request rejected"
+    var deleteAccountCount = 0
+    var loseDeleteAccountResponse = false
+    var deleteAccountGate: DispatchSemaphore?
+    var onDeleteAccount: (() -> Void)?
     private var loginCount = 0
     private var creations: [String: Delivery] = [:]
 
@@ -917,6 +1227,7 @@ private final class PilotSessionBackend {
         let authorization = request.value(forHTTPHeaderField: "Authorization")
         var gate: DispatchSemaphore?
         var received: (() -> Void)?
+        var loseResponse = false
         // Never hold the backend lock while waiting for a test to release a delayed response.
         let response: (Int, Data) = try withState { state in
             state.requests.append(RequestRecord(method: method, path: path, origin: origin, authorization: authorization,
@@ -949,6 +1260,18 @@ private final class PilotSessionBackend {
             let driver = Driver(id: state.user.id, name: state.user.name, active: state.active, capacity: 5,
                                 location: nil, locationUpdatedAt: nil)
             switch (method, path) {
+            case ("GET", "/v1/account/deletion-preview"):
+                if state.deletionPreviewStatus != 200 { return (state.deletionPreviewStatus, Self.errorBody) }
+                return (200, try Self.json(["delivery_count": state.deletionCount, "active_delivery_count": state.activeDeletionCount,
+                                           "confirmation": state.deletionConfirmation]))
+            case ("DELETE", "/v1/account"):
+                state.deleteAccountCount += 1
+                gate = state.deleteAccountGate; received = state.onDeleteAccount
+                loseResponse = state.loseDeleteAccountResponse
+                if state.deleteAccountStatus != 204 {
+                    return (state.deleteAccountStatus, try Self.json(["error": state.deleteAccountError]))
+                }
+                return (204, Data())
             case ("GET", "/v1/drivers"): return (200, try APIClient.encoder().encode([driver]))
             case ("GET", "/v1/shift"): return (200, try APIClient.encoder().encode(driver))
             case ("GET", "/v1/route"):
@@ -994,12 +1317,14 @@ private final class PilotSessionBackend {
         }
         received?()
         if let gate, gate.wait(timeout: .now() + 10) == .timedOut { throw URLError(.timedOut) }
+        if loseResponse { throw URLError(.networkConnectionLost) }
         return response
     }
 
     private static let errorBody = Data(#"{"error":"Test request rejected"}"#.utf8)
     private static func userBody(_ user: Principal) -> [String: Any] {
         var result: [String: Any] = ["id": user.id, "name": user.name, "role": user.role, "roles": user.roles]
+        if user.canDeleteAccount { result["can_delete_account"] = true }
         if let teamId = user.teamId { result["team_id"] = teamId }
         if let teamName = user.teamName { result["team_name"] = teamName }
         return result

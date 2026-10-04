@@ -1,4 +1,4 @@
-//! Operator-managed team accounts are provisioned offline, never by a public signup.
+//! Operator-managed accounts and invite-only drivers share team-bound session checks.
 //! The configuration is authoritative on startup; account changes invalidate sessions.
 use crate::{
     error::{ApiError, ApiResult},
@@ -136,7 +136,7 @@ impl ProductionConfig {
     }
 }
 
-fn valid_identifier(value: &str) -> bool {
+pub(crate) fn valid_identifier(value: &str) -> bool {
     value
         .as_bytes()
         .first()
@@ -201,6 +201,7 @@ impl Account {
                 .find(|t| t.id == team_id)
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| team_id.into()),
+            can_delete_account: (!config.accounts.iter().any(|a| a.id == self.id)).then_some(true),
         }
     }
     pub(crate) fn fingerprint(&self, config: &ProductionConfig) -> String {
@@ -236,6 +237,17 @@ impl Account {
 
 pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiResult<()> {
     let tx = db.transaction()?;
+    // Neither identity source may silently replace the other, even when disabled.
+    for account in &config.accounts {
+        let collision: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM invited_accounts WHERE id=?1 OR username=?2)",
+            params![account.id, account.username],
+            |r| r.get(0),
+        )?;
+        if collision {
+            return Err(ApiError::conflict("Configured and invited account identities collide; keep the existing identities distinct"));
+        }
+    }
     // Permanent bindings prevent removed/re-added accounts and driver IDs from moving history.
     // Validate ALL identities before modifying profiles or revoking sessions.
     for account in &config.accounts {
@@ -268,10 +280,8 @@ pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiR
     };
     for (team_id, body) in driver_rows {
         let mut driver: crate::model::Driver = serde_json::from_str(&body)?;
-        if !config
-            .accounts
-            .iter()
-            .any(|a| a.id == driver.id && a.has_role("driver") && a.team_id(config) == team_id)
+        if !account_by_id(&tx, config, &driver.id)?
+            .is_some_and(|a| a.has_role("driver") && a.team_id(config) == team_id)
         {
             driver.active = false;
             crate::db::save_driver(&tx, &team_id, &driver)?;
@@ -309,10 +319,25 @@ pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiR
         rows.collect::<Result<_, _>>()?
     };
     for (token, id, fingerprint, team) in sessions {
-        if !config.accounts.iter().any(|a| {
-            a.id == id && a.team_id(config) == team && a.fingerprint(config) == fingerprint
-        }) {
+        if !account_by_id(&tx, config, &id)?
+            .is_some_and(|a| a.team_id(config) == team && a.fingerprint(config) == fingerprint)
+        {
             tx.execute("DELETE FROM sessions WHERE token_hash=?1", [token])?;
+        }
+    }
+    // Removal/capability changes revoke pending secrets permanently, even if config is restored.
+    let invitations: Vec<(String, String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT id,issuer_id,issuer_fingerprint,team_id FROM invites")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for (id, issuer, fingerprint, team) in invitations {
+        if !account_by_id(&tx, config, &issuer)?.is_some_and(|a| {
+            a.has_role("dispatcher")
+                && a.team_id(config) == team
+                && a.fingerprint(config) == fingerprint
+        }) {
+            tx.execute("DELETE FROM invites WHERE id=?1", [id])?;
         }
     }
     tx.commit()?;
@@ -351,12 +376,8 @@ pub(crate) fn session(
     let token_hash = digest(token);
     let row: Option<(String,String,i64,String)> = db.query_row("SELECT account_id,account_fingerprint,expires_at,team_id FROM sessions WHERE token_hash=?1 AND expires_at>?2",params![token_hash,now],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let (id, fingerprint, expires_at, team_id) = row.ok_or_else(unauthorized)?;
-    let account = config
-        .accounts
-        .iter()
-        .find(|a| {
-            a.id == id && a.fingerprint(config) == fingerprint && a.team_id(config) == team_id
-        })
+    let account = account_by_id(db, config, &id)?
+        .filter(|a| a.fingerprint(config) == fingerprint && a.team_id(config) == team_id)
         .ok_or_else(unauthorized)?;
     Ok(Session {
         principal: account.principal(config),
@@ -394,4 +415,121 @@ pub(crate) fn verify(hash: &str, password: &str) -> bool {
             .verify_password(password.as_bytes(), &parsed)
             .is_ok()
     })
+}
+
+pub(crate) fn configured_team(config: &ProductionConfig, team: &str) -> bool {
+    team == config.fleet_id || config.teams.iter().any(|t| t.id == team)
+}
+
+fn invited_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
+    Ok(Account {
+        id: row.get(0)?,
+        username: row.get(1)?,
+        name: row.get(2)?,
+        role: "driver".into(),
+        roles: Some(vec!["driver".into()]),
+        team_id: Some(row.get(4)?),
+        password_hash: row.get(3)?,
+    })
+}
+
+pub(crate) fn account_by_id(
+    db: &Connection,
+    config: &ProductionConfig,
+    id: &str,
+) -> ApiResult<Option<Account>> {
+    if let Some(account) = config.accounts.iter().find(|a| a.id == id) {
+        return Ok(Some(account.clone()));
+    }
+    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.id=?1 AND i.disabled=0", [id], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
+}
+
+pub(crate) fn account_by_username(
+    db: &Connection,
+    config: &ProductionConfig,
+    username: &str,
+) -> ApiResult<Option<Account>> {
+    if let Some(account) = config.accounts.iter().find(|a| a.username == username) {
+        return Ok(Some(account.clone()));
+    }
+    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.username=?1 AND i.disabled=0", [username], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
+}
+
+pub(crate) fn random_token() -> ApiResult<String> {
+    use rand_core::RngCore;
+    let mut bytes = [0u8; 32];
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(ApiError::internal)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub(crate) fn save_session(
+    db: &Connection,
+    account: &Account,
+    config: &ProductionConfig,
+    token: &str,
+    now: i64,
+    expires_at: i64,
+) -> ApiResult<()> {
+    db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now])?;
+    db.execute("DELETE FROM sessions WHERE account_id=?1 AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE account_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 9)", [&account.id])?;
+    db.execute("INSERT INTO sessions(token_hash,account_id,account_fingerprint,expires_at,created_at,team_id) VALUES (?1,?2,?3,?4,?5,?6)",params![digest(token),account.id,account.fingerprint(config),expires_at,now,account.team_id(config)])?;
+    Ok(())
+}
+
+pub(crate) fn reserve_attempt(
+    db: &Connection,
+    key: &str,
+    max: i64,
+    window: i64,
+    now: i64,
+) -> ApiResult<()> {
+    db.execute("DELETE FROM login_limits WHERE reset_at<=?1", [now])?;
+    let count: i64 = db.query_row(
+        "SELECT COALESCE((SELECT attempts FROM login_limits WHERE bucket=?1),0)",
+        [key],
+        |r| r.get(0),
+    )?;
+    if count >= max {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many invite attempts; try again later",
+        ));
+    }
+    db.execute("INSERT INTO login_limits(bucket,attempts,reset_at) VALUES (?1,1,?2) ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1", params![key,now+window])?;
+    Ok(())
+}
+
+/// Offline operator recovery: disable an invited driver without deleting delivery history.
+/// Opens only an existing production DB; never accepts passwords or creates credentials.
+pub fn disable_invited_account(path: &std::path::Path, username: &str) -> Result<(), String> {
+    if !path.is_absolute()
+        || !valid_identifier(username)
+        || username != username.to_ascii_lowercase()
+    {
+        return Err("Use an absolute production database path and exact lowercase username".into());
+    }
+    let run = || -> ApiResult<()> {
+        let mut db =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        db.busy_timeout(std::time::Duration::from_secs(5))?;
+        let tx = db.transaction()?;
+        let mode: String =
+            tx.query_row("SELECT value FROM deployment WHERE key='mode'", [], |r| {
+                r.get(0)
+            })?;
+        if !mode.starts_with("production:") {
+            return Err(ApiError::bad_request("Use the production database"));
+        }
+        let (id, team): (String,String) = tx.query_row("SELECT id,team_id FROM invited_accounts WHERE username=?1", [username], |r| Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(|| ApiError::not_found("Invited account not found; configured accounts are managed in the auth configuration"))?;
+        tx.execute("UPDATE invited_accounts SET disabled=1 WHERE id=?1", [&id])?;
+        tx.execute("DELETE FROM sessions WHERE account_id=?1", [&id])?;
+        let mut driver = crate::db::driver(&tx, &team, &id)?;
+        driver.active = false;
+        crate::db::save_driver(&tx, &team, &driver)?;
+        tx.commit()?;
+        Ok(())
+    };
+    run().map_err(|e| e.message)
 }

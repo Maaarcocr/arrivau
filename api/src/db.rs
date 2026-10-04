@@ -18,9 +18,20 @@ pub fn open(
     db.busy_timeout(Duration::from_secs(5))?;
     db.execute_batch("PRAGMA foreign_keys=ON;")?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 3 {
+    if version > 5 {
         return Err(ApiError::bad_request(
             "Database schema is newer than this server",
+        ));
+    }
+    if version >= 5
+        && !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='idempotency_retired')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err(ApiError::bad_request(
+            "Deletion retry metadata is missing; restore a verified backup",
         ));
     }
     // All schema, legacy mappings and guards commit together; rejected upgrades leave data intact.
@@ -48,6 +59,7 @@ pub fn open(
          );
          CREATE INDEX IF NOT EXISTS sessions_account ON sessions(account_id,expires_at);
          CREATE TABLE IF NOT EXISTS login_limits (bucket TEXT PRIMARY KEY,attempts INTEGER NOT NULL,reset_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS idempotency_retired (scope_hash TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS idempotency (
            principal_id TEXT NOT NULL, key TEXT NOT NULL, request_hash TEXT NOT NULL,
            response TEXT NOT NULL CHECK(json_valid(response)), PRIMARY KEY(principal_id,key)
@@ -140,6 +152,24 @@ pub fn open(
          CREATE INDEX IF NOT EXISTS idempotency_team ON idempotency(team_id,principal_id,key);
          CREATE INDEX IF NOT EXISTS sessions_team ON sessions(team_id,account_id);"
     )?;
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS invited_accounts (
+        id TEXT PRIMARY KEY REFERENCES account_teams(account_id), username TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL, password_hash TEXT NOT NULL, team_id TEXT NOT NULL,
+        disabled INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0,1))
+    ); CREATE INDEX IF NOT EXISTS invited_accounts_team ON invited_accounts(team_id,id);
+    CREATE TABLE IF NOT EXISTS invites (
+        id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+        issuer_id TEXT NOT NULL REFERENCES account_teams(account_id), issuer_fingerprint TEXT NOT NULL,
+        team_id TEXT NOT NULL, expires_at INTEGER NOT NULL
+    ); CREATE INDEX IF NOT EXISTS invites_team ON invites(team_id,expires_at);")?;
+    let inconsistent_invites: i64 = tx.query_row("SELECT
+        (SELECT COUNT(*) FROM invited_accounts i LEFT JOIN account_teams a ON a.account_id=i.id WHERE a.account_id IS NULL OR i.team_id<>a.team_id)
+        +(SELECT COUNT(*) FROM invites i LEFT JOIN account_teams a ON a.account_id=i.issuer_id WHERE a.account_id IS NULL OR i.team_id<>a.team_id)", [], |r| r.get(0))?;
+    if inconsistent_invites != 0 {
+        return Err(ApiError::bad_request(
+            "Persisted invitation team ownership is inconsistent",
+        ));
+    }
     // Fail closed on a previously inconsistent database, never re-label historical rows.
     let inconsistent: i64 = tx.query_row(
         "SELECT (SELECT COUNT(*) FROM drivers d JOIN account_teams a ON d.id=a.account_id WHERE d.team_id<>a.team_id)
@@ -170,6 +200,8 @@ pub fn open(
     }
     // Defense in depth: even an unscoped future write cannot cross a persisted team boundary.
     for (table, guard) in [
+        ("invited_accounts", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.id AND team_id=NEW.team_id)"),
+        ("invites", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.issuer_id AND team_id=NEW.team_id)"),
         ("drivers", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.id AND team_id=NEW.team_id)"),
         ("deliveries", "NEW.driver_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM drivers WHERE id=NEW.driver_id AND team_id=NEW.team_id)"),
         ("route_stops", "NOT EXISTS (SELECT 1 FROM drivers WHERE id=NEW.driver_id AND team_id=NEW.team_id) OR NOT EXISTS (SELECT 1 FROM deliveries WHERE id=NEW.delivery_id AND team_id=NEW.team_id)"),
@@ -210,9 +242,9 @@ pub fn open(
             [legacy_team],
         )?;
     }
-    // Older servers cannot interpret unknown readiness safely; fail their
-    // existing future-schema guard rather than allow a semantic downgrade.
-    tx.execute_batch("PRAGMA user_version=3;")?;
+    // Invite-only v4 servers ignore retired retry keys and could resurrect erased
+    // deliveries after downgrade. Reject them through their future-schema guard.
+    tx.execute_batch("PRAGMA user_version=5;")?;
     tx.commit()?;
     db.execute_batch("PRAGMA journal_mode=WAL;")?;
     Ok(db)

@@ -11,6 +11,7 @@ RUN groupadd --gid 10001 arrivau \
  && mkdir -p /data \
  && chown 10001:10001 /data
 COPY --from=build /build/api/target/release/arrivau-api /usr/local/bin/arrivau-api
+COPY --from=build /build/api/target/release/arrivau-disable-invited-account /usr/local/bin/arrivau-disable-invited-account
 USER 10001:10001
 WORKDIR /data
 ENV ARRIVAU_MODE=production ARRIVAU_DB_PATH=/data/pilot.sqlite3

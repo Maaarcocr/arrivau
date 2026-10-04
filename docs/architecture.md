@@ -34,5 +34,5 @@ UI testing uses an explicit launch flag to provide a fixed Pachino coordinate wi
 
 ## API evolution
 
-See `api-contract.md`. The native app uses operator-provisioned Argon2id accounts and expiring opaque sessions; the API enforces roles and driver ownership. Create/assign/status endpoints support scoped idempotency keys. A future web app still needs its own session/UI design and narrowly scoped CORS. Team isolation and dual-role accounts are documented in [Teams and App Review](teams-and-review.md). Event versions, broader abuse protection, audit, retention and multi-instance concurrency remain outside this supervised pilot. Read the pilot runbook for deployment and interruption checks.
+See `api-contract.md`. The native app uses operator-provisioned or invite-created Argon2id accounts and expiring opaque sessions; the API enforces roles and driver ownership. Create/assign/status endpoints support scoped idempotency keys. A future web app still needs its own session/UI design and narrowly scoped CORS. Team isolation and dual-role accounts are documented in [Teams and App Review](teams-and-review.md). Event versions, broader abuse protection, audit, retention and multi-instance concurrency remain outside this supervised pilot. Read the pilot runbook for deployment and interruption checks.
 

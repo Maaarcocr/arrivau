@@ -91,6 +91,10 @@ Mutations use idempotency keys to make retries of a still-pending action safe. T
 - Foreground polling, no APNs and no guaranteed background delivery notifications. A suspended dispatcher app can miss assignments/status changes until reopened
 - Background GPS is opt-in and must be verified on signed physical devices; iOS can suspend/terminate it. No tracking outside an explicitly active shift
 - Approximate routes, no traffic/road restrictions or global optimality guarantee; human judgement remains necessary
-- Private server-enforced teams, operator-managed accounts, no self-service signup/reset or team-administration UI, no billing or customer app
+- Private server-enforced teams, operator-managed accounts, invite-only driver signup, no self-service reset or team-administration UI, no billing or customer app
 - Database backups, service monitoring, certificate renewal, host security and retention are the operator's responsibility
 - Physical phones, signing, TestFlight processing/review, hosted TLS and real-world network behavior are not covered by CI
+
+## Invitation and deletion rollout
+
+Driver invitations are scoped to the issuer's Squadra and preserve existing dual-role accounts. See [invitations](invites.md) for additive schema v5, uncertain-response recovery, backups and operator disabling. Invited-account deletion is irreversible and includes linked active deliveries after explicit confirmation. Run the final commit’s native/device checks; merging source does not deploy a live migration or upload a TestFlight build.

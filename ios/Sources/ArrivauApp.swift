@@ -20,6 +20,7 @@ struct ArrivauApp: App {
                         ZStack { Color(.systemBackground).ignoresSafeArea(); Text("Arrivau").font(.largeTitle.bold()).foregroundStyle(.orange) }
                     }
                 }
+                .onOpenURL { store.receiveInvite($0.absoluteString) }
                 .onChange(of: scenePhase) { _, phase in store.setForeground(phase == .active) }
         }
     }
@@ -60,6 +61,15 @@ struct RootView: View {
                             else { DriverView() }
                         }
                         .toolbar {
+                            if store.canDeleteAccount {
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button { Task { await store.beginAccountDeletionReview() } } label: {
+                                        Label("Account", systemImage: "gearshape")
+                                    }
+                                    .accessibilityIdentifier("account_settings")
+                                    .disabled(store.isMutating)
+                                }
+                            }
                             ToolbarItem(placement: .topBarTrailing) {
                                 Button { store.logout() } label: {
                                     Label(store.isDemo ? "Cambia account" : "Esci", systemImage: "person.crop.circle")
@@ -74,6 +84,14 @@ struct RootView: View {
                 }
             } else { LoginView() }
         }
+        .sheet(item: Binding(
+            get: { store.isRestoringSession || store.canRetryRestore ? nil : store.pendingInvite },
+            set: { if $0 == nil && !store.isRestoringSession { store.dismissInvite() } }
+        )) { invitation in InviteSignupView().id(invitation.id) }
+        .sheet(isPresented: Binding(
+            get: { store.isReviewingAccountDeletion },
+            set: { if !$0 { store.cancelAccountDeletionReview() } }
+        )) { AccountDeletionView() }
         .alert("Operazione non riuscita", isPresented: Binding(
             get: { store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
@@ -106,6 +124,7 @@ struct LoginView: View {
     @EnvironmentObject private var store: DeliveryStore
     @State private var username = ""
     @State private var password = ""
+    @State private var pastedInvite = ""
 
     var body: some View {
         NavigationStack {
@@ -119,6 +138,12 @@ struct LoginView: View {
                             .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     }.padding(.vertical, 16)
                 }
+                if let notice = store.accountDeletionNotice {
+                    Section("Eliminazione account") {
+                        Text(notice).accessibilityIdentifier("account_deletion_notice")
+                        Button("Ho capito") { store.accountDeletionNotice = nil }
+                    }
+                }
                 #if DEBUG
                 if store.isDemo { demoLogin }
                 else { pilotLogin }
@@ -129,6 +154,7 @@ struct LoginView: View {
             .navigationTitle("Benvenuto")
             .navigationBarTitleDisplayMode(.inline)
         }
+        .onDisappear { password = ""; pastedInvite = "" }
     }
 
     private var pilotLogin: some View {
@@ -159,6 +185,19 @@ struct LoginView: View {
                         .accessibilityIdentifier("restore_session")
                     Button("Dimentica l’accesso su questo iPhone", role: .destructive) { store.logout() }
                 }
+            }
+            Section("Hai ricevuto un invito?") {
+                TextField("Incolla il link o il codice", text: $pastedInvite)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .privacySensitive().accessibilityIdentifier("invite_input")
+                    .disabled(store.isMutating)
+                Button("Apri invito") {
+                    let input = pastedInvite
+                    pastedInvite = ""
+                    store.receiveInvite(input)
+                }
+                .disabled(store.isMutating || pastedInvite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("open_invite")
             }
             Section("Server della prova") {
                 TextField("https://api.esempio.it", text: $store.apiURL)

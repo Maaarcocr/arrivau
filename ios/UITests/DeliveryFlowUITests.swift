@@ -819,6 +819,8 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["login_\(role)"])
         let destination = role == "dispatcher" || role == "dual" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
         XCTAssertTrue(destination.waitForExistence(timeout: 20), "Check the running Rust API and fresh database")
+        XCTAssertTrue(app.buttons["switch_role"].exists, "Account settings must preserve the existing sign-out control")
+        XCTAssertFalse(app.buttons["account_settings"].exists, "Public demo accounts must never offer self-deletion")
     }
 
     private func assertDualAccountView(_ title: String) {

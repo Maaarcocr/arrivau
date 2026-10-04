@@ -800,6 +800,11 @@ final class PilotSessionTests: XCTestCase {
 }
 
 private final class FaultingPilotStorage: SessionStorage {
+    private var restaurants: [String: PendingRestaurant] = [:]
+    func loadRestaurant(scope: String) throws -> PendingRestaurant? { restaurants[scope] }
+    func saveRestaurant(_ value: PendingRestaurant, scope: String) throws { restaurants[scope] = value }
+    func clearRestaurant(scope: String) throws { restaurants[scope] = nil }
+
     let base: MemorySessionStorage
     var failCreationLoad = false
     var failCreationSave = false
@@ -965,7 +970,7 @@ private final class PilotSessionBackend {
                     delivery = Delivery(id: "created-\(state.committedCreates)", shopName: input.shopName,
                                         pickupAddress: input.pickupAddress, pickup: input.pickup,
                                         dropoffAddress: input.dropoffAddress, dropoff: input.dropoff,
-                                        readyAt: input.readyAt, deadlineAt: input.deadlineAt,
+                                        readyAt: input.readyAt ?? 0, deadlineAt: input.deadlineAt,
                                         loadUnits: input.loadUnits, maxRideSeconds: input.maxRideSeconds,
                                         status: .pending, driverId: nil, createdAt: 1, pickedUpAt: nil, deliveredAt: nil)
                     state.creations[scope] = delivery

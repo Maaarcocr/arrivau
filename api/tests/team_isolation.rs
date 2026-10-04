@@ -198,6 +198,224 @@ fn job_input(name: &str) -> Value {
         "ready_at":NOW,"deadline_at":NOW+3600,"load_units":1,"max_ride_seconds":1800
     })
 }
+
+#[tokio::test]
+async fn restaurants_are_private_idempotent_and_resolve_immutable_pickup_snapshots() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("restaurants.db");
+    let mut server = Server::start(&path, config_json()).await;
+    let red = server.token("red-dispatch").await;
+    let blue = server.token("blue-dispatch").await;
+    let driver = server.token("red-driver").await;
+    let input =
+        json!({"name":"Pizzeria salvata","address":"Via del ristorante 5","coordinate":point()});
+    error(
+        server.get("/v1/restaurants", &driver).await,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    error(
+        server
+            .post("/v1/restaurants", &driver, input.clone(), None)
+            .await,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    let restaurant = json_response(
+        server
+            .post(
+                "/v1/restaurants",
+                &red,
+                input.clone(),
+                Some("restaurant-create-01"),
+            )
+            .await,
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(server.get_json("/v1/restaurants", &blue).await, json!([]));
+    assert_eq!(
+        server.get_json("/v1/restaurants", &red).await,
+        json!([restaurant.clone()])
+    );
+    let mut draft = job_input("Untrusted name");
+    draft.as_object_mut().unwrap().remove("ready_at");
+    draft["restaurant_id"] = restaurant["id"].clone();
+    draft["pickup_address"] = json!("Untrusted address");
+    draft["pickup"] = json!({"lat":0,"lng":0});
+    error(
+        server
+            .post("/v1/deliveries", &blue, draft.clone(), None)
+            .await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    let created = server
+        .create(&red, draft.clone(), Some("restaurant-order-01"))
+        .await;
+    assert_eq!(created["shop_name"], restaurant["name"]);
+    assert_eq!(created["pickup_address"], restaurant["address"]);
+    assert_eq!(created["pickup"], restaurant["coordinate"]);
+    assert_eq!(created["restaurant_id"], restaurant["id"]);
+    assert_eq!(created["readiness_state"], "unknown");
+    let mut invalid = input.clone();
+    invalid["coordinate"]["lat"] = json!(999);
+    error(
+        server.post("/v1/restaurants", &red, invalid, None).await,
+        StatusCode::BAD_REQUEST,
+    )
+    .await;
+    let mut changed = input.clone();
+    changed["name"] = json!("Different restaurant");
+    error(
+        server
+            .post(
+                "/v1/restaurants",
+                &red,
+                changed,
+                Some("restaurant-create-01"),
+            )
+            .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    server.close().await;
+    let server = Server::start(&path, config_json()).await;
+    let replay = json_response(
+        server
+            .post("/v1/restaurants", &red, input, Some("restaurant-create-01"))
+            .await,
+        StatusCode::CREATED,
+    )
+    .await;
+    assert_eq!(replay, restaurant);
+    let repeated = server
+        .create(&red, draft, Some("restaurant-order-01"))
+        .await;
+    assert_eq!(repeated, created);
+    assert_eq!(
+        server
+            .get_json("/v1/restaurants", &red)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn readiness_enforces_team_capability_schema_and_revocation_before_replay() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("readiness-auth.db");
+    let mut server = Server::start(&path, config_json()).await;
+    let red = server.token("red-dispatch").await;
+    let blue = server.token("blue-dispatch").await;
+    let driver = server.token("red-driver").await;
+    let dual = server.token("red-dual").await;
+    let mut input = job_input("Readiness fixture");
+    input.as_object_mut().unwrap().remove("ready_at");
+    let job = server.create(&red, input, None).await;
+    let path_action = job_path(&job, "readiness");
+    let ready = json!({"ready_in_minutes":0,"expected_revision":0});
+    error(
+        server
+            .request(Method::POST, &path_action, None, Some(ready.clone()), None)
+            .await,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    error(
+        server
+            .post(&path_action, &driver, ready.clone(), None)
+            .await,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    error(
+        server.post(&path_action, &blue, ready.clone(), None).await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    error(
+        server
+            .post(
+                "/v1/deliveries/nonexistent/readiness",
+                &red,
+                ready.clone(),
+                None,
+            )
+            .await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    for invalid in [
+        json!({"ready_in_minutes":-1,"expected_revision":0}),
+        json!({"ready_in_minutes":121,"expected_revision":0}),
+        json!({"ready_in_minutes":0}),
+        json!({"ready_in_minutes":0,"expected_revision":0,"team_id":BLUE}),
+    ] {
+        error(
+            server.post(&path_action, &red, invalid, None).await,
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+    let saved = json_response(
+        server
+            .post(
+                &path_action,
+                &dual,
+                ready.clone(),
+                Some("readiness-auth-01"),
+            )
+            .await,
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(saved["readiness_state"], "ready");
+    assert_eq!(saved["status"], "pending");
+    error(
+        server
+            .post(
+                &path_action,
+                &blue,
+                ready.clone(),
+                Some("readiness-auth-01"),
+            )
+            .await,
+        StatusCode::NOT_FOUND,
+    )
+    .await;
+    server.close().await;
+    let mut reduced = config_json();
+    for account in reduced["accounts"].as_array_mut().unwrap() {
+        if account["id"] == "red-dual" {
+            account["roles"] = json!(["driver"]);
+        }
+    }
+    let server = Server::start(&path, reduced).await;
+    error(
+        server
+            .post(
+                &path_action,
+                &dual,
+                ready.clone(),
+                Some("readiness-auth-01"),
+            )
+            .await,
+        StatusCode::UNAUTHORIZED,
+    )
+    .await;
+    let new_driver = server.token("red-dual").await;
+    error(
+        server
+            .post(&path_action, &new_driver, ready, Some("readiness-auth-01"))
+            .await,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+}
 fn job_id(job: &Value) -> &str {
     job["id"].as_str().unwrap()
 }

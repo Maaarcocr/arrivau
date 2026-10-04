@@ -220,7 +220,13 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
             .json()
             .await
             .unwrap();
-        assert_eq!(jobs, json!([delivery()]));
+        assert_eq!(
+            jobs,
+            json!([serde_json::to_value(
+                serde_json::from_value::<arrivau_api::model::Delivery>(delivery()).unwrap()
+            )
+            .unwrap()])
+        );
         let route: Value = client
             .get(format!("{base}/v1/drivers/driver/route"))
             .bearer_auth(TOKEN)
@@ -241,7 +247,13 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
             .await
             .unwrap();
         assert_eq!(replay.status(), StatusCode::CREATED);
-        assert_eq!(replay.json::<Value>().await.unwrap(), delivery());
+        assert_eq!(
+            replay.json::<Value>().await.unwrap(),
+            serde_json::to_value(
+                serde_json::from_value::<arrivau_api::model::Delivery>(delivery()).unwrap()
+            )
+            .unwrap()
+        );
         let login: Value = client
             .post(format!("{base}/v1/session"))
             .json(&json!({"username":"apple","password":"migration-only-fixture-password"}))
@@ -290,7 +302,7 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     for table in ["deliveries", "route_stops", "idempotency"] {
         assert_eq!(

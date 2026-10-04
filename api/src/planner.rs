@@ -7,6 +7,10 @@ use std::collections::{HashMap, HashSet};
 const HANDLING_SECONDS: i64 = 60;
 pub const LOCATION_FRESHNESS_SECONDS: i64 = 300;
 pub const MAX_ROUTE_STOPS: usize = 32;
+pub const PICKUP_TARGET_SECONDS: i64 = 600;
+/// A supervised-pilot policy, not a guarantee: the total extra delay after
+/// pickup is bounded against one persisted ETA, never reset by new insertions.
+pub const MAX_ADDITIONAL_ONBOARD_SECONDS: i64 = 300;
 
 pub fn location_is_fresh(driver: &Driver, now: i64) -> bool {
     driver.location.is_some()
@@ -38,6 +42,8 @@ pub fn evaluate(driver: &Driver, keys: &[StopKey], jobs: &[Delivery], now: i64) 
         finish_at: now,
         feasible: true,
         warnings: Vec::new(),
+        notices: Vec::new(),
+        estimates_available: driver.location.is_some(),
     };
     let assigned: HashMap<&str, &Delivery> = jobs
         .iter()
@@ -101,7 +107,18 @@ pub fn evaluate(driver: &Driver, keys: &[StopKey], jobs: &[Delivery], now: i64) 
         time = time.saturating_add(travel);
         match key.kind {
             StopKind::Pickup => {
-                time = time.max(job.ready_at);
+                if let Some(ready_at) = job.readiness_at() {
+                    time = time.max(ready_at);
+                    if time > ready_at.saturating_add(PICKUP_TARGET_SECONDS) {
+                        route
+                            .notices
+                            .push(format!("Pickup target missed for {}", job.id));
+                    }
+                } else {
+                    route
+                        .warnings
+                        .push(format!("Readiness is unknown for {}", job.id));
+                }
                 if job.status == DeliveryStatus::PickedUp || onboard.contains_key(job.id.as_str()) {
                     route
                         .warnings
@@ -132,6 +149,11 @@ pub fn evaluate(driver: &Driver, keys: &[StopKey], jobs: &[Delivery], now: i64) 
                     route
                         .warnings
                         .push(format!("Deadline missed for {}", job.id));
+                }
+                if job.onboard_deadline_at.is_some_and(|limit| time > limit) {
+                    route
+                        .warnings
+                        .push(format!("Onboard delivery delay exceeded for {}", job.id));
                 }
             }
         }
@@ -175,9 +197,89 @@ pub fn insert(
     candidate: &Delivery,
     now: i64,
 ) -> Option<(Vec<StopKey>, Route)> {
-    if !driver.active || !location_is_fresh(driver, now) || candidate.load_units > driver.capacity {
+    if !driver.active
+        || !location_is_fresh(driver, now)
+        || candidate.readiness_at().is_none()
+        || candidate.load_units > driver.capacity
+    {
         return None;
     }
+    best_insertion(driver, current, jobs, candidate, now, false)
+}
+
+/// Automatic dispatch must still pick the least-bad driver when timing targets
+/// cannot all be met. Active shift and structurally safe capacity/precedence are
+/// mandatory; elapsed time and stale GPS remain visible as warnings.
+pub fn insert_for_dispatch(
+    driver: &Driver,
+    current: &[StopKey],
+    jobs: &[Delivery],
+    candidate: &Delivery,
+    now: i64,
+) -> Option<(Vec<StopKey>, Route)> {
+    if !driver.active
+        || candidate.readiness_at().is_none()
+        || candidate.load_units > driver.capacity
+    {
+        return None;
+    }
+    if driver.location.is_none() {
+        // Queue after committed work instead of inventing a starting position.
+        let mut keys = current.to_vec();
+        if keys.len() + 2 > MAX_ROUTE_STOPS {
+            return None;
+        }
+        keys.push(StopKey {
+            delivery_id: candidate.id.clone(),
+            kind: StopKind::Pickup,
+        });
+        keys.push(StopKey {
+            delivery_id: candidate.id.clone(),
+            kind: StopKind::Dropoff,
+        });
+        let mut proposed_jobs = jobs.to_vec();
+        let mut assigned = candidate.clone();
+        assigned.driver_id = Some(driver.id.clone());
+        assigned.status = DeliveryStatus::Assigned;
+        proposed_jobs.retain(|job| job.id != candidate.id);
+        proposed_jobs.push(assigned);
+        let route = evaluate(driver, &keys, &proposed_jobs, now);
+        return structurally_safe(&route).then_some((keys, route));
+    }
+    best_insertion(driver, current, jobs, candidate, now, true)
+}
+
+/// A readiness report is a fact, even when its timing is no longer feasible.
+/// Preserve every stop and use recovery ranking to protect food already aboard.
+/// Fresh assignments still use insert() and require every hard constraint.
+pub fn replan_readiness(
+    driver: &Driver,
+    current: &[StopKey],
+    jobs: &[Delivery],
+    candidate: &Delivery,
+    now: i64,
+) -> (Vec<StopKey>, Route) {
+    if driver.location.is_none() {
+        let base: Vec<_> = current
+            .iter()
+            .filter(|key| key.delivery_id != candidate.id)
+            .cloned()
+            .collect();
+        return insert_for_dispatch(driver, &base, jobs, candidate, now)
+            .unwrap_or_else(|| (current.to_vec(), evaluate(driver, current, jobs, now)));
+    }
+    best_insertion(driver, current, jobs, candidate, now, true)
+        .unwrap_or_else(|| (current.to_vec(), evaluate(driver, current, jobs, now)))
+}
+
+fn best_insertion(
+    driver: &Driver,
+    current: &[StopKey],
+    jobs: &[Delivery],
+    candidate: &Delivery,
+    now: i64,
+    recovery: bool,
+) -> Option<(Vec<StopKey>, Route)> {
     let base: Vec<StopKey> = current
         .iter()
         .filter(|stop| stop.delivery_id != candidate.id)
@@ -195,6 +297,7 @@ pub fn insert(
     assigned_candidate.driver_id = Some(driver.id.clone());
     assigned_candidate.status = DeliveryStatus::Assigned;
     proposed_jobs.push(assigned_candidate);
+    let baseline = evaluate(driver, current, jobs, now);
     let mut best: Option<(Vec<StopKey>, Route)> = None;
     for pickup_index in 0..=base.len() {
         for dropoff_index in (pickup_index + 1)..=(base.len() + 1) {
@@ -214,12 +317,12 @@ pub fn insert(
                 },
             );
             let route = evaluate(driver, &keys, &proposed_jobs, now);
-            if route.feasible
+            if (route.feasible || (recovery && structurally_safe(&route)))
                 && best
                     .as_ref()
                     .map(|(_, old)| {
-                        (route.travel_seconds, route.finish_at)
-                            < (old.travel_seconds, old.finish_at)
+                        route_rank(&route, &baseline, &proposed_jobs)
+                            < route_rank(old, &baseline, &proposed_jobs)
                     })
                     .unwrap_or(true)
             {
@@ -228,6 +331,127 @@ pub fn insert(
         }
     }
     best
+}
+
+fn structurally_safe(route: &Route) -> bool {
+    route.warnings.iter().all(|warning| {
+        warning.starts_with("Driver ")
+            || warning.starts_with("Deadline missed for ")
+            || warning.starts_with("Maximum ride time exceeded for ")
+            || warning.starts_with("Onboard delivery delay exceeded for ")
+    })
+}
+
+/// Finite preference for prompt pickups: one second past the ten-minute target
+/// costs eight extra seconds, plus two per second of restaurant waiting. Hard
+/// delivery guards are applied before this score. This is an insertion heuristic.
+fn operating_cost(route: &Route, jobs: &[Delivery]) -> i64 {
+    route
+        .stops
+        .iter()
+        .filter(|stop| stop.kind == StopKind::Pickup)
+        .fold(route.travel_seconds, |cost, stop| {
+            let wait = jobs
+                .iter()
+                .find(|job| job.id == stop.delivery_id)
+                .and_then(Delivery::readiness_at)
+                .map(|ready| stop.arrival_at.saturating_sub(ready).max(0))
+                .unwrap_or(0);
+            cost.saturating_add(wait.saturating_mul(2)).saturating_add(
+                wait.saturating_sub(PICKUP_TARGET_SECONDS)
+                    .max(0)
+                    .saturating_mul(8),
+            )
+        })
+}
+
+pub fn incremental_priority_cost(route: &Route, baseline: &Route, jobs: &[Delivery]) -> i64 {
+    let extra_onboard = jobs
+        .iter()
+        .filter(|job| job.status == DeliveryStatus::PickedUp)
+        .filter_map(|job| Some((dropoff_at(route, &job.id)?, dropoff_at(baseline, &job.id)?)))
+        .map(|(after, before)| after.saturating_sub(before).max(0))
+        .sum::<i64>();
+    operating_cost(route, jobs)
+        .saturating_sub(operating_cost(baseline, jobs))
+        .saturating_add(extra_onboard)
+}
+
+pub fn dropoff_at(route: &Route, id: &str) -> Option<i64> {
+    route
+        .stops
+        .iter()
+        .find(|stop| stop.delivery_id == id && stop.kind == StopKind::Dropoff)
+        .map(|stop| stop.arrival_at)
+}
+
+pub fn onboard_deadline(job: &Delivery, committed: &Route, now: i64) -> Option<i64> {
+    if !committed.estimates_available {
+        return None;
+    }
+    Some(
+        dropoff_at(committed, &job.id)
+            .unwrap_or(now)
+            .saturating_add(MAX_ADDITIONAL_ONBOARD_SECONDS)
+            .min(job.deadline_at)
+            .min(
+                job.picked_up_at
+                    .unwrap_or(now)
+                    .saturating_add(job.max_ride_seconds),
+            ),
+    )
+}
+
+/// Return lateness separately per constraint so recovery cannot trade worsening
+/// one person's already-late delivery against improving a different one.
+pub fn timing_overruns(route: &Route, jobs: &[Delivery]) -> HashMap<String, [i64; 3]> {
+    jobs.iter()
+        .filter_map(|job| {
+            let dropoff = dropoff_at(route, &job.id)?;
+            let pickup = job.picked_up_at.or_else(|| {
+                route
+                    .stops
+                    .iter()
+                    .find(|stop| stop.delivery_id == job.id && stop.kind == StopKind::Pickup)
+                    .map(|stop| stop.arrival_at)
+            });
+            Some((
+                job.id.clone(),
+                [
+                    dropoff.saturating_sub(job.deadline_at).max(0),
+                    pickup
+                        .map(|at| {
+                            dropoff
+                                .saturating_sub(at)
+                                .saturating_sub(job.max_ride_seconds)
+                                .max(0)
+                        })
+                        .unwrap_or(0),
+                    job.onboard_deadline_at
+                        .map(|at| dropoff.saturating_sub(at).max(0))
+                        .unwrap_or(0),
+                ],
+            ))
+        })
+        .collect()
+}
+
+pub fn route_rank(route: &Route, baseline: &Route, jobs: &[Delivery]) -> (i64, i64, i64, i64, i64) {
+    let overruns = timing_overruns(route, jobs);
+    let onboard = jobs
+        .iter()
+        .filter(|job| job.status == DeliveryStatus::PickedUp)
+        .filter_map(|job| overruns.get(&job.id))
+        .flatten()
+        .sum();
+    let all = overruns.values().flatten().sum();
+    (
+        onboard,
+        all,
+        incremental_priority_cost(route, baseline, jobs),
+        route.travel_seconds,
+        route.finish_at,
+    )
 }
 
 #[cfg(test)]
@@ -256,10 +480,11 @@ mod tests {
                 lat: 36.717,
                 lng: 15.092,
             },
-            ready_at: 1000,
+            ready_at: Some(1000),
             deadline_at: 5000,
             load_units: 1,
             max_ride_seconds: 1800,
+            restaurant_id: None,
         }
         .into_delivery(1000)
         .with_id(id)
@@ -360,5 +585,202 @@ mod tests {
                 }
             ) > 0
         );
+    }
+
+    fn stop(id: &str, kind: StopKind) -> StopKey {
+        StopKey {
+            delivery_id: id.into(),
+            kind,
+        }
+    }
+    fn nearby(id: &str, status: DeliveryStatus) -> Delivery {
+        let mut job = job(id);
+        job.dropoff = job.pickup;
+        job.status = status;
+        if status != DeliveryStatus::Pending {
+            job.driver_id = Some("driver-1".into());
+        }
+        if status == DeliveryStatus::PickedUp {
+            job.picked_up_at = Some(900);
+        }
+        job
+    }
+
+    #[test]
+    fn unknown_readiness_never_becomes_an_urgent_or_executable_pickup() {
+        let mut candidate = nearby("unknown", DeliveryStatus::Pending);
+        candidate.ready_at = 0;
+        candidate.readiness_state = ReadinessState::Unknown;
+        assert!(insert(&driver(2), &[], &[], &candidate, 1000).is_none());
+        assert!(insert_for_dispatch(&driver(2), &[], &[], &candidate, 1000).is_none());
+        candidate.status = DeliveryStatus::Assigned;
+        candidate.driver_id = Some("driver-1".into());
+        let route = evaluate(
+            &driver(2),
+            &[
+                stop("unknown", StopKind::Pickup),
+                stop("unknown", StopKind::Dropoff),
+            ],
+            &[candidate],
+            1000,
+        );
+        assert!(!route.feasible);
+        assert!(route.notices.is_empty());
+    }
+
+    #[test]
+    fn pickup_target_is_soft_with_exact_boundary_and_ready_time_wait() {
+        let mut candidate = nearby("a", DeliveryStatus::Pending);
+        candidate.ready_at = 400;
+        let (_, route) = insert(&driver(2), &[], &[], &candidate, 1000).unwrap();
+        assert!(route.feasible && route.notices.is_empty());
+        candidate.ready_at = 399;
+        let (_, route) = insert(&driver(2), &[], &[], &candidate, 1000).unwrap();
+        assert!(route.feasible);
+        assert_eq!(route.notices, vec!["Pickup target missed for a"]);
+        candidate.ready_at = 1400;
+        let (_, route) = insert(&driver(2), &[], &[], &candidate, 1000).unwrap();
+        assert_eq!(route.stops[0].arrival_at, 1400);
+    }
+
+    #[test]
+    fn urgent_pickup_can_delay_onboard_delivery_but_not_reset_its_guard() {
+        let mut onboard = nearby("aboard", DeliveryStatus::PickedUp);
+        onboard.onboard_deadline_at = Some(1300);
+        let mut keys = vec![stop("aboard", StopKind::Dropoff)];
+        let mut jobs = vec![onboard];
+        let d = driver(8);
+        for index in 0..7 {
+            let mut candidate = nearby(&format!("ready-{index}"), DeliveryStatus::Pending);
+            candidate.ready_at = 0;
+            let (next, route) = insert(&d, &keys, &jobs, &candidate, 1000).unwrap();
+            if index == 0 {
+                assert_eq!(next[0], stop(&candidate.id, StopKind::Pickup));
+                assert_eq!(dropoff_at(&route, "aboard"), Some(1060));
+            }
+            assert!(dropoff_at(&route, "aboard").unwrap() <= 1300);
+            assert_eq!(jobs[0].onboard_deadline_at, Some(1300));
+            candidate.status = DeliveryStatus::Assigned;
+            candidate.driver_id = Some(d.id.clone());
+            jobs.push(candidate);
+            keys = next;
+        }
+        assert!(
+            keys.iter()
+                .position(|key| key.delivery_id == "aboard")
+                .unwrap()
+                <= 5
+        );
+    }
+
+    #[test]
+    fn additional_onboard_boundary_is_cumulative_and_deadline_remains_tighter() {
+        let mut onboard = nearby("aboard", DeliveryStatus::PickedUp);
+        onboard.onboard_deadline_at = Some(1300);
+        let mut candidate = nearby("a", DeliveryStatus::Assigned);
+        candidate.ready_at = 1240;
+        let keys = [
+            stop("a", StopKind::Pickup),
+            stop("aboard", StopKind::Dropoff),
+            stop("a", StopKind::Dropoff),
+        ];
+        assert!(
+            evaluate(
+                &driver(2),
+                &keys,
+                &[onboard.clone(), candidate.clone()],
+                1000
+            )
+            .feasible
+        );
+        candidate.ready_at = 1241;
+        let route = evaluate(
+            &driver(2),
+            &keys,
+            &[onboard.clone(), candidate.clone()],
+            1000,
+        );
+        assert!(!route.feasible);
+        assert!(route
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Onboard delivery delay")));
+        onboard.deadline_at = 1250;
+        let (_, route) = insert(
+            &driver(2),
+            &[stop("aboard", StopKind::Dropoff)],
+            &[onboard],
+            &candidate,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(route.stops[0].delivery_id, "aboard");
+    }
+
+    #[test]
+    fn delaying_assigned_food_reorders_behind_onboard_even_if_new_deadline_is_impossible() {
+        let mut onboard = nearby("aboard", DeliveryStatus::PickedUp);
+        onboard.onboard_deadline_at = Some(1300);
+        let mut changed = nearby("delayed", DeliveryStatus::Assigned);
+        changed.ready_at = 2000;
+        changed.deadline_at = 1100;
+        let current = [
+            stop("delayed", StopKind::Pickup),
+            stop("delayed", StopKind::Dropoff),
+            stop("aboard", StopKind::Dropoff),
+        ];
+        let (keys, route) = replan_readiness(
+            &driver(2),
+            &current,
+            &[onboard, changed.clone()],
+            &changed,
+            1000,
+        );
+        assert_eq!(keys[0], stop("aboard", StopKind::Dropoff));
+        assert_eq!(keys.len(), 3);
+        assert!(!route.feasible);
+        assert_eq!(dropoff_at(&route, "aboard"), Some(1000));
+    }
+
+    #[test]
+    fn dispatch_fallback_keeps_capacity_and_precedence_even_when_all_times_are_late() {
+        let mut onboard = nearby("aboard", DeliveryStatus::PickedUp);
+        onboard.deadline_at = 950;
+        onboard.max_ride_seconds = 60;
+        onboard.onboard_deadline_at = Some(960);
+        let mut candidate = nearby("new", DeliveryStatus::Pending);
+        candidate.deadline_at = 980;
+        let current = [stop("aboard", StopKind::Dropoff)];
+        assert!(insert(&driver(1), &current, &[onboard.clone()], &candidate, 1000).is_none());
+        let (keys, route) =
+            insert_for_dispatch(&driver(1), &current, &[onboard], &candidate, 1000).unwrap();
+        assert_eq!(keys[0], stop("aboard", StopKind::Dropoff));
+        assert_eq!(keys[1], stop("new", StopKind::Pickup));
+        assert!(!route.feasible);
+        assert!(!route
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Capacity")));
+    }
+
+    #[test]
+    fn readiness_edits_without_gps_never_jump_a_pickup_ahead_of_onboard_work() {
+        let mut d = driver(2);
+        d.location = None;
+        d.location_updated_at = None;
+        let aboard = nearby("aboard", DeliveryStatus::PickedUp);
+        let mut changed = nearby("queued", DeliveryStatus::Assigned);
+        changed.ready_at = 1000;
+        changed.readiness_state = ReadinessState::Ready;
+        let current = [
+            stop("aboard", StopKind::Dropoff),
+            stop("queued", StopKind::Pickup),
+            stop("queued", StopKind::Dropoff),
+        ];
+        let (keys, route) =
+            replan_readiness(&d, &current, &[aboard, changed.clone()], &changed, 1000);
+        assert_eq!(keys, current);
+        assert!(!route.estimates_available);
+        assert_eq!(route.stops[0].delivery_id, "aboard");
     }
 }

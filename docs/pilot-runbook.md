@@ -67,8 +67,8 @@ The app opens an Italian login screen. Enter your service's exact HTTPS origin a
 Use two phones and two different accounts. Keep both apps visible for this first check.
 
 1. Driver: sign in, start a shift and explicitly consent to sharing the current location
-2. Dispatcher: sign in, confirm the driver's recent position and active shift, create a clearly labelled synthetic delivery with real map-selected pickup/drop-off points and feasible times
-3. Dispatcher: review the suggested route and explicitly assign the delivery
+2. Dispatcher: sign in, confirm the driver's recent position and active shift, save a clearly labelled synthetic restaurant with a real map-selected address, then create an order using it and a real destination; readiness remains unknown
+3. Dispatcher: open the order and choose Pronta ora; confirm the server assigns it. Also test Pronta tra… with the dispatcher app closed, then reopen after the estimate and verify assignment
 4. Driver: verify the next stop appears (foreground refresh is approximately every five seconds), follow directions only when safe, then confirm pickup and delivery in order
 5. Dispatcher: verify status and route changes, including after restarting the server
 6. Driver: finish the work, end the shift and confirm location sharing stops; sign out and confirm the app no longer shows the previous account's deliveries
@@ -77,7 +77,7 @@ Use two phones and two different accounts. Keep both apps visible for this first
 
 Keep a human dispatcher in contact with the driver. Record the device model, iOS version, app build, API commit and result for every case:
 
-- Turn networking off during delivery creation/assignment/status changes. Confirm a visible error, reconnect and refresh. Retry the same pending action; check that a duplicate delivery or duplicate route stop is not created. Do not create a replacement delivery just because the first response was lost
+- Turn networking off during restaurant/order creation, readiness, assignment/status changes. Confirm a visible error, reconnect and refresh. Retry the same pending action; check that a duplicate delivery or duplicate route stop is not created. Do not create a replacement delivery just because the first response was lost
 - Sign out/in and restart the app; confirm restored sessions are checked, expired/revoked sessions return to login, and changing the API origin cannot send an old token to the new server
 - Deny location permission, later grant it, stop/restart sharing and end the shift. No GPS should be sent while off shift or after logout
 - Only after foreground checks pass, enable the separate background-sharing control; lock the phone, switch to Maps, lose/recover connectivity, then check location timestamps at the dispatcher

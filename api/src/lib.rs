@@ -46,6 +46,13 @@ pub struct AppState {
     clock: Arc<dyn Clock>,
     authentication: Arc<Authentication>,
     auth_workers: Arc<tokio::sync::Semaphore>,
+    dispatch_cursor: Arc<Mutex<DispatchCursor>>,
+}
+
+#[derive(Default)]
+struct DispatchCursor {
+    after: Option<(i64, String)>,
+    high_water: Option<(i64, String)>,
 }
 
 enum Authentication {
@@ -72,6 +79,7 @@ impl AppState {
             clock,
             authentication: Arc::new(Authentication::Demo),
             auth_workers: Arc::new(tokio::sync::Semaphore::new(2)),
+            dispatch_cursor: Arc::new(Mutex::new(DispatchCursor::default())),
         })
     }
 
@@ -108,6 +116,7 @@ impl AppState {
             clock,
             authentication: Arc::new(Authentication::Production(config)),
             auth_workers: Arc::new(tokio::sync::Semaphore::new(2)),
+            dispatch_cursor: Arc::new(Mutex::new(DispatchCursor::default())),
         })
     }
 
@@ -115,6 +124,72 @@ impl AppState {
         self.db
             .lock()
             .map_err(|_| ApiError::internal("Database lock poisoned"))
+    }
+
+    /// A bounded server-side sweep, independent of foreground clients. The cursor
+    /// rotates past attempted jobs so blocked older work cannot starve the queue.
+    pub fn dispatch_ready(&self) -> Result<usize, String> {
+        self.dispatch_ready_inner().map_err(|error| error.message)
+    }
+
+    fn dispatch_ready_inner(&self) -> ApiResult<usize> {
+        const MAX_DISPATCH_PER_TICK: usize = 32;
+        let now = self.clock.now();
+        let mut db = self.db()?;
+        let mut candidates = Vec::new();
+        for team in db::delivery_teams(&db)? {
+            for job in db::planning_deliveries(&db, &team)? {
+                if auto_dispatch_due(&job, now) {
+                    candidates.push((job.ready_at, job.id, team.clone()));
+                }
+            }
+        }
+        candidates.sort();
+        let mut cursor = self
+            .dispatch_cursor
+            .lock()
+            .map_err(|_| ApiError::internal("Dispatcher lock poisoned"))?;
+        let within_cohort = |candidate: &(i64, String, String), cursor: &DispatchCursor| {
+            let key = (candidate.0, candidate.1.clone());
+            cursor.after.as_ref().is_none_or(|after| &key > after)
+                && cursor.high_water.as_ref().is_some_and(|end| &key <= end)
+        };
+        if !candidates
+            .iter()
+            .any(|candidate| within_cohort(candidate, &cursor))
+        {
+            cursor.after = None;
+            cursor.high_water = candidates.last().map(|(at, id, _)| (*at, id.clone()));
+        }
+        // Snapshot the cohort boundary: continuous new arrivals cannot keep
+        // moving its end and prevent old blocked jobs from being retried.
+        candidates.retain(|candidate| within_cohort(candidate, &cursor));
+        let mut assigned = 0;
+        for (ready_at, id, team) in candidates.into_iter().take(MAX_DISPATCH_PER_TICK) {
+            cursor.after = Some((ready_at, id.clone()));
+            let tx = db.transaction()?;
+            let mut job = db::delivery(&tx, &team, &id)?;
+            if auto_dispatch_due(&job, now) && auto_assign(&tx, &team, &mut job, now)? {
+                assigned += 1;
+            }
+            tx.commit()?;
+        }
+        Ok(assigned)
+    }
+
+    pub fn spawn_dispatcher(&self, interval: std::time::Duration) -> tokio::task::JoinHandle<()> {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut ticks =
+                tokio::time::interval(interval.max(std::time::Duration::from_millis(25)));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                if let Err(error) = state.dispatch_ready() {
+                    tracing::error!(%error, "Automatic dispatch will retry on the next tick");
+                }
+            }
+        })
     }
 }
 
@@ -235,10 +310,15 @@ pub fn app(state: AppState) -> Router {
         .route("/me", get(me))
         .route("/session", get(session_identity).delete(logout))
         .route("/drivers", get(list_drivers))
+        .route(
+            "/restaurants",
+            get(list_restaurants).post(create_restaurant),
+        )
         .route("/shift", get(get_shift).post(shift))
         .route("/location", post(location))
         .route("/deliveries", get(list_deliveries).post(create_delivery))
         .route("/deliveries/{id}/assign", post(assign))
+        .route("/deliveries/{id}/readiness", post(readiness))
         .route("/deliveries/{id}/status", post(status))
         .route("/deliveries/{id}/suggestions", get(suggestions))
         .route("/route", get(own_route))
@@ -400,7 +480,7 @@ async fn shift(
     }
     let db = state.db()?;
     let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
-    let jobs = db::deliveries(&db, &principal.team_id)?;
+    let jobs = db::planning_deliveries(&db, &principal.team_id)?;
     let has_work = jobs.iter().any(|j| {
         j.driver_id.as_deref() == Some(&principal.id)
             && matches!(
@@ -431,6 +511,10 @@ async fn shift(
         ));
     }
     db::save_driver(&db, &principal.team_id, &driver)?;
+    drop(db);
+    if let Err(error) = state.dispatch_ready() {
+        tracing::warn!(%error, "Shift saved; automatic dispatch will retry");
+    }
     Ok(Json(driver))
 }
 
@@ -456,6 +540,10 @@ async fn location(
     driver.location = Some(coordinate);
     driver.location_updated_at = Some(state.clock.now());
     db::save_driver(&db, &principal.team_id, &driver)?;
+    drop(db);
+    if let Err(error) = state.dispatch_ready() {
+        tracing::warn!(%error, "Location saved; automatic dispatch will retry");
+    }
     Ok(Json(driver))
 }
 
@@ -496,6 +584,17 @@ impl Idempotency {
         }))
     }
     fn replay(&self, db: &Connection, principal: &Principal) -> ApiResult<Option<Delivery>> {
+        let response: Option<Delivery> = self.replay_body(db, principal)?;
+        if let Some(response) = &response {
+            db::delivery(db, &principal.team_id, &response.id)?;
+        }
+        Ok(response)
+    }
+    fn replay_body<T: serde::de::DeserializeOwned>(
+        &self,
+        db: &Connection,
+        principal: &Principal,
+    ) -> ApiResult<Option<T>> {
         let row: Option<(String, String)> = db
             .query_row(
                 "SELECT request_hash,response FROM idempotency WHERE principal_id=?1 AND key=?2 AND team_id=?3",
@@ -507,15 +606,16 @@ impl Idempotency {
             Some((hash, _)) if hash != self.request_hash => Err(ApiError::conflict(
                 "Idempotency-Key was already used for a different request",
             )),
-            Some((_, body)) => {
-                let response: Delivery = serde_json::from_str(&body)?;
-                db::delivery(db, &principal.team_id, &response.id)?;
-                Ok(Some(response))
-            }
+            Some((_, body)) => Ok(Some(serde_json::from_str(&body)?)),
             None => Ok(None),
         }
     }
-    fn save(&self, db: &Connection, principal: &Principal, response: &Delivery) -> ApiResult<()> {
+    fn save(
+        &self,
+        db: &Connection,
+        principal: &Principal,
+        response: &impl Serialize,
+    ) -> ApiResult<()> {
         db.execute(
             "INSERT INTO idempotency(principal_id,key,request_hash,response,team_id) VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -537,11 +637,17 @@ async fn create_delivery(
     body: Result<Json<NewDelivery>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Delivery>)> {
     principal.require("dispatcher")?;
-    let input = json_body(body)?;
-    input.validate().map_err(ApiError::bad_request)?;
+    let mut input = json_body(body)?;
     let key = Idempotency::parse(&headers, "/deliveries", &input)?;
     let mut db = state.db()?;
     let tx = db.transaction()?;
+    if let Some(id) = &input.restaurant_id {
+        let restaurant = db::restaurant(&tx, &principal.team_id, id)?;
+        input.shop_name = restaurant.name;
+        input.pickup_address = restaurant.address;
+        input.pickup = restaurant.coordinate;
+    }
+    input.validate().map_err(ApiError::bad_request)?;
     if let Some(saved) = key
         .as_ref()
         .map(|k| k.replay(&tx, &principal))
@@ -557,6 +663,231 @@ async fn create_delivery(
     }
     tx.commit()?;
     Ok((StatusCode::CREATED, Json(delivery)))
+}
+
+async fn list_restaurants(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> ApiResult<Json<Vec<Restaurant>>> {
+    principal.require("dispatcher")?;
+    Ok(Json(db::restaurants(&*state.db()?, &principal.team_id)?))
+}
+
+async fn create_restaurant(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
+    body: Result<Json<NewRestaurant>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<Restaurant>)> {
+    principal.require("dispatcher")?;
+    let input = json_body(body)?;
+    input.validate().map_err(ApiError::bad_request)?;
+    let key = Idempotency::parse(&headers, "/restaurants", &input)?;
+    let mut db = state.db()?;
+    let tx = db.transaction()?;
+    if let Some(saved) = key
+        .as_ref()
+        .map(|key| key.replay_body::<Restaurant>(&tx, &principal))
+        .transpose()?
+        .flatten()
+    {
+        db::restaurant(&tx, &principal.team_id, &saved.id)?;
+        return Ok((StatusCode::CREATED, Json(saved)));
+    }
+    let restaurant = Restaurant {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: input.name.trim().into(),
+        address: input.address.trim().into(),
+        coordinate: input.coordinate,
+        created_at: state.clock.now(),
+    };
+    db::save_restaurant(&tx, &principal.team_id, &restaurant)?;
+    if let Some(key) = key {
+        key.save(&tx, &principal, &restaurant)?;
+    }
+    tx.commit()?;
+    Ok((StatusCode::CREATED, Json(restaurant)))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadinessInput {
+    ready_in_minutes: i64,
+    expected_revision: u64,
+}
+
+async fn readiness(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
+    body: Result<Json<ReadinessInput>, JsonRejection>,
+) -> ApiResult<Json<Delivery>> {
+    principal.require("dispatcher")?;
+    let id = path_id(path)?;
+    let input = json_body(body)?;
+    if !(0..=120).contains(&input.ready_in_minutes) {
+        return Err(ApiError::bad_request(
+            "Ready-in minutes must be between 0 and 120",
+        ));
+    }
+    let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/readiness"), &input)?;
+    let now = state.clock.now();
+    let mut db = state.db()?;
+    let tx = db.transaction()?;
+    // Team ownership and capability always precede idempotency replay.
+    let mut job = db::delivery(&tx, &principal.team_id, &id)?;
+    if let Some(saved) = key
+        .as_ref()
+        .map(|key| key.replay(&tx, &principal))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(Json(saved));
+    }
+    if matches!(
+        job.status,
+        DeliveryStatus::PickedUp | DeliveryStatus::Delivered
+    ) {
+        return Err(ApiError::conflict("Readiness cannot change after pickup"));
+    }
+    if input.expected_revision != job.readiness_revision {
+        return Err(ApiError::conflict(
+            "Readiness changed; refresh the delivery and try again",
+        ));
+    }
+    // Confirming an already-confirmed order is a no-op, even with a new key:
+    // repeated taps must not extend its original pickup target.
+    if !(input.ready_in_minutes == 0 && job.readiness_state == ReadinessState::Ready) {
+        let mut jobs = ensure_onboard_guards(&tx, &principal.team_id, now)?;
+        job.ready_at = now.saturating_add(input.ready_in_minutes * 60);
+        job.readiness_state = if input.ready_in_minutes == 0 {
+            ReadinessState::Ready
+        } else {
+            ReadinessState::Estimated
+        };
+        job.readiness_updated_at = Some(now);
+        job.dispatch_waiting_reason = None;
+        job.readiness_revision = job
+            .readiness_revision
+            .checked_add(1)
+            .ok_or_else(|| ApiError::conflict("Readiness revision limit reached"))?;
+        if let Some(existing) = jobs.iter_mut().find(|existing| existing.id == job.id) {
+            *existing = job.clone();
+        }
+        if let Some(driver_id) = &job.driver_id {
+            let driver = db::driver(&tx, &principal.team_id, driver_id)?;
+            let current = db::route_keys(&tx, &principal.team_id, driver_id)?;
+            let (keys, _) = planner::replan_readiness(&driver, &current, &jobs, &job, now);
+            db::save_route(&tx, &principal.team_id, driver_id, &keys)?;
+        }
+        // Record the fact even if the updated plan is late. GET route exposes
+        // hard violations; no work is removed or silently reassigned.
+        db::save_delivery(&tx, &principal.team_id, &job)?;
+    }
+    if auto_dispatch_due(&job, now) {
+        auto_assign(&tx, &principal.team_id, &mut job, now)?;
+    }
+    if let Some(key) = key {
+        key.save(&tx, &principal, &job)?;
+    }
+    tx.commit()?;
+    Ok(Json(job))
+}
+
+fn auto_dispatch_due(job: &Delivery, now: i64) -> bool {
+    job.status == DeliveryStatus::Pending
+        && job.driver_id.is_none()
+        && job.readiness_revision > 0
+        && job.readiness_at().is_some_and(|ready| ready <= now)
+}
+
+fn auto_assign(db: &Connection, team_id: &str, job: &mut Delivery, now: i64) -> ApiResult<bool> {
+    let jobs = ensure_onboard_guards(db, team_id, now)?;
+    let mut choices = Vec::new();
+    let mut active_drivers = 0;
+    for driver in db::drivers(db, team_id)? {
+        if driver.active {
+            active_drivers += 1;
+        }
+        let current = db::route_keys(db, team_id, &driver.id)?;
+        if let Some((keys, route)) =
+            planner::insert_for_dispatch(&driver, &current, &jobs, job, now)
+        {
+            let baseline = planner::evaluate(&driver, &current, &jobs, now);
+            let position_quality = if planner::location_is_fresh(&driver, now) {
+                0
+            } else if driver.location.is_some() {
+                1
+            } else {
+                2
+            };
+            let rank = planner::route_rank(&route, &baseline, &jobs);
+            // Prefer fully feasible plans. Fallbacks prioritize known positions;
+            // no-GPS queues are compared by committed load, never invented ETAs.
+            let rank = if driver.location.is_none() {
+                (0, 0, current.len() as i64, 0, 0)
+            } else {
+                rank
+            };
+            choices.push((
+                driver.location.is_none(),
+                !route.feasible,
+                rank,
+                position_quality,
+                driver.id,
+                keys,
+            ));
+        }
+    }
+    choices.sort_by(|a, b| (&a.0, &a.1, &a.2, &a.3, &a.4).cmp(&(&b.0, &b.1, &b.2, &b.3, &b.4)));
+    let Some((_, _, _, _, driver_id, keys)) = choices.into_iter().next() else {
+        let reason = if active_drivers == 0 {
+            "no_active_driver"
+        } else {
+            "capacity_or_route_limit"
+        };
+        if job.dispatch_waiting_reason.as_deref() != Some(reason) {
+            job.dispatch_waiting_reason = Some(reason.into());
+            db::save_delivery(db, team_id, job)?;
+        }
+        return Ok(false);
+    };
+    job.driver_id = Some(driver_id.clone());
+    job.status = DeliveryStatus::Assigned;
+    job.dispatch_waiting_reason = None;
+    db::save_delivery(db, team_id, job)?;
+    db::save_route(db, team_id, &driver_id, &keys)?;
+    Ok(true)
+}
+
+/// Older serialized jobs lack the cumulative guard. Capture it once, within the
+/// first successful planning transaction, preserving their existing commitments.
+fn ensure_onboard_guards(db: &Connection, team_id: &str, now: i64) -> ApiResult<Vec<Delivery>> {
+    let mut jobs = db::planning_deliveries(db, team_id)?;
+    let pending: Vec<_> = jobs
+        .iter()
+        .filter(|job| job.status == DeliveryStatus::PickedUp && job.onboard_deadline_at.is_none())
+        .filter_map(|job| {
+            job.driver_id
+                .as_ref()
+                .map(|driver_id| (job.id.clone(), driver_id.clone()))
+        })
+        .collect();
+    for (id, driver_id) in pending {
+        let driver = db::driver(db, team_id, &driver_id)?;
+        let route = planner::evaluate(
+            &driver,
+            &db::route_keys(db, team_id, &driver_id)?,
+            &jobs,
+            now,
+        );
+        if let Some(job) = jobs.iter_mut().find(|job| job.id == id) {
+            job.onboard_deadline_at = planner::onboard_deadline(job, &route, now);
+            db::save_delivery(db, team_id, job)?;
+        }
+    }
+    Ok(jobs)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -595,6 +926,9 @@ async fn assign(
             "Picked-up and delivered jobs cannot be reassigned",
         ));
     }
+    if job.readiness_at().is_none() {
+        return Err(ApiError::conflict("Set readiness before choosing a driver"));
+    }
     if !driver.active || driver.location.is_none() {
         return Err(ApiError::conflict(
             "Driver must be on shift with a reported location",
@@ -605,7 +939,7 @@ async fn assign(
             "Driver location is older than 5 minutes; request an update",
         ));
     }
-    let jobs = db::deliveries(&tx, &principal.team_id)?;
+    let jobs = ensure_onboard_guards(&tx, &principal.team_id, state.clock.now())?;
     let current = db::route_keys(&tx, &principal.team_id, &driver.id)?;
     if current
         .iter()
@@ -639,6 +973,7 @@ async fn assign(
     }
     job.driver_id = Some(driver.id.clone());
     job.status = DeliveryStatus::Assigned;
+    job.dispatch_waiting_reason = None;
     db::save_delivery(&tx, &principal.team_id, &job)?;
     db::save_route(&tx, &principal.team_id, &driver.id, &keys)?;
     if let Some(key) = key {
@@ -710,10 +1045,10 @@ async fn status(
     let now = state.clock.now();
     match kind {
         StopKind::Pickup => {
-            if now < job.ready_at {
+            if job.readiness_at().is_none_or(|ready_at| now < ready_at) {
                 return Err(ApiError::conflict("Delivery is not ready for pickup"));
             }
-            let onboard: i32 = db::deliveries(&tx, &principal.team_id)?
+            let onboard: i32 = db::planning_deliveries(&tx, &principal.team_id)?
                 .iter()
                 .filter(|j| j.driver_id == job.driver_id && j.status == DeliveryStatus::PickedUp)
                 .map(|j| j.load_units)
@@ -729,6 +1064,20 @@ async fn status(
     }
     job.status = input.status;
     keys.remove(0);
+    if kind == StopKind::Pickup {
+        let mut jobs = db::planning_deliveries(&tx, &principal.team_id)?;
+        if let Some(existing) = jobs.iter_mut().find(|existing| existing.id == job.id) {
+            *existing = job.clone();
+        }
+        // A confirmed pickup is an execution fact at this restaurant. Capture
+        // the commitment from that stop, not a possibly stale pre-trip GPS fix.
+        // This planning-only anchor never overwrites the reported GPS location.
+        let mut pickup_anchor = driver.clone();
+        pickup_anchor.location = Some(job.pickup);
+        pickup_anchor.location_updated_at = Some(now);
+        let committed = planner::evaluate(&pickup_anchor, &keys, &jobs, now);
+        job.onboard_deadline_at = planner::onboard_deadline(&job, &committed, now);
+    }
     db::save_delivery(&tx, &principal.team_id, &job)?;
     db::save_route(&tx, &principal.team_id, &principal.id, &keys)?;
     if let Some(key) = key {
@@ -774,7 +1123,17 @@ fn route_after_removal(
     let introduces_violation = route
         .warnings
         .iter()
-        .any(|warning| !before.warnings.contains(warning));
+        .any(|warning| !before.warnings.contains(warning))
+        || planner::timing_overruns(&route, &remaining)
+            .iter()
+            .any(|(id, after)| {
+                let before = planner::timing_overruns(&before, jobs);
+                let previous = before.get(id).copied().unwrap_or([0; 3]);
+                after
+                    .iter()
+                    .zip(previous)
+                    .any(|(after, before)| *after > before)
+            });
     Ok(Some(SourceRouteChange {
         driver_id: source_id.to_owned(),
         keys,
@@ -788,7 +1147,7 @@ fn get_route(state: &AppState, team_id: &str, driver_id: &str) -> ApiResult<Rout
     Ok(planner::evaluate(
         &driver,
         &db::route_keys(&db, team_id, driver_id)?,
-        &db::deliveries(&db, team_id)?,
+        &db::planning_deliveries(&db, team_id)?,
         state.clock.now(),
     ))
 }
@@ -825,7 +1184,10 @@ async fn suggestions(
             "Suggestions are only available before pickup",
         ));
     }
-    let jobs = db::deliveries(&db, &principal.team_id)?;
+    if job.readiness_at().is_none() {
+        return Err(ApiError::conflict("Set readiness before choosing a driver"));
+    }
+    let jobs = db::planning_deliveries(&db, &principal.team_id)?;
     let now = state.clock.now();
     let mut result = Vec::new();
     for driver in db::drivers(&db, &principal.team_id)? {
@@ -846,16 +1208,162 @@ async fn suggestions(
         }
         if let Some((_, route)) = planner::insert(&driver, &current, &jobs, &job, now) {
             let baseline = planner::evaluate(&driver, &current, &jobs, now);
-            result.push(Suggestion {
-                driver_id: driver.id,
-                incremental_travel_seconds: route.travel_seconds - baseline.travel_seconds,
-                route,
-            });
+            let priority = planner::incremental_priority_cost(&route, &baseline, &jobs);
+            result.push((
+                priority,
+                Suggestion {
+                    driver_id: driver.id,
+                    incremental_travel_seconds: route.travel_seconds - baseline.travel_seconds,
+                    route,
+                },
+            ));
         }
     }
     result.sort_by(|a, b| {
-        (a.incremental_travel_seconds, &a.driver_id)
-            .cmp(&(b.incremental_travel_seconds, &b.driver_id))
+        (a.0, a.1.incremental_travel_seconds, &a.1.driver_id).cmp(&(
+            b.0,
+            b.1.incremental_travel_seconds,
+            &b.1.driver_id,
+        ))
     });
-    Ok(Json(result))
+    Ok(Json(
+        result
+            .into_iter()
+            .map(|(_, suggestion)| suggestion)
+            .collect(),
+    ))
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now(&self) -> i64 {
+            1000
+        }
+    }
+
+    #[test]
+    fn bounded_sweeps_rotate_past_blocked_work_and_never_assign_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let state =
+            AppState::open_with_clock(dir.path().join("dispatch.db"), true, Arc::new(FixedClock))
+                .unwrap();
+        let mut good_id = String::new();
+        {
+            let db = state.db().unwrap();
+            let mut driver = db::driver(&db, "demo", "driver-1").unwrap();
+            driver.active = true;
+            driver.capacity = 1;
+            driver.location = Some(Coordinate { lat: 0.0, lng: 0.0 });
+            driver.location_updated_at = Some(1000);
+            db::save_driver(&db, "demo", &driver).unwrap();
+            for index in 0..35 {
+                let mut job = NewDelivery {
+                    shop_name: format!("Fixture {index}"),
+                    pickup_address: "A".into(),
+                    pickup: driver.location.unwrap(),
+                    dropoff_address: "B".into(),
+                    dropoff: driver.location.unwrap(),
+                    ready_at: Some(100 + index),
+                    deadline_at: 10_000,
+                    load_units: if index == 34 { 1 } else { 8 },
+                    max_ride_seconds: 1800,
+                    restaurant_id: None,
+                }
+                .into_delivery(0);
+                job.readiness_revision = 1;
+                if index == 34 {
+                    good_id = job.id.clone();
+                }
+                db::save_delivery(&db, "demo", &job).unwrap();
+            }
+        }
+        assert_eq!(
+            state.dispatch_ready().unwrap(),
+            0,
+            "first batch contains 32 physically oversized jobs"
+        );
+        assert_eq!(
+            state.dispatch_ready().unwrap(),
+            1,
+            "later feasible job must not starve behind oversized work"
+        );
+        assert_eq!(state.dispatch_ready().unwrap(), 0);
+        let db = state.db().unwrap();
+        assert_eq!(
+            db::delivery(&db, "demo", &good_id).unwrap().status,
+            DeliveryStatus::Assigned
+        );
+        assert_eq!(db::route_keys(&db, "demo", "driver-1").unwrap().len(), 2);
+        assert_eq!(
+            db::deliveries(&db, "demo")
+                .unwrap()
+                .iter()
+                .filter(|job| job.status == DeliveryStatus::Pending)
+                .count(),
+            34
+        );
+    }
+
+    #[test]
+    fn a_fixed_cohort_retries_old_work_despite_continuous_new_arrivals() {
+        let dir = tempfile::tempdir().unwrap();
+        let state =
+            AppState::open_with_clock(dir.path().join("fair.db"), true, Arc::new(FixedClock))
+                .unwrap();
+        let make_job = |index: i64, load: i32| {
+            let mut job = NewDelivery {
+                shop_name: format!("Fixture {index}"),
+                pickup_address: "A".into(),
+                pickup: Coordinate { lat: 0.0, lng: 0.0 },
+                dropoff_address: "B".into(),
+                dropoff: Coordinate { lat: 0.0, lng: 0.0 },
+                ready_at: Some(index),
+                deadline_at: 10_000,
+                load_units: load,
+                max_ride_seconds: 1800,
+                restaurant_id: None,
+            }
+            .into_delivery(0);
+            job.readiness_revision = 1;
+            job
+        };
+        let old = make_job(1, 2);
+        {
+            let db = state.db().unwrap();
+            let mut driver = db::driver(&db, "demo", "driver-1").unwrap();
+            driver.active = true;
+            driver.capacity = 1;
+            driver.location = Some(Coordinate { lat: 0.0, lng: 0.0 });
+            driver.location_updated_at = Some(1000);
+            db::save_driver(&db, "demo", &driver).unwrap();
+            db::save_delivery(&db, "demo", &old).unwrap();
+            for index in 2..=40 {
+                db::save_delivery(&db, "demo", &make_job(index, 8)).unwrap();
+            }
+        }
+        assert_eq!(state.dispatch_ready().unwrap(), 0);
+        {
+            let db = state.db().unwrap();
+            let mut driver = db::driver(&db, "demo", "driver-1").unwrap();
+            driver.capacity = 2;
+            db::save_driver(&db, "demo", &driver).unwrap();
+        }
+        for round in 0..3 {
+            {
+                let db = state.db().unwrap();
+                for index in 41 + round * 64..105 + round * 64 {
+                    db::save_delivery(&db, "demo", &make_job(index, 8)).unwrap();
+                }
+            }
+            state.dispatch_ready().unwrap();
+        }
+        let db = state.db().unwrap();
+        assert_eq!(
+            db::delivery(&db, "demo", &old.id).unwrap().status,
+            DeliveryStatus::Assigned
+        );
+    }
 }

@@ -2,7 +2,7 @@
 //! Time is injected so readiness, stale GPS, and expiry checks are deterministic.
 use arrivau_api::{
     app,
-    model::{Delivery, Driver, Route, Suggestion},
+    model::{Delivery, DeliveryStatus, Driver, ReadinessState, Route, Suggestion},
     AppState, Clock,
 };
 use reqwest::{Client, Method, Response, StatusCode};
@@ -41,10 +41,12 @@ struct Server {
     base: String,
     client: Client,
     task: JoinHandle<()>,
+    dispatcher: JoinHandle<()>,
 }
 impl Server {
     async fn start(path: &Path, clock: Arc<TestClock>) -> Self {
         let state = AppState::open_with_clock(path, true, clock).unwrap();
+        let dispatcher = state.spawn_dispatcher(std::time::Duration::from_millis(25));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
@@ -54,6 +56,7 @@ impl Server {
             base,
             client: Client::new(),
             task,
+            dispatcher,
         }
     }
     async fn request(
@@ -124,12 +127,14 @@ impl Server {
         self.get("/v1/route", token).await.json().await.unwrap()
     }
     async fn close(&mut self) {
+        self.dispatcher.abort();
         self.task.abort();
         let _ = (&mut self.task).await;
     }
 }
 impl Drop for Server {
     fn drop(&mut self) {
+        self.dispatcher.abort();
         self.task.abort();
     }
 }
@@ -141,6 +146,316 @@ fn new_job() -> Value {
         "dropoff_address":"Via Garibaldi 8, Pachino", "dropoff":{"lat":36.7170,"lng":15.0920},
         "ready_at":NOW, "deadline_at":NOW+3600, "load_units":1, "max_ride_seconds":1800
     })
+}
+
+fn unknown_job() -> Value {
+    let mut input = new_job();
+    input.as_object_mut().unwrap().remove("ready_at");
+    input
+}
+
+impl Server {
+    async fn readiness(&self, job: &Delivery, minutes: i64, revision: u64, key: &str) -> Response {
+        self.client
+            .post(format!("{}/v1/deliveries/{}/readiness", self.base, job.id))
+            .bearer_auth(DISPATCHER)
+            .header("Idempotency-Key", key)
+            .json(&json!({"ready_in_minutes":minutes,"expected_revision":revision}))
+            .send()
+            .await
+            .unwrap()
+    }
+    async fn listed_job(&self, id: &str) -> Delivery {
+        self.get("/v1/deliveries", DISPATCHER)
+            .await
+            .json::<Vec<Delivery>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|job| job.id == id)
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn unknown_creation_waits_for_readiness_then_assigns_without_driver_selection() {
+    let dir = TempDir::new().unwrap();
+    let clock = TestClock::new();
+    let server = Server::start(&dir.path().join("ready.db"), clock.clone()).await;
+    server.driver_online(DRIVER_1, 2).await;
+    let job = server.create(unknown_job()).await;
+    assert_eq!(job.readiness_state, ReadinessState::Unknown);
+    assert!(job.readiness_at().is_none());
+    clock.advance(120);
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    assert_eq!(
+        server.listed_job(&job.id).await.status,
+        DeliveryStatus::Pending
+    );
+    assert!(server.route(DRIVER_1).await.stops.is_empty());
+    error_is_json(server.assign(&job, "driver-1").await, StatusCode::CONFLICT).await;
+    error_is_json(
+        server
+            .get(
+                &format!("/v1/deliveries/{}/suggestions", job.id),
+                DISPATCHER,
+            )
+            .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    let response = server.readiness(&job, 0, 0, "mark-ready-0001").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let ready: Delivery = response.json().await.unwrap();
+    assert_eq!(ready.ready_at, NOW + 120);
+    assert_eq!(ready.created_at, NOW);
+    assert_eq!(ready.readiness_state, ReadinessState::Ready);
+    assert_eq!(ready.status, DeliveryStatus::Assigned);
+    assert_eq!(ready.driver_id.as_deref(), Some("driver-1"));
+    assert_eq!(server.route(DRIVER_1).await.stops.len(), 2);
+}
+
+#[tokio::test]
+async fn readiness_retries_keep_original_eta_and_reject_stale_edits() {
+    let dir = TempDir::new().unwrap();
+    let clock = TestClock::new();
+    let server = Server::start(&dir.path().join("ready.db"), clock.clone()).await;
+    server.driver_online(DRIVER_1, 2).await;
+    let job = server.create(unknown_job()).await;
+    let estimated: Delivery = server
+        .readiness(&job, 2, 0, "estimate-0001")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(estimated.ready_at, NOW + 120);
+    assert_eq!(estimated.status, DeliveryStatus::Pending);
+    clock.advance(30);
+    let replay: Delivery = server
+        .readiness(&job, 2, 0, "estimate-0001")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay.ready_at, estimated.ready_at);
+    assert_eq!(replay.readiness_revision, 1);
+    error_is_json(
+        server.readiness(&job, 0, 0, "stale-edit-0001").await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    error_is_json(
+        server.readiness(&job, 3, 1, "estimate-0001").await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+    let ready: Delivery = server
+        .readiness(&job, 0, 1, "ready-now-0001")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ready.ready_at, NOW + 30);
+    assert_eq!(ready.status, DeliveryStatus::Assigned);
+    clock.advance(10);
+    let again: Delivery = server
+        .readiness(&job, 0, 2, "ready-again-0001")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again.ready_at, ready.ready_at);
+    assert_eq!(again.readiness_revision, 2);
+    assert_eq!(
+        server.status(&job, DRIVER_1, "picked_up").await.status(),
+        StatusCode::OK
+    );
+    error_is_json(
+        server.readiness(&job, 5, 2, "after-pickup-0001").await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn server_timer_assigns_future_readiness_without_foreground_client() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("ready.db");
+    let clock = TestClock::new();
+    let mut server = Server::start(&path, clock.clone()).await;
+    server.driver_online(DRIVER_1, 2).await;
+    let job = server.create(unknown_job()).await;
+    let estimated: Delivery = server
+        .readiness(&job, 1, 0, "future-ready-0001")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(estimated.status, DeliveryStatus::Pending);
+    server.close().await;
+    let server = Server::start(&path, clock.clone()).await;
+    clock.advance(60);
+    // No HTTP activity or app poll causes assignment: the server timer runs it.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let assigned = server.listed_job(&job.id).await;
+    assert_eq!(assigned.status, DeliveryStatus::Assigned);
+    assert_eq!(assigned.readiness_state, ReadinessState::Estimated);
+    assert_eq!(assigned.ready_at, NOW + 60);
+    assert_eq!(server.route(DRIVER_1).await.stops.len(), 2);
+    assert_eq!(
+        server.status(&job, DRIVER_1, "picked_up").await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn ready_without_shift_waits_visibly_then_shift_start_assigns_even_without_gps() {
+    let dir = TempDir::new().unwrap();
+    let server = Server::start(&dir.path().join("ready.db"), TestClock::new()).await;
+    let job = server.create(unknown_job()).await;
+    let waiting: Delivery = server
+        .readiness(&job, 0, 0, "waiting-ready-01")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(waiting.status, DeliveryStatus::Pending);
+    assert_eq!(
+        waiting.dispatch_waiting_reason.as_deref(),
+        Some("no_active_driver")
+    );
+    assert_eq!(
+        server
+            .post("/v1/shift", DRIVER_1, json!({"active":true,"capacity":1}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let assigned = server.listed_job(&job.id).await;
+    assert_eq!(assigned.status, DeliveryStatus::Assigned);
+    assert!(assigned.dispatch_waiting_reason.is_none());
+    let route = server.route(DRIVER_1).await;
+    assert!(!route.estimates_available);
+    assert!(!route.feasible);
+    assert!(route
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("location is unavailable")));
+    assert_eq!(route.stops.len(), 2);
+    let picked: Delivery = server
+        .status(&job, DRIVER_1, "picked_up")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        picked.onboard_deadline_at.is_some(),
+        "the explicitly confirmed pickup supplies a planning anchor without GPS"
+    );
+}
+
+#[tokio::test]
+async fn automatic_dispatch_assigns_late_work_and_queues_after_full_car_dropoff() {
+    let dir = TempDir::new().unwrap();
+    let server = Server::start(&dir.path().join("ready.db"), TestClock::new()).await;
+    server.driver_online(DRIVER_1, 1).await;
+    let onboard = server.create(new_job()).await;
+    assert_eq!(
+        server.assign(&onboard, "driver-1").await.status(),
+        StatusCode::OK
+    );
+    let picked: Delivery = server
+        .status(&onboard, DRIVER_1, "picked_up")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(picked.onboard_deadline_at.is_some());
+    let mut input = unknown_job();
+    input["deadline_at"] = json!(NOW + 1);
+    let job = server.create(input).await;
+    let assigned: Delivery = server
+        .readiness(&job, 0, 0, "late-ready-0001")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(assigned.status, DeliveryStatus::Assigned);
+    let route = server.route(DRIVER_1).await;
+    assert_eq!(route.stops[0].delivery_id, onboard.id);
+    assert_eq!(route.stops[0].kind, arrivau_api::model::StopKind::Dropoff);
+    assert!(!route.feasible);
+    assert!(route
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Deadline missed")));
+    assert_eq!(
+        server.listed_job(&onboard.id).await.onboard_deadline_at,
+        picked.onboard_deadline_at
+    );
+}
+
+#[tokio::test]
+async fn concurrent_readiness_reports_have_one_winner_and_one_assignment() {
+    let dir = TempDir::new().unwrap();
+    let server = Server::start(&dir.path().join("ready.db"), TestClock::new()).await;
+    server.driver_online(DRIVER_1, 2).await;
+    let job = server.create(unknown_job()).await;
+    let (a, b) = tokio::join!(
+        server.readiness(&job, 0, 0, "race-ready-0001"),
+        server.readiness(&job, 1, 0, "race-ready-0002")
+    );
+    assert!(
+        (a.status() == StatusCode::OK && b.status() == StatusCode::CONFLICT)
+            || (b.status() == StatusCode::OK && a.status() == StatusCode::CONFLICT)
+    );
+    let current = server.listed_job(&job.id).await;
+    assert_eq!(current.readiness_revision, 1);
+    let count = server.route(DRIVER_1).await.stops.len();
+    assert_eq!(
+        count,
+        if current.status == DeliveryStatus::Assigned {
+            2
+        } else {
+            0
+        }
+    );
+}
+
+#[tokio::test]
+async fn pickup_guard_uses_acknowledged_stop_instead_of_the_old_gps_approach() {
+    let dir = TempDir::new().unwrap();
+    let server = Server::start(&dir.path().join("anchor.db"), TestClock::new()).await;
+    server.driver_online(DRIVER_1, 2).await;
+    let mut input = unknown_job();
+    input["pickup"] = json!({"lat":36.8,"lng":15.0908});
+    input["dropoff"] = input["pickup"].clone();
+    let job = server.create(input).await;
+    let assigned: Delivery = server
+        .readiness(&job, 0, 0, "anchor-ready-01")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(assigned.status, DeliveryStatus::Assigned);
+    let picked: Delivery = server
+        .status(&job, DRIVER_1, "picked_up")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(picked.onboard_deadline_at, Some(NOW + 300));
+    let driver: Driver = server
+        .get("/v1/shift", DRIVER_1)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(
+        driver.location,
+        Some(job.pickup),
+        "pickup anchor is not a synthetic GPS upload"
+    );
 }
 async fn error_is_json(response: Response, expected: StatusCode) {
     assert_eq!(response.status(), expected);

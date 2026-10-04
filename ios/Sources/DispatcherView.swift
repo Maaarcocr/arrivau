@@ -33,7 +33,7 @@ struct DispatcherView: View {
                                 Text(legacy.delivery.shopName).font(.headline)
                                 Text("Ritiro: \(legacy.delivery.pickupAddress)")
                                 Text("Destinazione: \(legacy.delivery.dropoffAddress)")
-                                Text("Pronta: \(legacy.delivery.readyAt.epochDate.italianDateTime)")
+                                Text(legacy.delivery.readyAt.map { "Disponibilità prevista: \($0.epochDate.italianDateTime)" } ?? "Disponibilità da definire")
                                 Text("Riferimento richiesta: \(legacy.idempotencyKey)").font(.caption).textSelection(.enabled)
                                 Button("Ho verificato la consegna") {
                                     legacyReview = store.prepareLegacyCreationReview()
@@ -111,10 +111,20 @@ struct DeliveryDetailView: View {
     let deliveryId: String
     var onAssigned: (() -> Void)? = nil
     @State private var suggestions: [Suggestion]?
+    @State private var assignedRoute: DriverRoute?
     @State private var suggesting = false
     @State private var changingDriver = false
+    @State private var showingEstimate = false
+    @State private var estimateRevision: UInt64 = 0
+    @State private var suggestionRequestID = UUID()
     private var delivery: Delivery? { store.deliveries.first { $0.id == deliveryId } }
-    private var needsAssignment: Bool { delivery?.status == .pending || (delivery?.status == .assigned && changingDriver) }
+    private var needsAssignment: Bool {
+        delivery?.hasKnownReadiness == true && delivery?.status == .assigned && changingDriver
+    }
+    private var suggestionContext: String { "\(needsAssignment)-\(delivery?.readinessRevision ?? 0)" }
+    private var assignedRouteContext: String {
+        "\(delivery?.driverId ?? "")-\(delivery?.status.rawValue ?? "")-\(delivery?.readinessRevision ?? 0)-\(store.lastSyncedAt?.timeIntervalSince1970 ?? 0)"
+    }
 
     var body: some View {
         Group {
@@ -130,8 +140,53 @@ struct DeliveryDetailView: View {
                         }
                         DeliveryFacts(delivery: delivery)
                     }
+                    if delivery.canChangeReadiness {
+                        Section("Disponibilità del cibo") {
+                            if let pending = store.pendingReadiness(for: deliveryId) {
+                                Text("Modifica non confermata. Verifica la stessa richiesta prima di cambiarla.")
+                                    .font(.subheadline).foregroundStyle(.orange)
+                                Button("Riprova la stessa modifica") {
+                                    Task { _ = await store.setReadiness(deliveryId: deliveryId, readyInMinutes: pending.readyInMinutes, expectedRevision: pending.expectedRevision) }
+                                }.accessibilityIdentifier("retry_readiness")
+                            } else {
+                                Button("Pronta ora") {
+                                    Task { _ = await store.setReadiness(deliveryId: deliveryId, readyInMinutes: 0, expectedRevision: delivery.readinessRevision) }
+                                }
+                                .disabled(delivery.readinessState == .ready)
+                                .accessibilityIdentifier("ready_now")
+                                Button("Pronta tra X minuti") {
+                                    estimateRevision = delivery.readinessRevision
+                                    showingEstimate = true
+                                }.accessibilityIdentifier("estimate_readiness")
+                            }
+                            if !delivery.hasKnownReadiness {
+                                Text("Quando sarà pronta, l’app cercherà un corriere disponibile.")
+                                    .font(.subheadline).foregroundStyle(.secondary)
+                            }
+                        }.disabled(store.isMutating)
+                    }
+                    if delivery.status == .pending, delivery.hasKnownReadiness {
+                        Section {
+                            TimelineView(.periodic(from: .now, by: 1)) { context in
+                                Label(Int(context.date.timeIntervalSince1970) < delivery.readyAt
+                                      ? "Assegnazione prevista quando pronta" : "In attesa di un corriere",
+                                      systemImage: "bicycle")
+                                    .accessibilityIdentifier("automatic_assignment_status")
+                            }
+                            if let reason = delivery.localizedDispatchWaitingReason {
+                                Text(reason).font(.subheadline).foregroundStyle(.orange)
+                                    .accessibilityIdentifier("dispatch_waiting_reason")
+                            }
+                            if delivery.readinessRevision == 0 {
+                                Text("Conferma la disponibilità per avviare l’assegnazione automatica.")
+                                    .font(.subheadline).foregroundStyle(.orange)
+                            }
+                            Text("L’app assegna un corriere in base al percorso e alle consegne già in carico.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
+                    }
                     if needsAssignment {
-                        Section("Scegli un corriere") {
+                        Section("Cambia corriere") {
                             if suggesting { ProgressView("Ricerca di un corriere…") }
                             else if let suggestions {
                                 if let recommended = suggestions.first {
@@ -157,6 +212,13 @@ struct DeliveryDetailView: View {
                     } else if let driverId = delivery.driverId {
                         Section {
                             Label(store.drivers.first { $0.id == driverId }?.displayName ?? "Corriere assegnato", systemImage: "bicycle")
+                            if delivery.status != .delivered {
+                                if let assignedRoute {
+                                    routeSummary(assignedRoute)
+                                } else {
+                                    Text("Orari del percorso da verificare").font(.subheadline).foregroundStyle(.secondary)
+                                }
+                            }
                             if delivery.status == .assigned {
                                 Button("Cambia corriere") { changingDriver = true }
                                     .accessibilityIdentifier("change_driver")
@@ -165,19 +227,55 @@ struct DeliveryDetailView: View {
                     }
                     SyncFooter()
                 }
-                .task(id: needsAssignment) { if needsAssignment { await loadSuggestions() } }
+                .task(id: assignedRouteContext) {
+                    assignedRoute = nil
+                    let planned = await store.assignedRoute(for: deliveryId)
+                    guard !Task.isCancelled else { return }
+                    assignedRoute = planned
+                }
+                .task(id: suggestionContext) {
+                    if needsAssignment { await loadSuggestions() }
+                    else { suggestionRequestID = UUID(); suggestions = nil; suggesting = false }
+                }
             } else { ContentUnavailableView("Consegna non disponibile", systemImage: "shippingbox") }
         }
         .navigationTitle("Consegna")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showingEstimate) {
+            ReadinessEstimateView(deliveryId: deliveryId, expectedRevision: estimateRevision)
+        }
         .refreshable {
             await store.refresh(force: true)
             if needsAssignment { await loadSuggestions() }
         }
     }
 
+    private func routeSummary(_ route: DriverRoute) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if route.estimatesAvailable {
+                if let pickup = route.stops.first(where: { $0.deliveryId == deliveryId && $0.kind == .pickup }) {
+                    Text("Ritiro previsto alle \(pickup.arrivalAt.epochDate.italianTime)")
+                        .accessibilityIdentifier("assigned_pickup_eta")
+                }
+                if let dropoff = route.stops.first(where: { $0.deliveryId == deliveryId && $0.kind == .dropoff }) {
+                    Text("Consegna prevista alle \(dropoff.arrivalAt.epochDate.italianTime)")
+                }
+            } else {
+                Text("Posizione non disponibile; orari da verificare")
+                    .foregroundStyle(.orange).accessibilityIdentifier("route_estimates_unavailable")
+            }
+            ForEach(route.localizedNotices, id: \.self) { notice in
+                Label(notice, systemImage: "clock.badge.exclamationmark").foregroundStyle(.orange)
+            }
+            ForEach(route.localizedWarnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            }
+        }.font(.subheadline)
+    }
+
     private func assignment(_ suggestion: Suggestion, recommended: Bool) -> some View {
         let name = store.drivers.first { $0.id == suggestion.driverId }?.displayName ?? "Corriere"
+        let pickup = suggestion.route.stops.first { $0.deliveryId == deliveryId && $0.kind == .pickup }
         let dropoff = suggestion.route.stops.first { $0.deliveryId == deliveryId && $0.kind == .dropoff }
         return VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -185,7 +283,22 @@ struct DeliveryDetailView: View {
                 Spacer()
                 if recommended { Text("Consigliato").font(.caption).foregroundStyle(.secondary) }
             }
-            if let dropoff {
+            if suggestion.route.estimatesAvailable, let pickup {
+                Text("Ritiro previsto alle \(pickup.arrivalAt.epochDate.italianTime)")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("pickup_eta_\(suggestion.driverId)")
+            }
+            if !suggestion.route.estimatesAvailable {
+                Text("Posizione non disponibile; orari da verificare").font(.subheadline).foregroundStyle(.orange)
+            }
+            ForEach(suggestion.route.localizedWarnings, id: \.self) { warning in
+                Text(warning).font(.footnote).foregroundStyle(.orange)
+            }
+            ForEach(suggestion.route.localizedNotices, id: \.self) { notice in
+                Label(notice, systemImage: "clock.badge.exclamationmark")
+                    .font(.footnote).foregroundStyle(.orange)
+            }
+            if suggestion.route.estimatesAvailable, let dropoff {
                 Text("Consegna prevista alle \(dropoff.arrivalAt.epochDate.italianTime)")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
@@ -209,9 +322,14 @@ struct DeliveryDetailView: View {
     }
 
     private func loadSuggestions() async {
-        guard !suggesting else { return }
+        guard needsAssignment else { return }
+        let request = UUID()
+        suggestionRequestID = request
         suggesting = true
-        suggestions = await store.suggestions(for: deliveryId)
+        suggestions = nil
+        let fetched = await store.suggestions(for: deliveryId)
+        guard suggestionRequestID == request, !Task.isCancelled else { return }
+        suggestions = fetched
         suggesting = false
     }
 }
@@ -219,12 +337,11 @@ struct DeliveryDetailView: View {
 struct NewDeliveryView: View {
     @EnvironmentObject private var store: DeliveryStore
     @Environment(\.dismiss) private var dismiss
-    @State private var pickup: DeliveryPlace?
+    @State private var pickup: Restaurant?
     @State private var dropoff: DeliveryPlace?
     @State private var selectingPickup = false
     @State private var selectingDropoff = false
     @State private var customTiming = false
-    @State private var readyAt = Date()
     @State private var deadlineAt = Date().addingTimeInterval(3600)
     @State private var validationError: String?
     @State private var createdId: String?
@@ -239,13 +356,11 @@ struct NewDeliveryView: View {
                 } else {
                     Form {
                         Section {
-                            placeButton(title: "Ritiro", place: pickup, icon: "storefront", identifier: "choose_pickup") { selectingPickup = true }
+                            placeButton(title: "Ristorante", place: pickup.map { DeliveryPlace(name: $0.name, address: $0.address, coordinate: $0.coordinate) }, icon: "storefront", identifier: "choose_pickup") { selectingPickup = true }
                             placeButton(title: "Destinazione", place: dropoff, icon: "mappin.and.ellipse", identifier: "choose_dropoff") { selectingDropoff = true }
                         }
                         Section {
-                            ExpandableDetails(customTiming ? "Pronta alle \(readyAt.italianTime) · entro le \(deadlineAt.italianTime)" : "Pronta ora · consegna entro un’ora", systemImage: "clock", identifier: "delivery_timing") {
-                                DatePicker("Pronta alle", selection: $readyAt).accessibilityIdentifier("ready_at")
-                                    .onChange(of: readyAt) { _, _ in customTiming = true }
+                            ExpandableDetails(customTiming ? "Consegna entro le \(deadlineAt.italianTime)" : "Consegna entro un’ora", systemImage: "clock", identifier: "delivery_timing") {
                                 DatePicker("Da consegnare entro", selection: $deadlineAt).accessibilityIdentifier("deadline_at")
                                     .onChange(of: deadlineAt) { _, _ in customTiming = true }
                             }
@@ -266,13 +381,13 @@ struct NewDeliveryView: View {
                             } label: {
                                 HStack {
                                     if submitting { ProgressView().tint(.white) }
-                                    Text(creationUncertain ? "Riprova la stessa creazione" : (submitting ? "Creazione…" : "Scegli il corriere"))
+                                    Text(creationUncertain ? "Riprova la stessa creazione" : (submitting ? "Creazione…" : "Crea consegna"))
                                 }.frame(maxWidth: .infinity).padding(.vertical, 8)
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(pickup == nil || dropoff == nil || submitting || store.isMutating)
                             .accessibilityIdentifier("submit_delivery")
-                            Text(creationUncertain ? "La stessa richiesta evita duplicati. Puoi chiudere e verificarla più tardi." : "Crea la consegna e suggerisce un corriere")
+                            Text(creationUncertain ? "La stessa richiesta evita duplicati. Puoi chiudere e verificarla più tardi." : "Potrai indicare dopo quando il cibo è pronto")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding().background(.regularMaterial)
                     }
@@ -286,7 +401,7 @@ struct NewDeliveryView: View {
                 }
             }
             .sheet(isPresented: $selectingPickup) {
-                PlaceSearchView(title: "Ritiro", isUITesting: store.isUITesting) { pickup = $0 }
+                RestaurantPickerView { pickup = $0 }
             }
             .sheet(isPresented: $selectingDropoff) {
                 PlaceSearchView(title: "Destinazione", isUITesting: store.isUITesting) { dropoff = $0 }
@@ -325,9 +440,9 @@ struct NewDeliveryView: View {
         let draft = NewDelivery(
             shopName: pickup.name, pickupAddress: pickup.address, pickup: pickup.coordinate,
             dropoffAddress: dropoff.address, dropoff: dropoff.coordinate,
-            readyAt: Int((customTiming ? readyAt : now).timeIntervalSince1970),
+            readyAt: nil,
             deadlineAt: Int((customTiming ? deadlineAt : now.addingTimeInterval(3600)).timeIntervalSince1970),
-            loadUnits: 1, maxRideSeconds: 1800
+            loadUnits: 1, maxRideSeconds: 1800, restaurantId: pickup.id
         )
         validationError = draft.validationError
         guard validationError == nil else { return }
@@ -336,3 +451,160 @@ struct NewDeliveryView: View {
     }
 }
 
+
+private struct ReadinessEstimateView: View {
+    @EnvironmentObject private var store: DeliveryStore
+    @Environment(\.dismiss) private var dismiss
+    let deliveryId: String
+    let expectedRevision: UInt64
+    @State private var minutes = 10
+    @State private var submitting = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Stepper("Pronta tra \(minutes) minuti", value: $minutes, in: 1...120)
+                    .accessibilityIdentifier("readiness_minutes")
+                Text("È una stima. Potrai confermare «Pronta ora» quando il cibo sarà pronto.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Button("Salva previsione") {
+                    guard !submitting else { return }
+                    submitting = true
+                    Task {
+                        _ = await store.setReadiness(deliveryId: deliveryId, readyInMinutes: minutes, expectedRevision: expectedRevision)
+                        submitting = false
+                        // A lost response leaves an exact-request retry on the delivery screen.
+                        dismiss()
+                    }
+                }.accessibilityIdentifier("save_readiness")
+            }
+            .disabled(submitting || store.isMutating)
+            .navigationTitle("Quando sarà pronta?")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Annulla") { dismiss() }
+                        .disabled(submitting || store.isMutating)
+                        .accessibilityIdentifier("cancel_readiness")
+                }
+            }
+        }.interactiveDismissDisabled(submitting || store.isMutating)
+    }
+}
+
+private struct RestaurantPickerView: View {
+    @EnvironmentObject private var store: DeliveryStore
+    @Environment(\.dismiss) private var dismiss
+    let select: (Restaurant) -> Void
+    @State private var showingAdd = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let pending = store.pendingRestaurant {
+                    Section {
+                        Text("Salvataggio di \(pending.restaurant.name) da verificare.")
+                        Button("Riprova lo stesso salvataggio") {
+                            Task {
+                                if let restaurant = await store.createRestaurant(pending.restaurant) {
+                                    select(restaurant); dismiss()
+                                }
+                            }
+                        }.disabled(store.isMutating).accessibilityIdentifier("retry_restaurant")
+                    }
+                }
+                Section {
+                    ForEach(store.restaurants) { restaurant in
+                        Button {
+                            select(restaurant); dismiss()
+                        } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(restaurant.name).font(.headline)
+                                Text(restaurant.address).font(.subheadline).foregroundStyle(.secondary)
+                            }.foregroundStyle(.primary)
+                        }.accessibilityIdentifier("restaurant_\(restaurant.id)")
+                    }
+                    if store.loadingRestaurants { ProgressView("Caricamento ristoranti…") }
+                    else if let error = store.restaurantLoadError {
+                        Text(error).foregroundStyle(.orange)
+                        Button("Riprova") { Task { await store.loadRestaurants() } }
+                            .accessibilityIdentifier("reload_restaurants")
+                    } else if store.restaurants.isEmpty {
+                        Text("Aggiungi il primo ristorante da cui ritirare le consegne.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    Button("Aggiungi ristorante", systemImage: "plus") { showingAdd = true }
+                        .disabled(store.isMutating || store.pendingRestaurant != nil)
+                        .accessibilityIdentifier("add_restaurant")
+                }
+            }
+            .navigationTitle("Ristoranti")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Annulla") { dismiss() }.disabled(store.isMutating)
+                        .accessibilityIdentifier("cancel_restaurant_picker")
+                }
+            }
+            .task { await store.loadRestaurants() }
+            .refreshable { await store.loadRestaurants() }
+            .sheet(isPresented: $showingAdd) {
+                NewRestaurantView { restaurant in
+                    select(restaurant)
+                    showingAdd = false
+                    dismiss()
+                }
+            }
+        }.interactiveDismissDisabled(store.isMutating)
+    }
+}
+
+private struct NewRestaurantView: View {
+    @EnvironmentObject private var store: DeliveryStore
+    @Environment(\.dismiss) private var dismiss
+    let select: (Restaurant) -> Void
+    @State private var place: DeliveryPlace?
+    @State private var name = ""
+    @State private var searching = false
+    @State private var submitting = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Button { searching = true } label: {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(place?.address ?? "Scegli l’indirizzo del ristorante")
+                        if let place { Text(place.name).font(.caption).foregroundStyle(.secondary) }
+                    }
+                }.disabled(store.pendingRestaurant != nil).accessibilityIdentifier("restaurant_address")
+                TextField("Nome del ristorante", text: $name)
+                    .disabled(store.pendingRestaurant != nil).accessibilityIdentifier("restaurant_name")
+                Button(store.pendingRestaurant == nil ? "Salva ristorante" : "Riprova lo stesso salvataggio") {
+                    guard !submitting, let place else { return }
+                    submitting = true
+                    let draft = store.pendingRestaurant?.restaurant ?? NewRestaurant(
+                        name: name.trimmingCharacters(in: .whitespacesAndNewlines), address: place.address, coordinate: place.coordinate)
+                    Task {
+                        if let restaurant = await store.createRestaurant(draft) { select(restaurant) }
+                        submitting = false
+                    }
+                }
+                .disabled(place == nil || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || submitting || store.isMutating)
+                .accessibilityIdentifier("save_restaurant")
+            }
+            .disabled(submitting || store.isMutating)
+            .navigationTitle("Nuovo ristorante")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Annulla") { dismiss() }.disabled(submitting || store.isMutating)
+                        .accessibilityIdentifier("cancel_restaurant")
+                }
+            }
+            .sheet(isPresented: $searching) {
+                PlaceSearchView(title: "Ristorante", isUITesting: store.isUITesting) { selected in
+                    place = selected; name = selected.name
+                }
+            }
+        }.interactiveDismissDisabled(submitting || store.isMutating)
+    }
+}

@@ -26,6 +26,38 @@ pub struct Driver {
     pub location_updated_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Restaurant {
+    pub id: String,
+    pub name: String,
+    pub address: String,
+    pub coordinate: Coordinate,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewRestaurant {
+    pub name: String,
+    pub address: String,
+    pub coordinate: Coordinate,
+}
+
+impl NewRestaurant {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if [&self.name, &self.address]
+            .iter()
+            .any(|value| value.trim().is_empty() || value.chars().count() > 240)
+        {
+            return Err("Names and addresses must contain 1–240 characters");
+        }
+        if !self.coordinate.valid() {
+            return Err("Coordinates must be finite latitude/longitude values");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryStatus {
@@ -33,6 +65,17 @@ pub enum DeliveryStatus {
     Assigned,
     PickedUp,
     Delivered,
+}
+
+/// Readiness is independent of assignment and delivery progress. Missing state
+/// means the legacy ready_at estimate, never an implicit confirmation of cooking.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessState {
+    Unknown,
+    #[default]
+    Estimated,
+    Ready,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +87,12 @@ pub struct Delivery {
     pub dropoff_address: String,
     pub dropoff: Coordinate,
     pub ready_at: i64,
+    #[serde(default)]
+    pub readiness_state: ReadinessState,
+    #[serde(default)]
+    pub readiness_revision: u64,
+    #[serde(default)]
+    pub readiness_updated_at: Option<i64>,
     pub deadline_at: i64,
     pub load_units: i32,
     pub max_ride_seconds: i64,
@@ -52,6 +101,19 @@ pub struct Delivery {
     pub created_at: i64,
     pub picked_up_at: Option<i64>,
     pub delivered_at: Option<i64>,
+    /// Absolute guard captured once on pickup; later routing must not reset it.
+    #[serde(default)]
+    pub onboard_deadline_at: Option<i64>,
+    #[serde(default)]
+    pub restaurant_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_waiting_reason: Option<String>,
+}
+
+impl Delivery {
+    pub fn readiness_at(&self) -> Option<i64> {
+        (self.readiness_state != ReadinessState::Unknown).then_some(self.ready_at)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,10 +124,14 @@ pub struct NewDelivery {
     pub pickup: Coordinate,
     pub dropoff_address: String,
     pub dropoff: Coordinate,
-    pub ready_at: i64,
+    /// Accepted only for backwards-compatible clients. New clients omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<i64>,
     pub deadline_at: i64,
     pub load_units: i32,
     pub max_ride_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restaurant_id: Option<String>,
 }
 
 impl NewDelivery {
@@ -79,10 +145,14 @@ impl NewDelivery {
             return Err("Coordinates must be finite latitude/longitude values");
         }
         // Bounded timestamps make arithmetic safe and reject accidental milliseconds.
-        if self.ready_at < 0 || self.deadline_at > 32_503_680_000 {
+        if !(0..=32_503_680_000).contains(&self.deadline_at)
+            || self
+                .ready_at
+                .is_some_and(|at| !(0..=32_503_680_000).contains(&at))
+        {
             return Err("Timestamps must be Unix seconds between 1970 and 3000");
         }
-        if self.deadline_at < self.ready_at {
+        if self.ready_at.is_some_and(|at| self.deadline_at < at) {
             return Err("Deadline must be at or after readiness");
         }
         if !(1..=8).contains(&self.load_units) {
@@ -102,7 +172,17 @@ impl NewDelivery {
             pickup: self.pickup,
             dropoff_address: self.dropoff_address.trim().to_owned(),
             dropoff: self.dropoff,
-            ready_at: self.ready_at,
+            // The legacy numeric field stays decodable by old apps. It has NO
+            // readiness meaning while readiness_state=unknown. All new logic
+            // must use readiness_at(), not this compatibility projection.
+            ready_at: self.ready_at.unwrap_or(now),
+            readiness_state: if self.ready_at.is_some() {
+                ReadinessState::Estimated
+            } else {
+                ReadinessState::Unknown
+            },
+            readiness_revision: 0,
+            readiness_updated_at: None,
             deadline_at: self.deadline_at,
             load_units: self.load_units,
             max_ride_seconds: self.max_ride_seconds,
@@ -111,6 +191,9 @@ impl NewDelivery {
             created_at: now,
             picked_up_at: None,
             delivered_at: None,
+            onboard_deadline_at: None,
+            restaurant_id: self.restaurant_id,
+            dispatch_waiting_reason: None,
         }
     }
 }
@@ -146,6 +229,17 @@ pub struct Route {
     pub finish_at: i64,
     pub feasible: bool,
     pub warnings: Vec<String>,
+    /// Advisory targets do not invalidate otherwise executable routes.
+    #[serde(default)]
+    pub notices: Vec<String>,
+    /// Older clients assume numeric ETAs. New clients must hide them when the
+    /// first leg cannot be estimated because no driver position is available.
+    #[serde(default = "estimates_available_default")]
+    pub estimates_available: bool,
+}
+
+fn estimates_available_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

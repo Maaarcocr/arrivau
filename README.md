@@ -64,7 +64,7 @@ open Arrivau.xcodeproj
 
 For the local simulator chooser, add `--demo` to the Debug scheme's launch arguments and run while the demo API is running. Normal Debug and all Release launches show the pilot login instead. A physical phone must use the HTTPS pilot flow, not the loopback demo.
 
-In demo mode, sign in as Corriere 1, start the shift and simulate a Pachino location. Switch to the dispatcher, create a map-selected delivery, choose a driver and assign it. Switch back to Corriere 1, resume sharing and complete pickup then drop-off in route order. Finish work before ending the shift. The server excludes off-shift drivers and positions older than five minutes from suggestions.
+In demo mode, sign in as Corriere 1, start the shift and simulate a Pachino location. Switch to the dispatcher, save a restaurant from a Maps-selected address, create an order using that restaurant and a destination, then open it and mark it ready. The server assigns a driver automatically. Switch back to Corriere 1, resume sharing and complete pickup then drop-off in route order. Finish work before ending the shift. The server excludes off-shift drivers; stale or unavailable positions are explicitly flagged.
 
 ## Verify the code
 
@@ -95,9 +95,9 @@ The CI also builds the Release configuration for a generic physical iOS device w
 
 - Individual operator-provisioned accounts, one team per account and one server process. Server-enforced team isolation; no self-service signup/reset, public team administration, audit-log service, billing or customer marketplace
 - SQLite survives process restart on a persistent local disk; the operator owns backups, restore tests, retention, security and monitoring. Do not scale replicas or use network storage
-- Dispatcher assigns manually. Only the assigned driver can confirm pickup/drop-off, in committed stop order; driver isolation is enforced server-side
+- Dispatchers save restaurants, create unassigned orders, and later mark them ready now or in a number of minutes. The server assigns automatically when readiness arrives, including least-bad timing fallbacks with warnings. Only the assigned driver confirms pickup/drop-off
 - Route suggestions use Haversine distance × 1.3 at 25 km/h. They are not road routing, traffic-aware or globally optimal; safety, food handling and driving decisions remain with people
-- Readiness, pickup-before-drop-off, capacity, deadline and maximum ride time constrain suggestions. Time/location changes can invalidate plans; keep human supervision and review warnings
+- Pickup aims for ten minutes after readiness, with a five-minute cumulative extra-onboard-delay policy. Impossible timing is flagged rather than leaving ready work unassigned; physical capacity, precedence and the 32-stop bound remain mandatory. See [readiness and dispatch](docs/readiness-and-dispatch.md)
 - The foreground app polls about every five seconds. There is no APNs or guaranteed suspended-app notification delivery, and no general offline queue
 - Delivery creation retains its idempotency key and request securely for uncertain-response recovery. Check current state before manually replacing a job. Connectivity errors are visible rather than silently treated as success
 - GPS starts only after explicit sharing consent on an active shift. Separate background opt-in supports locking/Maps, subject to iOS behavior. Ending the shift or signing out stops local reporting. The most recent point remains on the server; no location history feed is built

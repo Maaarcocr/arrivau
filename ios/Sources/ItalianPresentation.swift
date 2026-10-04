@@ -45,6 +45,21 @@ enum ItalianPresentation {
         return unknownError
     }
 
+    static func readiness(_ delivery: Delivery) -> String {
+        switch delivery.readinessState {
+        case .unknown: return "Da definire"
+        case .estimated: return "Prevista alle \(delivery.readyAt.epochDate.italianTime) (stima)"
+        case .ready: return "Pronta dalle \(delivery.readyAt.epochDate.italianTime) (confermata)"
+        }
+    }
+
+    static func routeNotice(_ notice: String) -> String {
+        if notice.hasPrefix("Pickup target missed for ") {
+            return "Ritiro previsto oltre l’obiettivo di 10 minuti dalla disponibilità."
+        }
+        return "Controlla con la centrale l’orario previsto per il ritiro."
+    }
+
     static func serverError(_ message: String?, statusCode: Int) -> String {
         if statusCode == 401 { return "Sessione scaduta o revocata. Accedi di nuovo." }
         if statusCode == 429 { return "Troppi tentativi di accesso. Attendi qualche minuto e riprova." }
@@ -90,6 +105,10 @@ enum ItalianPresentation {
         "Pickup is not the next route stop": "Il ritiro non è la prossima tappa del percorso.",
         "Delivery is not ready for pickup": "La consegna non è ancora pronta per il ritiro.",
         "Pickup would exceed driver capacity": "Il ritiro supererebbe la capacità del corriere.",
+        "Ready-in minutes must be between 0 and 120": "Indica un numero di minuti compreso tra 0 e 120.",
+        "Readiness cannot change after pickup": "La disponibilità non può cambiare dopo il ritiro.",
+        "Readiness changed; refresh the delivery and try again": "La disponibilità è cambiata. Aggiorna la consegna e riprova.",
+        "Set readiness before choosing a driver": "Indica quando sarà pronta prima di scegliere un corriere.",
         "Suggestions are only available before pickup": "I suggerimenti sono disponibili solo prima del ritiro."
     ]
 
@@ -103,6 +122,8 @@ enum ItalianPresentation {
         default: break
         }
         let prefixes = [
+            ("Readiness is unknown for ", "Disponibilità da definire per la consegna "),
+            ("Onboard delivery delay exceeded for ", "Tempo a bordo superato per la consegna "),
             ("Duplicate stop for ", "Tappa duplicata per la consegna "),
             ("Invalid route reference ", "Riferimento non valido nel percorso: "),
             ("Duplicate pickup for ", "Ritiro duplicato per la consegna "),

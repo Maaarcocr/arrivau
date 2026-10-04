@@ -12,6 +12,11 @@ final class DeliveryStore: ObservableObject {
     }
     @Published private(set) var principal: Principal?
     @Published private var availableDeliveries: [Delivery] = []
+    @Published private(set) var restaurants: [Restaurant] = []
+    @Published private(set) var pendingRestaurant: PendingRestaurant?
+    @Published private(set) var loadingRestaurants = false
+    @Published private(set) var restaurantLoadError: String?
+    private var restaurantReadId = UUID()
     @Published private(set) var drivers: [Driver] = []
     @Published private(set) var currentDriver: Driver?
     @Published private(set) var route: DriverRoute?
@@ -54,12 +59,18 @@ final class DeliveryStore: ObservableObject {
     private var sessionId = UUID()
     private var refreshId = UUID()
     private var viewId = UUID()
-    private enum ActionKind: Equatable { case assignment(String), status(DeliveryStatus) }
+    private enum ActionKind: Equatable { case assignment(String), status(DeliveryStatus), readiness(ReadinessUpdate) }
     private struct PendingAction {
         let kind: ActionKind
         let key: String
     }
     private var pendingActions: [String: PendingAction] = [:]
+    private var readinessNeedsRefresh: Set<String> = []
+
+    func pendingReadiness(for deliveryId: String) -> ReadinessUpdate? {
+        guard case .readiness(let update) = pendingActions[deliveryId]?.kind else { return nil }
+        return update
+    }
 
     /// Immutable confirmation context: an old sheet cannot clear another session/team's recovery.
     struct LegacyCreationReview {
@@ -199,6 +210,7 @@ final class DeliveryStore: ObservableObject {
     private func install(_ api: APIClient, user: Principal, expiresAt: Int?) throws {
         let scope = CreationScope.current(endpoint: api.baseURL.absoluteString, user: user)
         let pending = user.supports(.dispatcher) ? try storage.loadCreation(scope: scope) : nil
+        let restaurantRecovery = user.supports(.dispatcher) ? try storage.loadRestaurant(scope: scope) : nil
         let legacyScope = CreationScope.legacy(endpoint: api.baseURL.absoluteString, accountId: user.id)
         let legacy = user.supports(.dispatcher) && user.teamId != nil ? try storage.loadCreation(scope: legacyScope) : nil
         client = api
@@ -217,8 +229,9 @@ final class DeliveryStore: ObservableObject {
         location.stop()
         locationSharing = false
         backgroundLocationSharing = false
+        restaurants = []; pendingRestaurant = restaurantRecovery; restaurantReadId = UUID(); loadingRestaurants = false; restaurantLoadError = nil
         availableDeliveries = []; drivers = []; currentDriver = nil; route = nil
-        pendingActions = [:]; lastSyncedAt = nil; syncErrorMessage = nil; locationErrorMessage = nil
+        pendingActions = [:]; readinessNeedsRefresh = []; lastSyncedAt = nil; syncErrorMessage = nil; locationErrorMessage = nil
         scheduleExpiry()
     }
 
@@ -229,6 +242,7 @@ final class DeliveryStore: ObservableObject {
         guard validateSession(), !isMutating, let principal, principal.supports(selectedRole),
               role != selectedRole else { return false }
         viewId = UUID()
+        restaurantReadId = UUID(); loadingRestaurants = false
         refreshId = UUID()
         isRefreshing = false
         role = selectedRole
@@ -277,9 +291,10 @@ final class DeliveryStore: ObservableObject {
         locationSharing = false
         backgroundLocationSharing = false
         principal = nil; role = nil; client = nil; currentDriver = nil
+        restaurants = []; pendingRestaurant = nil; restaurantReadId = UUID(); loadingRestaurants = false; restaurantLoadError = nil
         availableDeliveries = []; drivers = []; route = nil
         errorMessage = message; syncErrorMessage = nil; locationErrorMessage = nil
-        pendingCreation = nil; creationScope = nil; pendingActions = [:]; legacyPendingCreation = nil
+        pendingCreation = nil; creationScope = nil; pendingActions = [:]; readinessNeedsRefresh = []; legacyPendingCreation = nil
         createOutcomeUncertain = false
         sessionExpiresAt = nil
         lastSyncedAt = nil; isRefreshing = false; isMutating = false; isRestoringSession = false
@@ -348,7 +363,7 @@ final class DeliveryStore: ObservableObject {
                 let fetchedJobs = try await jobs
                 guard session == sessionId, refreshId == requestId, !Task.isCancelled else { return }
                 drivers = people
-                availableDeliveries = fetchedJobs
+                applyFetchedDeliveries(fetchedJobs)
                 if principal?.supports(.driver) == true,
                    let ownDriver = people.first(where: { $0.id == principal?.id }) {
                     currentDriver = ownDriver
@@ -364,7 +379,7 @@ final class DeliveryStore: ObservableObject {
                 }
                 currentDriver = driver
                 if !driver.active { setLocationSharing(false) }
-                availableDeliveries = fetchedJobs
+                applyFetchedDeliveries(fetchedJobs)
                 route = fetchedRoute
                 synchronizeLocation()
             }
@@ -377,6 +392,59 @@ final class DeliveryStore: ObservableObject {
             if handleUnauthorized(error) { return }
             syncErrorMessage = ItalianPresentation.errorMessage(error)
         }
+    }
+
+    func loadRestaurants() async {
+        guard validateSession(), role == .dispatcher, principal?.supports(.dispatcher) == true,
+              let api = client else { return }
+        let session = sessionId
+        let view = viewId
+        let request = UUID()
+        restaurantReadId = request
+        loadingRestaurants = true
+        defer { if restaurantReadId == request { loadingRestaurants = false } }
+        do {
+            let fetched = try await api.restaurants()
+            guard session == sessionId, view == viewId, restaurantReadId == request, !Task.isCancelled else { return }
+            restaurants = fetched.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            restaurantLoadError = nil
+        } catch {
+            guard session == sessionId, view == viewId, restaurantReadId == request, !Task.isCancelled else { return }
+            if handleUnauthorized(error) { return }
+            restaurantLoadError = "Impossibile caricare i ristoranti. Riprova."
+        }
+    }
+
+    func createRestaurant(_ restaurant: NewRestaurant) async -> Restaurant? {
+        guard validateSession(), !isMutating, role == .dispatcher, principal?.supports(.dispatcher) == true,
+              let scope = creationScope else { return nil }
+        if let validation = restaurant.validationError { errorMessage = validation; return nil }
+        if let pendingRestaurant, pendingRestaurant.restaurant != restaurant {
+            errorMessage = "Verifica prima il salvataggio del ristorante in sospeso."
+            return nil
+        }
+        let pending = pendingRestaurant ?? PendingRestaurant(idempotencyKey: UUID().uuidString, restaurant: restaurant)
+        // Persist the exact snapshot and key before transmission, scoped to team/account/endpoint.
+        do { try storage.saveRestaurant(pending, scope: scope) }
+        catch { errorMessage = ItalianPresentation.errorMessage(error); return nil }
+        pendingRestaurant = pending
+        return await mutate({ try await $0.createRestaurant(pending.restaurant, idempotencyKey: pending.idempotencyKey) }, onFailure: { error in
+            if error is URLError || error is CancellationError || (error as? APIError)?.mutationOutcomeUncertain == true {
+                self.errorMessage = "Salvataggio non confermato. Riprova la stessa richiesta per evitare duplicati."
+            } else { self.clearPendingRestaurant(scope: scope) }
+        }) { result in
+            self.restaurantReadId = UUID()
+            self.loadingRestaurants = false
+            self.clearPendingRestaurant(scope: scope)
+            self.restaurants.removeAll { $0.id == result.id }
+            self.restaurants.append(result)
+            self.restaurants.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        }
+    }
+
+    private func clearPendingRestaurant(scope: String) {
+        do { try storage.clearRestaurant(scope: scope); pendingRestaurant = nil }
+        catch { errorMessage = "Ristorante verificato, ma il recupero locale non è stato aggiornato. Riprova lo stesso salvataggio." }
     }
 
     func create(_ delivery: NewDelivery) async -> Delivery? {
@@ -450,9 +518,53 @@ final class DeliveryStore: ObservableObject {
         }
     }
 
+    /// Relative estimates are sent with the original revision/body/key until their outcome is known.
+    /// A sheet captures its displayed revision so a stale tap cannot move a newer estimate.
+    func setReadiness(deliveryId: String, readyInMinutes: Int, expectedRevision: UInt64) async -> Bool {
+        guard validateSession(), !isMutating, role == .dispatcher, principal?.supports(.dispatcher) == true,
+              (0...120).contains(readyInMinutes),
+              let current = deliveries.first(where: { $0.id == deliveryId }), current.canChangeReadiness else { return false }
+        guard !readinessNeedsRefresh.contains(deliveryId) else {
+            errorMessage = "Aggiorna la consegna prima di modificare la disponibilità."
+            return false
+        }
+        let update: ReadinessUpdate
+        if let pending = pendingReadiness(for: deliveryId) {
+            guard pending.readyInMinutes == readyInMinutes else {
+                errorMessage = "La disponibilità precedente non è ancora verificata. Riprova la stessa modifica o aggiorna i dati."
+                return false
+            }
+            update = pending
+        } else {
+            // A repeated ready-now tap is a no-op, even if its view predates the confirmation.
+            if readyInMinutes == 0, current.readinessState == .ready { return true }
+            guard current.readinessRevision == expectedRevision else {
+                errorMessage = "La disponibilità è cambiata. Controlla l’orario aggiornato e riprova."
+                return false
+            }
+            update = ReadinessUpdate(readyInMinutes: readyInMinutes, expectedRevision: expectedRevision)
+        }
+        guard let key = actionKey(for: deliveryId, kind: .readiness(update)) else { return false }
+        let result: Delivery? = await mutate({ try await $0.readiness(deliveryId: deliveryId, update: update, idempotencyKey: key) }, onFailure: { error in
+            self.releaseActionIfDefinitive(error, deliveryId: deliveryId)
+            if (error as? APIError)?.statusCode == 409 {
+                self.readinessNeedsRefresh.insert(deliveryId)
+                self.errorMessage = "La disponibilità è cambiata. Aggiorna la consegna, controlla l’orario e riprova."
+            } else if self.pendingReadiness(for: deliveryId) != nil {
+                self.errorMessage = "Disponibilità non confermata. Riprova la stessa modifica: l’orario originale non verrà spostato."
+            }
+        }) { result in
+            self.pendingActions[deliveryId] = nil
+            self.readinessNeedsRefresh.remove(deliveryId)
+            self.applyConfirmedDelivery(result)
+        }
+        return result != nil
+    }
+
     func assign(deliveryId: String, driverId: String) async -> Bool {
         guard !isMutating, role == .dispatcher, principal?.supports(.dispatcher) == true,
-              let current = deliveries.first(where: { $0.id == deliveryId }),
+              let current = deliveries.first(where: { $0.id == deliveryId }), current.hasKnownReadiness,
+              !readinessNeedsRefresh.contains(deliveryId),
               current.status == .pending || current.status == .assigned else { return false }
         if current.status == .assigned && current.driverId == driverId { return true }
         guard let key = actionKey(for: deliveryId, kind: .assignment(driverId)) else { return false }
@@ -486,7 +598,7 @@ final class DeliveryStore: ObservableObject {
                (stop.kind == .pickup && result.status == .pickedUp) || (stop.kind == .dropoff && result.status == .delivered) {
                 self.route = DriverRoute(driverId: route.driverId, stops: Array(route.stops.dropFirst()),
                                          travelSeconds: route.travelSeconds, finishAt: route.finishAt,
-                                         feasible: route.feasible, warnings: route.warnings)
+                                         feasible: route.feasible, warnings: route.warnings, notices: route.notices, estimatesAvailable: route.estimatesAvailable)
             }
         }
     }
@@ -517,6 +629,10 @@ final class DeliveryStore: ObservableObject {
                 if delivery.driverId == target, delivery.status != .pending { pendingActions[delivery.id] = nil }
             case .status(let target):
                 if delivery.status == target || delivery.status == .delivered { pendingActions[delivery.id] = nil }
+            case .readiness(let update):
+                if delivery.readinessRevision > update.expectedRevision || !delivery.canChangeReadiness {
+                    pendingActions[delivery.id] = nil
+                }
             }
         }
     }
@@ -545,17 +661,51 @@ final class DeliveryStore: ObservableObject {
         }
     }
     private func applyConfirmedDelivery(_ delivery: Delivery) {
-        if let index = availableDeliveries.firstIndex(where: { $0.id == delivery.id }) { availableDeliveries[index] = delivery }
-        else { availableDeliveries.append(delivery) }
+        if let index = availableDeliveries.firstIndex(where: { $0.id == delivery.id }) {
+            guard delivery.readinessRevision >= availableDeliveries[index].readinessRevision,
+                  delivery.status.progressRank >= availableDeliveries[index].status.progressRank else { return }
+            availableDeliveries[index] = delivery
+        } else { availableDeliveries.append(delivery) }
     }
+    private func applyFetchedDeliveries(_ fetched: [Delivery]) {
+        let previous = Dictionary(uniqueKeysWithValues: availableDeliveries.map { ($0.id, $0) })
+        availableDeliveries = fetched.map { delivery in
+            if let current = previous[delivery.id],
+               current.readinessRevision > delivery.readinessRevision || current.status.progressRank > delivery.status.progressRank { return current }
+            readinessNeedsRefresh.remove(delivery.id)
+            return delivery
+        }
+    }
+    func assignedRoute(for deliveryId: String) async -> DriverRoute? {
+        guard validateSession(), role == .dispatcher, principal?.supports(.dispatcher) == true,
+              let current = deliveries.first(where: { $0.id == deliveryId }), current.status != .delivered,
+              let driverId = current.driverId, let api = client else { return nil }
+        let session = sessionId
+        let view = viewId
+        do {
+            let planned = try await api.route(driverId: driverId)
+            guard session == sessionId, view == viewId, !Task.isCancelled, planned.driverId == driverId,
+                  deliveries.first(where: { $0.id == deliveryId }) == current else { return nil }
+            return planned
+        } catch {
+            guard session == sessionId, view == viewId, !Task.isCancelled else { return nil }
+            if handleUnauthorized(error) { return nil }
+            return nil
+        }
+    }
+
     func suggestions(for deliveryId: String) async -> [Suggestion]? {
         guard validateSession(), role == .dispatcher, principal?.supports(.dispatcher) == true,
+              let current = deliveries.first(where: { $0.id == deliveryId }), current.hasKnownReadiness,
+              current.canChangeReadiness, !readinessNeedsRefresh.contains(deliveryId),
               let api = client else { return nil }
         let session = sessionId
         let view = viewId
         do {
             let suggestions = try await api.suggestions(deliveryId: deliveryId)
-            return session == sessionId && view == viewId && !Task.isCancelled ? suggestions : nil
+            guard session == sessionId, view == viewId, !Task.isCancelled,
+                  deliveries.first(where: { $0.id == deliveryId }) == current else { return nil }
+            return suggestions
         } catch {
             let failure = error as NSError
             guard !(error is CancellationError), !Task.isCancelled,

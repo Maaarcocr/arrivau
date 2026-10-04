@@ -19,7 +19,10 @@ struct DeliveryRow: View {
             HStack { Text(delivery.shopName).font(.headline); Spacer(); StatusPill(status: delivery.status) }
             Label(delivery.dropoffAddress, systemImage: "mappin.and.ellipse")
                 .font(.subheadline).foregroundStyle(.secondary)
-            Text(delivery.status == .pending ? "Scegli un corriere" : "Entro le \(delivery.deadlineAt.epochDate.italianTime)")
+            if delivery.canChangeReadiness {
+                Text(delivery.readinessTitle).font(.caption).foregroundStyle(delivery.hasKnownReadiness ? .secondary : .orange)
+            }
+            Text("Entro le \(delivery.deadlineAt.epochDate.italianTime)")
                 .font(.caption).foregroundStyle(delivery.status == .pending ? .orange : .secondary)
         }
         .padding(.vertical, 4)
@@ -40,7 +43,15 @@ struct DeliveryFacts: View {
     var body: some View {
         LabeledContent("Ritiro", value: delivery.pickupAddress)
         LabeledContent("Destinazione", value: delivery.dropoffAddress)
-        LabeledContent("Pronta dal", value: delivery.readyAt.epochDate.italianDateTime)
+        LabeledContent("Disponibilità") {
+            Text(delivery.readinessTitle).accessibilityIdentifier("delivery_readiness")
+        }
+        if delivery.canChangeReadiness, let target = delivery.pickupTargetAt {
+            LabeledContent("Obiettivo ritiro", value: "Entro le \(target.epochDate.italianTime)")
+        }
+        if delivery.status == .pickedUp, let deadline = delivery.onboardDeadlineAt {
+            LabeledContent("Tempo a bordo fino alle", value: deadline.epochDate.italianTime)
+        }
         LabeledContent("Da consegnare entro", value: delivery.deadlineAt.epochDate.italianDateTime)
     }
 }

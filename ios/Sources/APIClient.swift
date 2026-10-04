@@ -103,6 +103,10 @@ struct APIClient {
     func revokeSession() async throws { _ = try await response("v1/session", method: "DELETE", body: nil) }
     func me() async throws -> Principal { try await get("v1/me") }
     func drivers() async throws -> [Driver] { try await get("v1/drivers") }
+    func restaurants() async throws -> [Restaurant] { try await get("v1/restaurants") }
+    func createRestaurant(_ restaurant: NewRestaurant, idempotencyKey: String) async throws -> Restaurant {
+        try await post("v1/restaurants", body: restaurant, idempotencyKey: idempotencyKey)
+    }
     func deliveries() async throws -> [Delivery] { try await get("v1/deliveries") }
     func shift() async throws -> Driver { try await get("v1/shift") }
     func route() async throws -> DriverRoute { try await get("v1/route") }
@@ -110,6 +114,9 @@ struct APIClient {
     func suggestions(deliveryId: String) async throws -> [Suggestion] { try await get("v1/deliveries/\(deliveryId)/suggestions") }
     func create(_ delivery: NewDelivery, idempotencyKey: String = UUID().uuidString) async throws -> Delivery {
         try await post("v1/deliveries", body: delivery, idempotencyKey: idempotencyKey)
+    }
+    func readiness(deliveryId: String, update: ReadinessUpdate, idempotencyKey: String) async throws -> Delivery {
+        try await post("v1/deliveries/\(deliveryId)/readiness", body: update, idempotencyKey: idempotencyKey)
     }
     func shift(active: Bool, capacity: Int) async throws -> Driver { try await post("v1/shift", body: ShiftBody(active: active, capacity: capacity)) }
     func location(_ coordinate: Coordinate) async throws -> Driver { try await post("v1/location", body: coordinate) }

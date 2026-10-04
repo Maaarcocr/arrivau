@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Black-box localhost smoke test against a running demo API; standard library only.
 
-Use a disposable database. This intentionally creates and completes a delivery.
+Use a disposable database. This intentionally creates a restaurant and completes synthetic deliveries.
 """
 import argparse
 import json
@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 def main():
@@ -20,10 +21,12 @@ def main():
     if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
         parser.error("This demo uses public fixture tokens and must target loopback")
 
-    def request(method, path, token=None, body=None, expected=200):
+    def request(method, path, token=None, body=None, expected=200, key=None):
         headers = {"Content-Type": "application/json"}
         if token:
             headers["Authorization"] = "Bearer " + token
+        if key:
+            headers["Idempotency-Key"] = key
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
         try:
@@ -76,11 +79,36 @@ def main():
     done = request("POST", f"/v1/deliveries/{identifier}/status", driver, {"status": "delivered"})
     assert done["status"] == "delivered" and done["delivered_at"] is not None
     assert request("GET", "/v1/route", driver)["stops"] == []
+
+    restaurant_body = {"name": "Saved Smoke Pizzeria", "address": "Via Roma 1 (fixture)", "coordinate": point}
+    restaurant_key = str(uuid.uuid4())
+    restaurant = request("POST", "/v1/restaurants", dispatcher, restaurant_body, expected=201, key=restaurant_key)
+    assert request("POST", "/v1/restaurants", dispatcher, restaurant_body, expected=201, key=restaurant_key) == restaurant
+    assert restaurant["id"] in [r["id"] for r in request("GET", "/v1/restaurants", dispatcher)]
+    fresh = request("POST", "/v1/deliveries", dispatcher, {
+        "restaurant_id": restaurant["id"], "shop_name": "Ignored substituted name",
+        "pickup_address": "Ignored address", "pickup": {"lat": 0, "lng": 0},
+        "dropoff_address": "Smoke destination", "dropoff": point,
+        "deadline_at": now + 3600, "load_units": 1, "max_ride_seconds": 1800,
+    }, expected=201, key=str(uuid.uuid4()))
+    assert fresh["pickup"] == point and fresh["shop_name"] == restaurant["name"]
+    assert fresh["readiness_state"] == "unknown" and fresh["driver_id"] is None
+    ready_path = f"/v1/deliveries/{fresh['id']}/readiness"
+    estimated = request("POST", ready_path, dispatcher, {"ready_in_minutes": 5, "expected_revision": 0}, key=str(uuid.uuid4()))
+    assert estimated["readiness_state"] == "estimated" and estimated["status"] == "pending"
+    readiness_key = str(uuid.uuid4())
+    ready_body = {"ready_in_minutes": 0, "expected_revision": 1}
+    automatic = request("POST", ready_path, dispatcher, ready_body, key=readiness_key)
+    assert automatic["status"] == "assigned" and automatic["driver_id"] == "driver-1"
+    assert request("POST", ready_path, dispatcher, ready_body, key=readiness_key) == automatic
+    request("POST", f"/v1/deliveries/{fresh['id']}/status", driver, {"status": "picked_up"})
+    request("POST", f"/v1/deliveries/{fresh['id']}/status", driver, {"status": "delivered"})
+    assert request("GET", "/v1/route", driver)["stops"] == []
     request("POST", "/v1/shift", driver, {"active": False, "capacity": 2})
     print(f"PASS: real HTTP dispatcher → assignment → driver pickup → delivery ({identifier})")
     print("PASS: authorization, driver isolation, transition order, active-work shift guard")
+    print("PASS: saved restaurant snapshot/retry, unknown readiness, estimate → ready, automatic assignment")
 
 
 if __name__ == "__main__":
     main()
-

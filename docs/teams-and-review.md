@@ -124,16 +124,18 @@ PRs, logs or these docs.
 
 1. Sign in and confirm the **App Review** team label. Select **Corriere**.
 2. Start the shift and explicitly allow foreground location sharing. Denying
-   permission remains supported, but a fresh real location is required for route
-   suggestions/assignment. Do not use simulated GPS or public demo tokens in the
+   permission remains supported; automatic assignment can queue work without GPS,
+   but the app must hide unavailable ETAs and show the position warning. Fresh
+   real GPS is needed for meaningful timing comparisons. Do not use simulated GPS or public demo tokens in the
    Release app.
-3. Select **Centrale**. Create a clearly labelled synthetic delivery using nearby
-   real map-selected pickup/drop-off points, feasible times and no real customer's
-   personal information. Choose locations near the reviewer's current position,
+3. Select **Centrale**. Save a clearly labelled synthetic restaurant using a nearby
+   real map-selected address, then create an order with a nearby destination and no
+   real customer's personal information. Choose locations near the reviewer's current position,
    rather than assuming the reviewer is physically in Pachino.
-4. Select the review account's own driver profile and assign the delivery. If no
-   suggestion appears, check shift status, location age (at most five minutes) and
-   route feasibility instead of weakening production checks.
+4. Open the order and mark it Pronta ora. Verify automatic assignment to the
+   review account's on-shift driver profile. If it remains pending, inspect the
+   visible no-active-driver/capacity/route-limit reason. Also test future readiness
+   with the app closed; assignment is performed by the server timer.
 5. Select **Corriere**, confirm the next stop, record pickup after readiness, then
    delivery in route order. View switches do not automatically start GPS or end
    the shift. Previously authorized sharing continues while the shift is active;

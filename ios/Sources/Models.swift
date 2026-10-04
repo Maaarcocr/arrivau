@@ -83,9 +83,21 @@ struct Driver: Codable, Identifiable, Equatable {
 
 enum DeliveryStatus: String, Codable, CaseIterable {
     case pending, assigned, pickedUp = "picked_up", delivered
+    var progressRank: Int {
+        switch self { case .pending: 0; case .assigned: 1; case .pickedUp: 2; case .delivered: 3 }
+    }
     var title: String {
         switch self { case .pending: "Da assegnare"; case .assigned: "Assegnata"; case .pickedUp: "In consegna"; case .delivered: "Consegnata" }
     }
+}
+
+enum ReadinessState: String, Codable {
+    case unknown, estimated, ready
+}
+
+struct ReadinessUpdate: Codable, Equatable {
+    let readyInMinutes: Int
+    let expectedRevision: UInt64
 }
 
 struct Delivery: Codable, Identifiable, Equatable {
@@ -104,6 +116,70 @@ struct Delivery: Codable, Identifiable, Equatable {
     let createdAt: Int
     let pickedUpAt: Int?
     let deliveredAt: Int?
+    let readinessState: ReadinessState
+    let readinessRevision: UInt64
+    let readinessUpdatedAt: Int?
+    let onboardDeadlineAt: Int?
+    let dispatchWaitingReason: String?
+
+    init(id: String, shopName: String, pickupAddress: String, pickup: Coordinate,
+         dropoffAddress: String, dropoff: Coordinate, readyAt: Int, deadlineAt: Int,
+         loadUnits: Int, maxRideSeconds: Int, status: DeliveryStatus, driverId: String?,
+         createdAt: Int, pickedUpAt: Int?, deliveredAt: Int?,
+         readinessState: ReadinessState = .estimated, readinessRevision: UInt64 = 0,
+         readinessUpdatedAt: Int? = nil, onboardDeadlineAt: Int? = nil, dispatchWaitingReason: String? = nil) {
+        self.id = id; self.shopName = shopName; self.pickupAddress = pickupAddress; self.pickup = pickup
+        self.dropoffAddress = dropoffAddress; self.dropoff = dropoff; self.readyAt = readyAt
+        self.deadlineAt = deadlineAt; self.loadUnits = loadUnits; self.maxRideSeconds = maxRideSeconds
+        self.status = status; self.driverId = driverId; self.createdAt = createdAt
+        self.pickedUpAt = pickedUpAt; self.deliveredAt = deliveredAt
+        self.readinessState = readinessState; self.readinessRevision = readinessRevision
+        self.readinessUpdatedAt = readinessUpdatedAt; self.onboardDeadlineAt = onboardDeadlineAt
+        self.dispatchWaitingReason = dispatchWaitingReason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, shopName, pickupAddress, pickup, dropoffAddress, dropoff, readyAt, deadlineAt
+        case loadUnits, maxRideSeconds, status, driverId, createdAt, pickedUpAt, deliveredAt
+        case readinessState, readinessRevision, readinessUpdatedAt, onboardDeadlineAt, dispatchWaitingReason
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        shopName = try values.decode(String.self, forKey: .shopName)
+        pickupAddress = try values.decode(String.self, forKey: .pickupAddress)
+        pickup = try values.decode(Coordinate.self, forKey: .pickup)
+        dropoffAddress = try values.decode(String.self, forKey: .dropoffAddress)
+        dropoff = try values.decode(Coordinate.self, forKey: .dropoff)
+        readyAt = try values.decode(Int.self, forKey: .readyAt)
+        deadlineAt = try values.decode(Int.self, forKey: .deadlineAt)
+        loadUnits = try values.decode(Int.self, forKey: .loadUnits)
+        maxRideSeconds = try values.decode(Int.self, forKey: .maxRideSeconds)
+        status = try values.decode(DeliveryStatus.self, forKey: .status)
+        driverId = try values.decodeIfPresent(String.self, forKey: .driverId)
+        createdAt = try values.decode(Int.self, forKey: .createdAt)
+        pickedUpAt = try values.decodeIfPresent(Int.self, forKey: .pickedUpAt)
+        deliveredAt = try values.decodeIfPresent(Int.self, forKey: .deliveredAt)
+        // Only a missing field is legacy data. An explicit unknown never inherits ready_at.
+        readinessState = values.contains(.readinessState) ? try values.decode(ReadinessState.self, forKey: .readinessState) : .estimated
+        readinessRevision = try values.decodeIfPresent(UInt64.self, forKey: .readinessRevision) ?? 0
+        readinessUpdatedAt = try values.decodeIfPresent(Int.self, forKey: .readinessUpdatedAt)
+        onboardDeadlineAt = try values.decodeIfPresent(Int.self, forKey: .onboardDeadlineAt)
+        dispatchWaitingReason = try values.decodeIfPresent(String.self, forKey: .dispatchWaitingReason)
+    }
+
+    var hasKnownReadiness: Bool { readinessState != .unknown }
+    var canChangeReadiness: Bool { status == .pending || status == .assigned }
+    var pickupTargetAt: Int? { hasKnownReadiness ? readyAt + 600 : nil }
+    var localizedDispatchWaitingReason: String? {
+        switch dispatchWaitingReason {
+        case "no_active_driver": return "Nessun corriere in turno. L’assegnazione riproverà automaticamente."
+        case "capacity_or_route_limit": return "I corrieri in turno hanno il carico o il percorso al completo. L’assegnazione riproverà appena possibile."
+        case .some: return "Assegnazione in attesa. Controlla i corrieri in turno."
+        case .none: return nil
+        }
+    }
+    var readinessTitle: String { ItalianPresentation.readiness(self) }
 }
 
 enum StopKind: String, Codable {
@@ -127,7 +203,33 @@ struct DriverRoute: Codable, Equatable {
     let finishAt: Int
     let feasible: Bool
     let warnings: [String]
+    let notices: [String]
+    let estimatesAvailable: Bool
     var localizedWarnings: [String] { warnings.map(ItalianPresentation.routeWarning) }
+    var localizedNotices: [String] {
+        notices.map(ItalianPresentation.routeNotice).reduce(into: []) { result, text in
+            if !result.contains(text) { result.append(text) }
+        }
+    }
+
+    init(driverId: String, stops: [RouteStop], travelSeconds: Int, finishAt: Int,
+         feasible: Bool, warnings: [String], notices: [String] = [], estimatesAvailable: Bool = true) {
+        self.driverId = driverId; self.stops = stops; self.travelSeconds = travelSeconds
+        self.finishAt = finishAt; self.feasible = feasible; self.warnings = warnings; self.notices = notices
+        self.estimatesAvailable = estimatesAvailable
+    }
+    private enum CodingKeys: String, CodingKey { case driverId, stops, travelSeconds, finishAt, feasible, warnings, notices, estimatesAvailable }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        driverId = try values.decode(String.self, forKey: .driverId)
+        stops = try values.decode([RouteStop].self, forKey: .stops)
+        travelSeconds = try values.decode(Int.self, forKey: .travelSeconds)
+        finishAt = try values.decode(Int.self, forKey: .finishAt)
+        feasible = try values.decode(Bool.self, forKey: .feasible)
+        warnings = try values.decode([String].self, forKey: .warnings)
+        notices = try values.decodeIfPresent([String].self, forKey: .notices) ?? []
+        estimatesAvailable = try values.decodeIfPresent(Bool.self, forKey: .estimatesAvailable) ?? true
+    }
 }
 struct Suggestion: Codable, Identifiable, Equatable {
     let driverId: String
@@ -135,23 +237,59 @@ struct Suggestion: Codable, Identifiable, Equatable {
     let route: DriverRoute
     var id: String { driverId }
 }
+struct Restaurant: Codable, Identifiable, Equatable {
+    let id: String
+    let name: String
+    let address: String
+    let coordinate: Coordinate
+    let createdAt: Int
+}
+struct NewRestaurant: Codable, Equatable {
+    let name: String
+    let address: String
+    let coordinate: Coordinate
+    var validationError: String? {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Scegli un indirizzo e inserisci il nome del ristorante."
+        }
+        guard coordinate.isValid else { return "Scegli un indirizzo valido per il ristorante." }
+        return nil
+    }
+}
+struct PendingRestaurant: Codable, Equatable {
+    let idempotencyKey: String
+    let restaurant: NewRestaurant
+}
+
 struct NewDelivery: Codable, Equatable {
     let shopName: String
     let pickupAddress: String
     let pickup: Coordinate
     let dropoffAddress: String
     let dropoff: Coordinate
-    let readyAt: Int
+    let readyAt: Int?
     let deadlineAt: Int
     let loadUnits: Int
     let maxRideSeconds: Int
+
+    let restaurantId: String?
+
+    init(shopName: String, pickupAddress: String, pickup: Coordinate, dropoffAddress: String,
+         dropoff: Coordinate, readyAt: Int?, deadlineAt: Int, loadUnits: Int, maxRideSeconds: Int,
+         restaurantId: String? = nil) {
+        self.shopName = shopName; self.pickupAddress = pickupAddress; self.pickup = pickup
+        self.dropoffAddress = dropoffAddress; self.dropoff = dropoff; self.readyAt = readyAt
+        self.deadlineAt = deadlineAt; self.loadUnits = loadUnits; self.maxRideSeconds = maxRideSeconds
+        self.restaurantId = restaurantId
+    }
 
     var validationError: String? {
         if [shopName, pickupAddress, dropoffAddress].contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
             return "Inserisci il nome del negozio ed entrambi gli indirizzi."
         }
         if !pickup.isValid || !dropoff.isValid { return "Inserisci valori validi di latitudine e longitudine." }
-        if deadlineAt < readyAt { return "Il termine di consegna non può precedere l’orario di disponibilità." }
+        if let readyAt, deadlineAt < readyAt { return "Il termine di consegna non può precedere l’orario di disponibilità." }
         if !(1...8).contains(loadUnits) { return "Il carico deve essere compreso tra 1 e 8 unità." }
         if !(60...7200).contains(maxRideSeconds) { return "Il tempo massimo di trasporto deve essere compreso tra 1 e 120 minuti." }
         return nil
@@ -164,7 +302,7 @@ enum DeliveryAction {
         guard let route, let stop = route.stops.first,
               route.driverId == delivery.driverId, stop.deliveryId == delivery.id else { return nil }
         switch (stop.kind, delivery.status) {
-        case (.pickup, .assigned): return now >= delivery.readyAt ? .pickedUp : nil
+        case (.pickup, .assigned): return delivery.hasKnownReadiness && now >= delivery.readyAt ? .pickedUp : nil
         case (.dropoff, .pickedUp): return .delivered
         default: return nil
         }

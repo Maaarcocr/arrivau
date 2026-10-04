@@ -50,6 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _ => return Err("Set ARRIVAU_MODE=production with account/HTTPS configuration, or explicitly choose ARRIVAU_MODE=demo for loopback fixtures".into()),
     }.map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(address).await?;
+    let dispatcher = state.spawn_dispatcher(std::time::Duration::from_secs(5));
     axum::serve(listener, app(state))
         .with_graceful_shutdown(async {
             if let Err(error) = tokio::signal::ctrl_c().await {
@@ -57,5 +58,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         })
         .await?;
+    dispatcher.abort();
     Ok(())
 }

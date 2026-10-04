@@ -20,7 +20,7 @@ struct DeliveryRow: View {
             Label(delivery.dropoffAddress, systemImage: "mappin.and.ellipse")
                 .font(.subheadline).foregroundStyle(.secondary)
             if delivery.canChangeReadiness {
-                Text(delivery.readinessTitle).font(.caption).foregroundStyle(delivery.hasKnownReadiness ? .secondary : .orange)
+                Text(delivery.readinessTitle).font(.caption).foregroundStyle(delivery.hasKnownReadiness ? Color.secondary : Color.orange)
             }
             Text("Entro le \(delivery.deadlineAt.epochDate.italianTime)")
                 .font(.caption).foregroundStyle(delivery.status == .pending ? .orange : .secondary)

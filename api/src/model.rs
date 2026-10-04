@@ -54,7 +54,7 @@ pub struct Delivery {
     pub delivered_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewDelivery {
     pub shop_name: String,

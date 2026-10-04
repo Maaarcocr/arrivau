@@ -1,37 +1,41 @@
 # Arrivau
 
-A small, local-first prototype for a delivery fleet around Pachino: a Rust API and one native SwiftUI iOS app with dispatcher and driver roles.
+A Rust API and native Italian SwiftUI app for a **supervised, single-fleet delivery pilot** around Pachino. One app supports dispatcher and driver accounts. The server owns roles, assignments, shift state and routes.
 
-**This is a working starter, not a production dispatch service.** Authentication uses public demo identities, routes use an approximate distance model, and background location support still needs real-device verification. Do not put real customer data in it or expose the server to the internet.
+The code now has an explicit production/pilot mode with individual passwords, expiring/revocable sessions, HTTPS app configuration and persistent SQLite. It remains a small prototype: route times are approximate, notifications require the foreground app, and background location must be checked on real devices. It is not ready for unsupervised dispatch or a broad public launch.
 
-## What's in this repository
+## Start a real-phone pilot
 
-- `api/`: Rust / Axum HTTP API, SQLite state, constrained insertion planner, role checks and real HTTP integration tests
-- `ios/`: SwiftUI app, Core Location on-shift/background lifecycle, Maps handoff, unit tests and XCUITest workflow; generate the Xcode project with XcodeGen
-- `docs/api-contract.md`: shared JSON contract for iOS and a future dispatcher web client
-- `scripts/`: development and verification commands
-- `.github/workflows/ci.yml`: Linux backend checks and macOS simulator test job
+Follow [the pilot runbook](docs/pilot-runbook.md) for:
 
-## Start the API
+1. Deploying one API process behind HTTPS with a fresh persistent database
+2. Provisioning one dispatcher account and separate driver accounts
+3. Configuring a signed iPhone build with your endpoint, team and bundle ID
+4. Running the two-phone delivery and interruption checklist
 
-Requires the [official Rust toolchain](https://www.rust-lang.org/tools/install) and a C compiler for bundled SQLite. The repository pins its tested Rust version in `rust-toolchain.toml`.
+[The TestFlight guide](docs/testflight.md) includes an archive-only command and the explicit upload handoff. No server, Apple account, credentials or TestFlight build is created automatically. The owner supplies hosting and Apple signing/access.
+
+Deployment templates: `deploy/Dockerfile`, `deploy/arrivau.service`, `deploy/pilot.env.example`, `deploy/Caddyfile.example`. Read [API configuration](api/README.md) before using them. Keep account files, password hashes, sessions and databases out of Git/logs.
+
+## What is included
+
+- `api/`: Axum HTTP API, Argon2id authentication, opaque sessions, server role checks, SQLite state and constrained insertion planner
+- `ios/`: iOS 17+ SwiftUI app, HTTPS login, Keychain sessions, map-selected delivery addresses, on-shift Core Location, Italian UI, unit/UI tests and release icon/privacy resources
+- `docs/api-contract.md`: JSON contract for the native app and a future dispatcher client
+- `scripts/`: local demo, verification, screenshot export and archive preparation
+- `.github/workflows/ci.yml`: Rust/HTTP checks, container build, macOS native tests and unsigned Release device build using Xcode 26.6
+
+## Isolated local demo
+
+For development only, use the [official Rust toolchain](https://www.rust-lang.org/tools/install), pinned in `rust-toolchain.toml`, and a C compiler for bundled SQLite:
 
 ```sh
 ./scripts/api-dev.sh
 ```
 
-This starts `127.0.0.1:8080` and writes `arrivau.sqlite3` in the repository root. Stop with Ctrl-C; jobs, shifts, locations and assigned stop order survive a restart. `ARRIVAU_DB_PATH` chooses a separate database. `ARRIVAU_ADDR` selects a loopback address/port. The executable refuses to run without `ARRIVAU_DEMO=1` and refuses public binding.
+The demo binds to `127.0.0.1:8080` and writes `arrivau-demo.sqlite3` locally. `ARRIVAU_DB_PATH` chooses another demo database. Public binding is rejected in demo mode; the three demo bearer strings are intentionally public and never authenticate in production. Database mode/fleet checks keep demo and pilot data separate.
 
-Health check:
-
-```sh
-curl http://127.0.0.1:8080/health
-curl -H 'Authorization: Bearer demo-dispatcher' http://127.0.0.1:8080/v1/drivers
-```
-
-## Run the native app
-
-Requires a Mac with Xcode, an iOS 17+ simulator, and [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+On a Mac with Xcode 26+ and XcodeGen:
 
 ```sh
 brew install xcodegen
@@ -40,70 +44,46 @@ xcodegen generate
 open Arrivau.xcodeproj
 ```
 
-Run the `Arrivau` scheme on an iPhone simulator while the API is running. The default API address is the host Mac's loopback interface, reachable from the simulator. The demo is deliberately limited to loopback, so a physical iPhone is not a supported target until real authentication and HTTPS are introduced.
+For the local simulator chooser, add `--demo` to the Debug scheme's launch arguments and run while the demo API is running. Normal Debug and all Release launches show the pilot login instead. A physical phone must use the HTTPS pilot flow, not the loopback demo.
 
-See `ios/README.md` for app details and test launch options.
+In demo mode, sign in as Corriere 1, start the shift and simulate a Pachino location. Switch to the dispatcher, create a map-selected delivery, choose a driver and assign it. Switch back to Corriere 1, resume sharing and complete pickup then drop-off in route order. Finish work before ending the shift. The server excludes off-shift drivers and positions older than five minutes from suggestions.
 
-## Try a delivery
+## Verify the code
 
-1. Open Corriere 1 and tap **Avvia turno e condividi posizione** (simulate a location near Pachino in Xcode)
-2. Switch to Gestisci le consegne, tap **Nuova consegna**, and choose the pickup and destination from native Maps search
-3. Tap **Scegli il corriere**. The job is created and a suggested driver appears immediately; tap **Assegna a Corriere 1**
-4. Switch to Corriere 1 and resume sharing. The next stop is at the top, with directions and one completion action
-5. At the ready time, mark the pickup, then the drop-off. The next action updates automatically
-6. Open shift controls to end the shift once work is complete; location reporting stops
-
-On a fresh database the drivers are off shift. The backend will not suggest an off-shift driver or one without a location reported in the last five minutes. Dispatchers cannot update driver statuses on their behalf. Corriere 2 cannot read or update Corriere 1's jobs.
-
-## Verify
-
-Backend format, lint, unit/planner and real HTTP tests:
+Backend format, lint, unit/planner, real HTTP integration tests and configuration/script tests:
 
 ```sh
 ./scripts/check.sh
 ```
 
-Black-box smoke against a disposable API database:
+Black-box demo smoke (fresh disposable database; in separate terminals):
 
 ```sh
 ARRIVAU_DB_PATH=/tmp/arrivau-smoke.sqlite3 ./scripts/api-dev.sh
-# In another terminal:
 python3 scripts/e2e.py
 ```
 
-Use a fresh database for the smoke test, because it assumes Corriere 1 has no earlier active work. It writes and completes one clearly labeled fixture delivery. Unit/HTTP integration tests create isolated temporary databases and ephemeral TCP ports.
-
-On macOS, the combined native app → HTTP API workflow is:
+On macOS, run the native app against a disposable real API and simulator:
 
 ```sh
 ./scripts/test-ios.sh
 ```
 
-This generates the project, builds the API, starts a disposable database/server, chooses an available iPhone simulator, and runs the app's unit and UI tests. Pass `SIMULATOR_UDID` to select a particular installed simulator. The UI test uses deterministic location and address-search fixtures and drives the real API; normal app use requires a selected Maps result and does not silently use fixture coordinates.
+The script generates the Xcode project, builds/starts the API, selects an installed iPhone simulator and runs unit/UI tests. `SIMULATOR_UDID` selects a particular device. Explicit test flags provide deterministic GPS/place-search fixtures; ordinary app use requires genuine permission and selected Maps results. Screenshots are written under `ios/build/screenshots/` and attached to CI runs.
 
-The macOS job also captures eight Italian screens and details and publishes an `arrivau-ios-screenshots` artifact. On GitHub, open Actions → Verify API and iOS → the run → Artifacts. The same command writes PNGs under `ios/build/screenshots/` locally. Captures use fixture deliveries and simulated Pachino location, while state changes still use the real API.
+The CI also builds the Release configuration for a generic physical iOS device without signing. This catches code hidden by Debug-only paths; it does not prove signing, physical GPS, hosted TLS or TestFlight processing. See [verification notes](docs/verification.md) and the exact commit's CI results.
 
-See [verification notes](docs/verification.md) for exactly which checks were run when this starter was created. A configured CI job is not evidence that it has passed.
+## Pilot limits and safety
 
-## Scope and safety
+- Individual operator-provisioned accounts, one fleet and one server process. No self-service signup/reset, multitenancy, audit-log service, billing or customer marketplace
+- SQLite survives process restart on a persistent local disk; the operator owns backups, restore tests, retention, security and monitoring. Do not scale replicas or use network storage
+- Dispatcher assigns manually. Only the assigned driver can confirm pickup/drop-off, in committed stop order; driver isolation is enforced server-side
+- Route suggestions use Haversine distance × 1.3 at 25 km/h. They are not road routing, traffic-aware or globally optimal; safety, food handling and driving decisions remain with people
+- Readiness, pickup-before-drop-off, capacity, deadline and maximum ride time constrain suggestions. Time/location changes can invalidate plans; keep human supervision and review warnings
+- The foreground app polls about every five seconds. There is no APNs or guaranteed suspended-app notification delivery, and no general offline queue
+- Delivery creation retains its idempotency key and request securely for uncertain-response recovery. Check current state before manually replacing a job. Connectivity errors are visible rather than silently treated as success
+- GPS starts only after explicit sharing consent on an active shift. Separate background opt-in supports locking/Maps, subject to iOS behavior. Ending the shift or signing out stops local reporting. The most recent point remains on the server; no location history feed is built
+- Apple Maps search sends the query to Apple; opening directions shares the selected stop coordinates. The app does not include paid routing/geocoding providers
+- Physical-device and background/network/battery checks must pass before using real customer work. Start with synthetic deliveries and inform participants about stored location/address data
 
-- Role authorization and driver isolation are implemented, but demo bearer strings are public and offer no real identity verification. Production needs authenticated accounts, revocation and HTTPS
-- SQLite is appropriate for this single-process small-fleet sketch. There is no multi-tenant data partitioning, concurrent multi-instance scheduler, audit log or backup service
-- Assignment is a human-confirmed action; suggestions do not automatically dispatch a driver
-- Route suggestions minimize incremental approximate driving time within an insertion heuristic. They are not guaranteed globally optimal and do not know road restrictions, traffic, closures or vehicle type
-- Readiness, pickup-before-drop-off, load capacity, deadline and maximum in-vehicle time constrain proposed routes. Existing late routes remain visible with warnings
-- Time and location changes can invalidate an earlier plan; drivers and dispatchers must review warnings. Real-world safety, food handling and driving decisions remain with people
-- The app polls while foregrounded. Push notifications, reliable background delivery notifications and offline queues need separate implementation. Background Core Location has an explicit opt-in/code path, but must be verified on a signed physical device
-- Addresses and coordinates are selected together through native Apple Maps search. Search needs a network connection and sends the entered query to Apple. No paid geocoding service, customer marketplace, payment flow or production deployment is added
-- The **Avvia turno e condividi posizione** action is an explicit foreground-location opt-in; background sharing can be enabled separately and explicitly for phone locking/Maps use. Ending a shift/signing out stops app location reporting. The most recent point stays in the local database; there is no location history feed
-- Maps opens only when the user taps directions and then shares that stop's coordinates with Apple Maps
-
-## Next practical iteration
-
-1. Add a real identity provider and per-fleet roles, HTTPS, audit events and retention/deletion policy
-2. Replace the `travel_seconds` estimate with a road-time matrix provider, including attribution and API-key management on the server
-3. Test on a real iPhone with a signed build; verify background location while locked/using Maps, then add APNs, reconnection and idempotent/offline status actions
-4. Trial with a small fleet and compare suggested routes against actual pickup readiness, service time and travel time
-
-The JSON API is independent of SwiftUI, so a web dispatcher can be added without replacing the driver app.
-
+The HTTP contract is independent of SwiftUI, so a future dispatcher web client can share it after its own security/UI work.

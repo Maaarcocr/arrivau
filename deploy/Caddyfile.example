@@ -1,0 +1,14 @@
+# Replace with your domain after its DNS points at your host.
+# API port 8080 must remain private; only the TLS proxy is public.
+pilot.example.com {
+    request_body {
+        max_size 64KB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        Cache-Control "no-store"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+    reverse_proxy 127.0.0.1:8080
+}

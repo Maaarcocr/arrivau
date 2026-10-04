@@ -78,7 +78,7 @@ final class ItalianPresentationTests: XCTestCase {
 
     func testKnownBackendErrorsHaveSpecificItalianTranslations() {
         let cases = [
-            ("A valid bearer token is required", "Accesso non valido. Seleziona di nuovo un ruolo demo."),
+            ("A valid bearer token is required", "Accesso non valido. Accedi di nuovo."),
             ("dispatcher role required", "Questa operazione richiede il ruolo Centrale."),
             ("driver role required", "Questa operazione richiede il ruolo Corriere."),
             ("Path must contain a valid UTF-8 identifier", "L’identificativo della richiesta non è valido."),
@@ -131,7 +131,7 @@ final class ItalianPresentationTests: XCTestCase {
         XCTAssertEqual(ItalianPresentation.errorMessage(URLError(.serverCertificateUntrusted)), "Impossibile stabilire una connessione sicura con il server. Controlla la configurazione HTTPS.")
         XCTAssertEqual(ItalianPresentation.errorMessage(CancellationError()), "Richiesta annullata.")
         let context = DecodingError.Context(codingPath: [], debugDescription: "Raw English decoding error")
-        XCTAssertEqual(ItalianPresentation.errorMessage(DecodingError.dataCorrupted(context)), "La risposta del server contiene dati non validi o non compatibili con questa demo.")
+        XCTAssertEqual(ItalianPresentation.errorMessage(DecodingError.dataCorrupted(context)), "La risposta del server contiene dati non validi o non compatibili con questa app.")
     }
 
     func testMutationUncertaintyDefaultsToFalseAndNeverDependsOnErrorText() {
@@ -168,3 +168,4 @@ final class ItalianPresentationTests: XCTestCase {
         XCTAssertNil(draft(ready: 2, deadline: 2).validationError)
     }
 }
+

@@ -16,6 +16,17 @@ __pycache__/
 /ios/Arrivau.xcodeproj/
 /ios/build/
 /ios/DerivedData/
+/ios/DerivedData-Release/
 *.xcuserstate
 xcuserdata/
 *.xcresult/
+
+# Pilot secrets and signing material (never commit)
+/deploy/auth.json
+/deploy/pilot.env
+/ios/Config/Local.xcconfig
+*.p12
+*.mobileprovision
+*.p8
+*.ipa
+*.xcarchive/

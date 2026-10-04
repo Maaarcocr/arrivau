@@ -91,6 +91,33 @@ final class DeliveryStoreTests: XCTestCase {
         XCTAssertFalse(store.backgroundLocationSharing)
     }
 
+    func testUncertainEndStopsLocationEvenWhenReconciliationFails() async {
+        backend.withState { $0.active = true }
+        await store.login(as: .driver1)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        backend.withState { $0.loseShiftResponse = true; $0.failReadsAfterWrite = true }
+        await store.setShift(active: false, capacity: 5)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertNotNil(store.syncErrorMessage)
+        XCTAssertEqual(backend.withState { $0.active }, false)
+    }
+
+    func testServerEndedShiftClearsBothOptInsBeforeItCanStartAgain() async {
+        backend.withState { $0.active = true }
+        await store.login(as: .driver1)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        backend.withState { $0.active = false }
+        await store.refresh(force: true)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        backend.withState { $0.active = true }
+        await store.refresh(force: true)
+        XCTAssertFalse(store.locationSharing, "A new shift needs a new explicit location opt-in")
+    }
+
     func testOffShiftCannotOptIntoLocation() async {
         await store.login(as: .driver1)
         store.setLocationSharing(true)
@@ -128,14 +155,14 @@ final class DeliveryStoreTests: XCTestCase {
         XCTAssertEqual(backend.withState { $0.createWrites }, 1)
     }
 
-    func testLostCreateResponseReconcilesAndWarnsAgainstRepeating() async {
+    func testLostCreateResponseReconcilesAndPreservesSafeRetry() async {
         await store.login(as: .dispatcher)
         backend.withState { $0.loseCreateResponse = true }
         let created = await store.create(Fixtures.newDelivery)
         XCTAssertNil(created)
         XCTAssertTrue(store.createOutcomeUncertain)
         XCTAssertEqual(store.deliveries.count, 1, "The follow-up read recovers the committed delivery")
-        XCTAssertEqual(store.errorMessage, "Impossibile confermare la creazione. Controlla l’elenco delle consegne prima di riprovare.")
+        XCTAssertEqual(store.errorMessage, "Creazione non confermata. Riprova la stessa richiesta: il server eviterà duplicati, anche se era già stata salvata.")
     }
 
     func testConfirmedAssignmentCannotBeRepeatedAfterFailedRefresh() async {
@@ -188,6 +215,43 @@ final class DeliveryStoreTests: XCTestCase {
         await store.completeNextStop(delivery)
         XCTAssertEqual(backend.withState { $0.statusWrites }, 1)
     }
+    func testUncertainStatusRetryReusesKeyAndCannotSkipThePickup() async throws {
+        backend.withState { $0.active = true; $0.jobs = [DriverStoreBackend.delivery(status: .assigned)] }
+        await store.login(as: .driver1)
+        let delivery = try XCTUnwrap(store.deliveries.first)
+        backend.withState { $0.loseStatusResponse = true; $0.failReadsAfterWrite = true }
+        await store.completeNextStop(delivery)
+        XCTAssertEqual(store.deliveries.first?.status, .assigned, "Failed reads must not invent a result")
+        backend.withState { $0.loseStatusResponse = false }
+        await store.completeNextStop(delivery)
+        XCTAssertEqual(store.deliveries.first?.status, .pickedUp)
+        XCTAssertEqual(store.route?.stops.first?.kind, .dropoff)
+        let keys = backend.withState { $0.statusKeys }
+        XCTAssertEqual(keys.count, 2)
+        XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(keys.first)))
+        XCTAssertEqual(keys.first, keys.last)
+        XCTAssertEqual(backend.withState { $0.statusWrites }, 1)
+    }
+
+    func testUncertainAssignmentBlocksDifferentDriverUntilResolved() async throws {
+        backend.withState { $0.jobs = [DriverStoreBackend.delivery(status: .pending)] }
+        await store.login(as: .dispatcher)
+        backend.withState { $0.loseAssignmentResponse = true; $0.failReadsAfterWrite = true }
+        let uncertain = await store.assign(deliveryId: "delivery-1", driverId: "driver-1")
+        XCTAssertFalse(uncertain)
+        let conflicting = await store.assign(deliveryId: "delivery-1", driverId: "driver-2")
+        XCTAssertFalse(conflicting)
+        XCTAssertEqual(backend.withState { $0.assignmentWrites }, 1)
+        backend.withState { $0.loseAssignmentResponse = false }
+        let replay = await store.assign(deliveryId: "delivery-1", driverId: "driver-1")
+        XCTAssertTrue(replay)
+        let keys = backend.withState { $0.assignmentKeys }
+        XCTAssertEqual(keys.count, 2)
+        XCTAssertNotNil(UUID(uuidString: try XCTUnwrap(keys.first)))
+        XCTAssertEqual(keys.first, keys.last)
+        XCTAssertEqual(backend.withState { $0.assignmentWrites }, 1)
+    }
+
 }
 
 private final class DriverStoreURLProtocol: URLProtocol {
@@ -216,6 +280,11 @@ private final class DriverStoreBackend {
     var failReads = false
     var loseCreateResponse = false
     var loseStatusResponse = false
+    var loseShiftResponse = false
+    var loseAssignmentResponse = false
+    var statusKeys: [String] = []
+    var assignmentKeys: [String] = []
+    var replayResponses: [String: Data] = [:]
     var lastShiftCapacity: Int?
     var shiftWrites = 0
     var createWrites = 0
@@ -265,6 +334,12 @@ private final class DriverStoreBackend {
             default: return (404, Data(#"{"error":"Not found"}"#.utf8))
             }
         }
+        let key = request.value(forHTTPHeaderField: "Idempotency-Key")
+        if let key {
+            if path.hasSuffix("/status") { statusKeys.append(key) }
+            if path.hasSuffix("/assign") { assignmentKeys.append(key) }
+            if let response = replayResponses[key] { return (200, response) }
+        }
         if rejectWrites { return (409, Data(#"{"error":"Action rejected"}"#.utf8)) }
         if failReadsAfterWrite { failReads = true }
         let payload = try JSONSerialization.jsonObject(with: Self.body(of: request)) as? [String: Any] ?? [:]
@@ -273,6 +348,7 @@ private final class DriverStoreBackend {
             shiftWrites += 1
             lastShiftCapacity = payload["capacity"] as? Int
             active = payload["active"] as? Bool ?? false
+            if loseShiftResponse { throw URLError(.networkConnectionLost) }
             return (200, try APIClient.encoder().encode(driver))
         case "/v1/deliveries":
             createWrites += 1
@@ -286,14 +362,19 @@ private final class DriverStoreBackend {
             assignmentWrites += 1
             let delivery = Self.delivery(status: .assigned)
             jobs = [delivery]
-            return (200, try APIClient.encoder().encode(delivery))
+            let response = try APIClient.encoder().encode(delivery)
+            if let key { replayResponses[key] = response }
+            if loseAssignmentResponse { throw URLError(.networkConnectionLost) }
+            return (200, response)
         case "/v1/deliveries/delivery-1/status":
             statusWrites += 1
             let status = DeliveryStatus(rawValue: payload["status"] as? String ?? "") ?? .assigned
             let delivery = Self.delivery(status: status)
             jobs = [delivery]
+            let response = try APIClient.encoder().encode(delivery)
+            if let key { replayResponses[key] = response }
             if loseStatusResponse { throw URLError(.networkConnectionLost) }
-            return (200, try APIClient.encoder().encode(delivery))
+            return (200, response)
         default: return (404, Data(#"{"error":"Not found"}"#.utf8))
         }
     }
@@ -312,3 +393,4 @@ private final class DriverStoreBackend {
         return data
     }
 }
+

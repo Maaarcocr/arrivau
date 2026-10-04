@@ -21,6 +21,12 @@ struct DispatcherView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("create_delivery")
+                    .disabled(store.pendingCreation != nil || store.isMutating)
+                    if store.pendingCreation != nil {
+                        Text("C’è una creazione da verificare. Riprova la stessa richiesta prima di crearne un’altra.").font(.subheadline)
+                        Button("Verifica la creazione in sospeso") { Task { _ = await store.retryPendingCreation() } }
+                            .disabled(store.isMutating).accessibilityIdentifier("retry_pending_creation")
+                    }
                 }.padding(.vertical, 6)
             }
             if !openDeliveries.isEmpty {
@@ -35,11 +41,19 @@ struct DispatcherView: View {
             Section {
                 ExpandableDetails("Corrieri · \(store.drivers.filter(\.active).count) in turno", identifier: "drivers_details") {
                     ForEach(store.drivers) { driver in
-                        HStack {
-                            Label(driver.displayName, systemImage: "bicycle")
-                            Spacer()
-                            Text(driver.active ? "In turno" : "Fuori turno")
-                                .font(.subheadline).foregroundStyle(driver.active ? .green : .secondary)
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack {
+                                Label(driver.displayName, systemImage: "bicycle")
+                                Spacer()
+                                Text(driver.active ? "In turno" : "Fuori turno")
+                                    .font(.subheadline).foregroundStyle(driver.active ? .green : .secondary)
+                            }
+                            if let timestamp = driver.locationUpdatedAt {
+                                LocationAgeLabel(timestamp: timestamp, accessibilityID: "driver_location_age_\(driver.id)")
+                            } else {
+                                Text("Posizione non disponibile").font(.caption).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("driver_location_age_\(driver.id)")
+                            }
                         }.accessibilityIdentifier("driver_\(driver.id)")
                     }
                 }
@@ -210,22 +224,25 @@ struct NewDeliveryView: View {
                             Section { Text(validationError).foregroundStyle(.red).accessibilityIdentifier("form_error") }
                         }
                     }
+                    .disabled(creationUncertain || submitting)
                     .navigationTitle("Nuova consegna")
                     .safeAreaInset(edge: .bottom) {
                         VStack(spacing: 8) {
                             Button {
-                                if creationUncertain { dismiss() }
-                                else { Task { await create() } }
+                                Task {
+                                    if creationUncertain { await retryCreation() }
+                                    else { await create() }
+                                }
                             } label: {
                                 HStack {
                                     if submitting { ProgressView().tint(.white) }
-                                    Text(creationUncertain ? "Controlla le consegne" : (submitting ? "Creazione…" : "Scegli il corriere"))
+                                    Text(creationUncertain ? "Riprova la stessa creazione" : (submitting ? "Creazione…" : "Scegli il corriere"))
                                 }.frame(maxWidth: .infinity).padding(.vertical, 8)
                             }
                             .buttonStyle(.borderedProminent)
                             .disabled(pickup == nil || dropoff == nil || submitting || store.isMutating)
                             .accessibilityIdentifier("submit_delivery")
-                            Text(creationUncertain ? "Prima di riprovare, controlla se la consegna è stata salvata" : "Crea la consegna e suggerisce un corriere")
+                            Text(creationUncertain ? "La stessa richiesta evita duplicati. Puoi chiudere e verificarla più tardi." : "Crea la consegna e suggerisce un corriere")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding().background(.regularMaterial)
                     }
@@ -262,6 +279,14 @@ struct NewDeliveryView: View {
         }.buttonStyle(.plain).accessibilityIdentifier(identifier)
     }
 
+    private func retryCreation() async {
+        guard !submitting else { return }
+        submitting = true
+        defer { submitting = false }
+        if let created = await store.retryPendingCreation() { createdId = created.id; creationUncertain = false }
+        else { creationUncertain = store.pendingCreation != nil }
+    }
+
     private func create() async {
         guard !submitting, let pickup, let dropoff else { return }
         submitting = true
@@ -280,3 +305,4 @@ struct NewDeliveryView: View {
         else if store.createOutcomeUncertain { creationUncertain = true }
     }
 }
+

@@ -1,18 +1,30 @@
+# Native iOS pilot
+
+The normal app now signs in to a configured HTTPS pilot service using individual credentials and server-assigned roles. It securely stores expiring sessions in the Keychain, restores them only after server verification, revokes on reachable logout, and clears private state/GPS on signout or expiry. Release has no demo chooser or fixture tokens.
+
+Start with [the pilot runbook](../docs/pilot-runbook.md) and [TestFlight/signing guide](../docs/testflight.md). `ARRIVAU_API_URL` is a non-secret build setting embedded in Info.plist; when blank, the login screen asks for the HTTPS root origin. Set your own team and registered bundle ID when archiving. `scripts/archive-ios.sh` validates configuration and only builds an archive.
+
+For simulator development, launch the Debug app with `--demo`. `--uitesting` implies the isolated loopback demo. These flags and environment fixture overrides are compiled out of Release. The older detailed workflow below describes this explicit demo/test mode; physical phones use the pilot login.
+
+The icon and privacy manifest live in `Resources/`. Recheck privacy declarations against the deployed service and App Store Connect disclosures. The operator must verify a signed build on physical devices; neither an unsigned Release build nor simulator UI tests establish background GPS or TestFlight readiness.
+
+## Local demo implementation and test reference
+
 # Native iOS sketch
 
-SwiftUI, iOS 17+, no third-party runtime dependencies. Dispatcher and driver demo roles share the Rust API in this repository. This is a local prototype, not a production delivery app.
+SwiftUI, iOS 17+, no third-party runtime dependencies. Dispatcher and driver demo roles share the Rust API in this repository. The following section covers only the isolated local demo.
 
 ## Run on a Mac
 
-Requirements: Xcode 16+ with an iOS 17+ simulator runtime, XcodeGen, Rust/Cargo for the API.
+Requirements: Xcode 26+ with an iOS 17+ simulator runtime, XcodeGen, Rust/Cargo for the API.
 
 1. Start the API from the repository root using its README instructions, with `ARRIVAU_DEMO=1` and a local database.
 2. `cd ios && xcodegen generate`
 3. Open `Arrivau.xcodeproj` and run the `Arrivau` scheme on an iPhone simulator in Debug.
-4. The login screen defaults to `http://localhost:8080`, connecting to the Mac's loopback API. Choose Corriere 1 and tap **Avvia turno e condividi posizione**. This button explicitly opts into foreground location sharing. For manual simulator use choose a custom Pachino location (latitude `36.7163`, longitude `15.0908`) under Simulator → Features → Location → Custom Location. Alternatively add `--uitesting` to Debug launch arguments for deterministic Pachino samples; the UI clearly labels simulated location.
+4. Add `--demo` to the Debug launch arguments. The demo login screen defaults to `http://localhost:8080`, connecting to the Mac's loopback API. Choose Corriere 1 and tap **Avvia turno e condividi posizione**. This button explicitly opts into foreground location sharing. For manual simulator use choose a custom Pachino location (latitude `36.7163`, longitude `15.0908`) under Simulator → Features → Location → Custom Location. Alternatively add `--uitesting` to Debug launch arguments for deterministic Pachino samples; the UI clearly labels simulated location.
 5. Switch to Gestisci le consegne, tap **Nuova consegna**, choose pickup and destination from Maps search, then **Scegli il corriere**. Driver suggestions load automatically in the same flow; tap **Assegna a Corriere 1**. Switch back to Corriere 1 to work the ordered pickup and drop-off stops. Role switches stop local tracking but do not end server-side shifts or discard assigned work.
 
-No remote API host is permitted by this demo. A physical device cannot reach the Mac using `localhost`; a secure authenticated deployment and a reviewed configuration change are prerequisites for real-device end-to-end use. Release builds have no HTTP ATS exception. Demo tokens are public fixture strings, never production secrets; no token storage or production login is supplied.
+No remote API host is permitted by this demo. A physical device cannot reach the Mac using `localhost`; use the HTTPS pilot login described above. Release builds have no HTTP ATS exception and compile out public demo fixture tokens. Pilot sessions use the Keychain; passwords are not saved.
 
 ## Tests
 
@@ -27,11 +39,11 @@ xcodebuild test -project ios/Arrivau.xcodeproj \
 
 Use an installed simulator name. The UI suite requires a running API on `localhost:8080` and a fresh demo database, with Corriere 1 off shift and no work. The test scheme fixes `ARRIVAU_API_URL` to `http://127.0.0.1:8080`; change its test environment variable in `project.yml` and regenerate to use another loopback port. Do not run the UI suite against a database you care about: it creates deliveries, starts/ends a shift, shares simulated coordinates, assigns, picks up and completes work. There is no test-only reset endpoint.
 
-- `ArrivauTests`: snake_case/Unix-second contract decoding and encoding, coordinates/form validation, next-stop/state/ready-time guards, loopback URL policy, bearer/HTTP/error handling using URLProtocol
+- `ArrivauTests`: snake_case/Unix-second contract decoding and encoding, coordinates/form validation, next-stop/state/ready-time guards, HTTPS and isolated-loopback URL policies, bearer/HTTP/error handling using URLProtocol, pilot session restore/expiry/revocation and pending-action recovery
 - `ArrivauUITests`: real API dispatcher-to-driver lifecycle and persisted completion, plus cancelled creation and invalid remote-host rejection
 - `--uitesting` replaces location sensor input and address-search results in Debug; all API requests and writes remain real
 
-The Linux authoring environment has no Apple SDK, so native execution runs in GitHub Actions on macOS. The baseline build was verified with Xcode 16.4; see `docs/verification.md` for that baseline and the Actions run for the exact current commit for updated results. The current suite also covers confirmed-state recovery and address selection. Real-device background behavior remains unverified.
+The Linux authoring environment has no Apple SDK, so native execution runs in GitHub Actions on macOS. The historical baseline build was verified with Xcode 16.4; the pilot CI now selects Xcode 26.6; see `docs/verification.md` for that baseline and the Actions run for the exact current commit for updated results. The current suite also covers confirmed-state recovery and address selection. Real-device background behavior remains unverified.
 
 ## Location and lifecycle
 
@@ -81,3 +93,4 @@ The Xcode `.xcresult` artifact contains the attachments. GitHub Actions exports 
 All app-owned screens, accessibility labels, validation and location-permission explanations are Italian. The app advertises Italian as its development language and uses `it_IT` for in-app date and time formatting. Demo identity labels are translated only when both the known ID and original seeded name match; entered business names and addresses are preserved. API status values, role identifiers, error strings and route warning payloads remain unchanged on the wire. A presentation adapter translates known server messages and shows an Italian fallback for unknown failures. Uncertain creation outcomes use a typed flag instead of matching translated error text.
 
 The UI suite keeps cancellation, repeated-submit and pending-job reopening coverage, and checks repeated details expansion plus background/foreground interruptions. Physical-device location behavior still needs the validation described above.
+

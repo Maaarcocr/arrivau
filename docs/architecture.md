@@ -2,7 +2,7 @@
 
 ## One repository, two clients roles
 
-The API owns delivery/driver/route state and permissions. The SwiftUI app is one binary with a demo identity picker that selects dispatcher or driver. Screen visibility is convenience only: server authorization is required for every operation. There is no customer-facing marketplace.
+The API owns delivery/driver/route state and permissions. The SwiftUI app is one binary with individual HTTPS login and server-returned dispatcher/driver roles. The public demo identity picker exists only in explicitly selected Debug demo mode. Screen visibility is convenience only: server authorization is required for every operation. There is no customer-facing marketplace.
 
 `pending → assigned → picked_up → delivered` is the only successful job progression. The dispatcher creates and assigns; the assigned driver alone reports pickup and drop-off, in the committed route order. Errors leave persisted state unchanged. All writes affecting planning must be checked and committed atomically so overlapping assignments cannot overbook a driver.
 
@@ -34,4 +34,5 @@ UI testing uses an explicit launch flag to provide a fixed Pachino coordinate wi
 
 ## API evolution
 
-See `api-contract.md`. A future web app can use the same endpoints after authenticated session/token design and narrowly scoped CORS are introduced. Schema evolution, retries/idempotency, event versions, rate limits, concurrency and multi-fleet authorization need production design. None are implied by this starter's demo login.
+See `api-contract.md`. The native app uses operator-provisioned Argon2id accounts and expiring opaque sessions; the API enforces roles and driver ownership. Create/assign/status endpoints support scoped idempotency keys. A future web app still needs its own session/UI design and narrowly scoped CORS. Event versions, fleet isolation, broader abuse protection, audit, retention and multi-instance concurrency remain outside this supervised pilot. Read the pilot runbook for deployment and interruption checks.
+

@@ -1,11 +1,14 @@
 # Arrivau API v1
 
-API base: `http://127.0.0.1:8080`. JSON uses snake_case. Timestamps are UTC Unix seconds (integers), coordinates decimal degrees. IDs are strings. All routes except `GET /health` require `Authorization: Bearer <token>`.
+Pilot API base: your configured HTTPS root origin. Isolated demo base: `http://127.0.0.1:8080`. JSON uses snake_case. Timestamps are UTC Unix seconds (integers), coordinates decimal degrees. IDs are strings. All routes except `GET /health` and `POST /v1/session` require `Authorization: Bearer <token>`.
 
-Demo-only principals (enabled explicitly by `ARRIVAU_DEMO=1`): token `demo-dispatcher` has dispatcher role; `demo-driver-1` / `demo-driver-2` have driver role and matching IDs `driver-1` / `driver-2`. Production authentication is intentionally not implemented: server must refuse startup unless demo mode is explicitly enabled. Bind loopback by default. Never use these tokens or plain HTTP outside local development.
+Demo-only principals (enabled explicitly by `ARRIVAU_DEMO=1`): token `demo-dispatcher` has dispatcher role; `demo-driver-1` / `demo-driver-2` have driver role and matching IDs `driver-1` / `driver-2`. These tokens never authenticate in production mode. The API fails closed unless an explicit demo or fully configured production mode is selected. Bind loopback by default; managed hosts require both trusted-TLS-proxy and nonloopback opt-ins. Never expose raw HTTP or use public fixture tokens outside local development.
 
-Responses below are complete stable contracts. API errors: `{"error":"human-readable reason"}` with suitable 400/401/403/404/409/422 status.
+Responses below are complete stable contracts. API errors: `{"error":"human-readable reason"}` with suitable 400/401/403/404/409/422/429 status. Responses have `Cache-Control: no-store`; request bodies are bounded to 16 KiB.
 
+- `POST /v1/session` (production, no bearer): body `{"username":"dispatcher","password":"<private password>"}` → 201 `{"token":"<opaque bearer>","expires_at":1791117600,"user":{"id":"dispatcher-1","name":"Centrale","role":"dispatcher"}}`. Invalid credentials return generic 401; throttling returns 429. Accounts are configured offline; no signup endpoint
+- `GET /v1/session` (authenticated) → `{"expires_at":1791117600,"user":{"id":"dispatcher-1","name":"Centrale","role":"dispatcher"}}`. Demo expiry is null
+- `DELETE /v1/session` (authenticated) → 204; revokes that production token immediately. Expired/revoked tokens return 401
 - `GET /health` → `{"status":"ok"}`
 - `GET /v1/me` → `{"id":"dispatcher-1","name":"Dispatcher","role":"dispatcher"}` (driver principals use matching IDs and name `Driver 1` etc.)
 - `GET /v1/drivers` (dispatcher) → array of Driver
@@ -28,4 +31,11 @@ Route: `{"driver_id":"driver-1","stops":[{"delivery_id":"...","kind":"pickup","a
 
 Suggestion: `{"driver_id":"driver-1","incremental_travel_seconds":180,"route":{...}}`.
 
-The app refreshes every 5 seconds while foregrounded, plus after writes. Push, real road travel matrices and production login are future integrations. Location reporting is opt-in while on shift, with an explicit background Core Location capability/code path for locking the phone or using Maps; device execution is unverified. Stopping shift/signing out stops updates. UI simulator can opt into deterministic location through launch argument `--uitesting` only, using local demo tokens. No customer contact/payment details are collected.
+The app refreshes every 5 seconds while foregrounded, plus after writes. Push and real road travel matrices are future integrations. Location reporting is opt-in while on shift, with an explicit background Core Location capability/code path for locking the phone or using Maps; device execution is unverified. Stopping shift/signing out stops updates. UI simulator can opt into deterministic location through launch argument `--uitesting` only, using local demo tokens. No payment details are collected; delivery addresses and current driver locations are persisted and require appropriate operator privacy handling.
+
+
+## Retry and session contract
+
+`POST /v1/deliveries`, `POST /v1/deliveries/{id}/assign` and `POST /v1/deliveries/{id}/status` accept `Idempotency-Key` (use a UUID). A key is scoped to the authenticated principal, method/path and canonical request body. The original response is committed in the same SQLite transaction as the domain write and survives restart. Repeating the exact request returns the original response; reusing a key for a different operation/body returns 409. Keep the same key while the result is uncertain. This is not an offline queue. Shift changes set a desired state; location reporting uses the next fresh sample.
+
+The native app persists an uncertain creation's exact body/key scoped to HTTPS origin and user ID, and retains assignment/status keys while the current process reconciles. It does not replay credentials across redirects. The app never infers the role from a login choice in pilot mode. Tokens expire at the server's Unix timestamp; the app clears private state and stops local GPS on expiry/401/signout. Remote revocation cannot be guaranteed while the phone is offline, so session TTL and operator revocation remain part of the safety boundary.

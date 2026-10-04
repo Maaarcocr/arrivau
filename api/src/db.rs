@@ -8,7 +8,7 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{path::Path, time::Duration};
 
-pub fn open(path: impl AsRef<Path>) -> ApiResult<Connection> {
+pub fn open(path: impl AsRef<Path>, mode: &str) -> ApiResult<Connection> {
     let mut db = Connection::open(path)?;
     db.busy_timeout(Duration::from_secs(5))?;
     db.execute_batch(
@@ -35,8 +35,42 @@ pub fn open(path: impl AsRef<Path>) -> ApiResult<Connection> {
          );
          PRAGMA user_version = 1;",
     )?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS deployment (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (
+            token_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+            account_fingerprint TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS sessions_account ON sessions(account_id,expires_at);
+        CREATE TABLE IF NOT EXISTS login_limits (bucket TEXT PRIMARY KEY,attempts INTEGER NOT NULL,reset_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS idempotency (
+            principal_id TEXT NOT NULL, key TEXT NOT NULL, request_hash TEXT NOT NULL,
+            response TEXT NOT NULL CHECK(json_valid(response)), PRIMARY KEY(principal_id,key)
+        );")?;
+    let marker: Option<String> = db
+        .query_row("SELECT value FROM deployment WHERE key='mode'", [], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    match marker {
+        Some(existing) if existing != mode => {
+            return Err(ApiError::bad_request(
+                "Database belongs to a different mode/fleet; use a separate database",
+            ))
+        }
+        None => {
+            let existing: i64 = db.query_row("SELECT COUNT(*) FROM drivers", [], |r| r.get(0))?;
+            if mode != "demo" && existing > 0 {
+                return Err(ApiError::bad_request("An unmarked legacy database cannot be used for production; start with a separate database"));
+            }
+            db.execute(
+                "INSERT INTO deployment(key,value) VALUES ('mode',?1)",
+                [mode],
+            )?;
+        }
+        _ => {}
+    }
     let tx = db.transaction()?;
-    for i in 1..=2 {
+    for i in 1..=if mode == "demo" { 2 } else { 0 } {
         let driver = Driver {
             id: format!("driver-{i}"),
             name: format!("Driver {i}"),

@@ -55,6 +55,7 @@ jobs:
       - name: Inspect manual TestFlight CLI compatibility (no credentials)
         run: ./scripts/check-testflight-tools.sh
       - name: Build Release for a real iOS device (unsigned)
+        id: release-build
         run: |
           (cd ios && xcodegen generate)
           xcodebuild build -project ios/Arrivau.xcodeproj -scheme Arrivau \
@@ -62,14 +63,32 @@ jobs:
             -derivedDataPath ios/DerivedData-Release CODE_SIGNING_ALLOWED=NO
           python3 scripts/verify-ios-bundle.py ios/DerivedData-Release/Build/Products/Release-iphoneos/Arrivau.app
       - name: Run native unit and UI tests with real server
+        id: native-tests
         run: ./scripts/test-ios.sh
-      - name: Save Xcode test results
+      # Raw .xcresult bundles can contain unrelated simulator service credentials
+      # in compressed system diagnostics. Never upload the bundles or diagnostics.
+      - name: Record safe iOS check summary
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-test-results
-          path: ios/build/*.xcresult
-          if-no-files-found: warn
+        env:
+          RELEASE_RESULT: ${{ steps.release-build.outcome }}
+          TEST_RESULT: ${{ steps.native-tests.outcome }}
+        shell: bash
+        run: |
+          # Only these fixed status words reach the summary, never tool output.
+          case "$RELEASE_RESULT" in
+            success|failure|cancelled|skipped) ;;
+            *) RELEASE_RESULT=unknown ;;
+          esac
+          case "$TEST_RESULT" in
+            success|failure|cancelled|skipped) ;;
+            *) TEST_RESULT=unknown ;;
+          esac
+          {
+            printf '## iOS verification\n\n'
+            printf -- '- Unsigned Release build: %s\n' "$RELEASE_RESULT"
+            printf -- '- Native unit and UI tests: %s\n' "$TEST_RESULT"
+            printf '\nRaw Xcode result bundles and simulator diagnostics are intentionally not uploaded.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Save main-screen screenshots
         if: always()
         uses: actions/upload-artifact@v4

@@ -223,6 +223,8 @@ pub struct RouteStop {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
+    #[serde(default)]
+    pub travel_estimate: crate::routing::TravelEstimate,
     pub driver_id: String,
     pub stops: Vec<RouteStop>,
     pub travel_seconds: i64,

@@ -2,7 +2,7 @@
 
 A Rust API and native Italian SwiftUI app for a **supervised, team-isolated delivery pilot** around Pachino. One app supports dispatcher, driver and dual-role accounts. Each account belongs to a private team (Squadra). The server owns roles, assignments, shift state and routes.
 
-The code now has an explicit production/pilot mode with individual passwords, expiring/revocable sessions, HTTPS app configuration and persistent SQLite. It remains a small prototype: route times are approximate, notifications require the foreground app, and background location must be checked on real devices. It is not ready for unsupervised dispatch or a broad public launch.
+The code now has an explicit production/pilot mode with individual passwords, expiring/revocable sessions, HTTPS app configuration and persistent SQLite. It remains a small prototype: road routing is an opt-in embedded feature with explicit approximate fallback, notifications require the foreground app, and background location must be checked on real devices. It is not ready for unsupervised dispatch or a broad public launch.
 
 ## Start a real-phone pilot
 
@@ -96,7 +96,7 @@ The CI also builds the Release configuration for a generic physical iOS device w
 - Individual operator-provisioned accounts, one team per account and one server process. Server-enforced team isolation; no self-service signup/reset, public team administration, audit-log service, billing or customer marketplace
 - SQLite survives process restart on a persistent local disk; the operator owns backups, restore tests, retention, security and monitoring. Do not scale replicas or use network storage
 - Dispatchers save restaurants, create unassigned orders, and later mark them ready now or in a number of minutes. The server assigns automatically when readiness arrives, including least-bad timing fallbacks with warnings. Only the assigned driver confirms pickup/drop-off
-- Route suggestions use Haversine distance × 1.3 at 25 km/h. They are not road routing, traffic-aware or globally optimal; safety, food handling and driving decisions remain with people
+- The default travel model is Haversine × 1.3 at 25 km/h. [Optional embedded OSRM](docs/embedded-routing.md) provides offline road-time matrices with a separately prepared regional map. Approximation/fallback is labelled, traffic is not live, and the insertion planner is not globally optimal; people retain safety, food handling and driving decisions
 - Pickup aims for ten minutes after readiness, with a five-minute cumulative extra-onboard-delay policy. Impossible timing is flagged rather than leaving ready work unassigned; physical capacity, precedence and the 32-stop bound remain mandatory. See [readiness and dispatch](docs/readiness-and-dispatch.md)
 - The foreground app polls about every five seconds. There is no APNs or guaranteed suspended-app notification delivery, and no general offline queue
 - Delivery creation retains its idempotency key and request securely for uncertain-response recovery. Check current state before manually replacing a job. Connectivity errors are visible rather than silently treated as success

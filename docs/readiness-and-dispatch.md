@@ -24,7 +24,7 @@ starving later work. Failed/no-driver work remains visible and is retried. This
 is one process with serialized SQLite transactions, not a distributed queue.
 
 No on-shift driver yields `dispatch_waiting_reason=no_active_driver`. Genuine
-capacity, structural-route or 32-stop limits yield `capacity_or_route_limit`.
+capacity, structural-route or 32-stop limits yield `capacity_or_route_limit`. With embedded road routing, this generic hard-route reason also covers unreachable road legs; the app asks the dispatcher to check road access as well as capacity and stop count, rather than claiming that every vehicle is full.
 Neither case pretends assignment succeeded. Dispatchers should inspect the alert
 and arrange a suitable on-shift driver. No off-shift driver is silently activated.
 

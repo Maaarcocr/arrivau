@@ -266,9 +266,10 @@ struct DeliveryDetailView: View {
                     Text("Consegna prevista alle \(dropoff.arrivalAt.epochDate.italianTime)")
                 }
             } else {
-                Text("Posizione non disponibile; orari da verificare")
+                Text(route.unavailableEstimateMessage)
                     .foregroundStyle(.orange).accessibilityIdentifier("route_estimates_unavailable")
             }
+            RouteTravelNotice(route: route)
             ForEach(route.localizedNotices, id: \.self) { notice in
                 Label(notice, systemImage: "clock.badge.exclamationmark").foregroundStyle(.orange)
             }
@@ -294,8 +295,9 @@ struct DeliveryDetailView: View {
                     .accessibilityIdentifier("pickup_eta_\(suggestion.driverId)")
             }
             if !suggestion.route.estimatesAvailable {
-                Text("Posizione non disponibile; orari da verificare").font(.subheadline).foregroundStyle(.orange)
+                Text(suggestion.route.unavailableEstimateMessage).font(.subheadline).foregroundStyle(.orange)
             }
+            RouteTravelNotice(route: suggestion.route)
             ForEach(suggestion.route.localizedWarnings, id: \.self) { warning in
                 Text(warning).font(.footnote).foregroundStyle(.orange)
             }

@@ -3,6 +3,7 @@ mod db;
 mod error;
 pub mod model;
 pub mod planner;
+pub mod routing;
 
 use axum::{
     extract::{
@@ -18,8 +19,10 @@ use axum::{
 use error::{ApiError, ApiResult};
 use model::*;
 use rand_core::{OsRng, RngCore};
+use routing::{Approximate, RoutingService, TravelMatrix, TravelTimes};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{
     path::Path as FsPath,
     sync::{Arc, Mutex, MutexGuard},
@@ -42,11 +45,13 @@ impl Clock for SystemClock {
 
 #[derive(Clone)]
 pub struct AppState {
+    routing: RoutingService,
     db: Arc<Mutex<Connection>>,
     clock: Arc<dyn Clock>,
     authentication: Arc<Authentication>,
     auth_workers: Arc<tokio::sync::Semaphore>,
     dispatch_cursor: Arc<Mutex<DispatchCursor>>,
+    dispatch_workers: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Default)]
@@ -75,11 +80,13 @@ impl AppState {
         }
         let db = db::open(path, "demo", "demo", &[]).map_err(|e| e.message)?;
         Ok(Self {
+            routing: RoutingService::default(),
             db: Arc::new(Mutex::new(db)),
             clock,
             authentication: Arc::new(Authentication::Demo),
             auth_workers: Arc::new(tokio::sync::Semaphore::new(2)),
             dispatch_cursor: Arc::new(Mutex::new(DispatchCursor::default())),
+            dispatch_workers: Arc::new(tokio::sync::Semaphore::new(1)),
         })
     }
 
@@ -112,12 +119,90 @@ impl AppState {
         .map_err(|e| e.message)?;
         auth::initialize(&mut db, &config).map_err(|e| e.message)?;
         Ok(Self {
+            routing: RoutingService::default(),
             db: Arc::new(Mutex::new(db)),
             clock,
             authentication: Arc::new(Authentication::Production(config)),
             auth_workers: Arc::new(tokio::sync::Semaphore::new(2)),
             dispatch_cursor: Arc::new(Mutex::new(DispatchCursor::default())),
+            dispatch_workers: Arc::new(tokio::sync::Semaphore::new(1)),
         })
+    }
+
+    pub fn with_routing(mut self, routing: RoutingService) -> Self {
+        self.routing = routing;
+        self
+    }
+
+    /// Snapshot only this team's outstanding work. All native calls happen
+    /// after releasing SQLite. Recheck SQLite's write counter before use; no
+    /// database revision table or schema migration is required for one process.
+    async fn prepare_travel(
+        &self,
+        team: &str,
+        candidate_id: Option<&str>,
+        driver_id: Option<&str>,
+        pickup_anchor: bool,
+    ) -> ApiResult<PreparedTravel> {
+        for _ in 0..3 {
+            let (revision, inputs) = {
+                let db = self.db()?;
+                if let Some(id) = driver_id {
+                    db::driver(&db, team, id)?;
+                }
+                let candidate = candidate_id
+                    .map(|id| db::delivery(&db, team, id))
+                    .transpose()?;
+                let revision = db.total_changes();
+                if !self.routing.is_embedded() {
+                    return Ok(PreparedTravel {
+                        revision,
+                        approximate: true,
+                        matrices: HashMap::new(),
+                    });
+                }
+                let jobs = db::planning_deliveries(&db, team)?;
+                let inputs = db::drivers(&db, team)?
+                    .into_iter()
+                    .filter(|driver| driver_id.is_none_or(|id| id == driver.id))
+                    .filter(|driver| {
+                        driver_id.is_some()
+                            || driver.active
+                            || jobs
+                                .iter()
+                                .any(|job| job.driver_id.as_deref() == Some(driver.id.as_str()))
+                    })
+                    .map(|mut driver| {
+                        // Pickup is acknowledged at the restaurant. Exclude old
+                        // GPS from the native point set too: OSRM snapping can
+                        // depend on every point in a table, not just each leg.
+                        if pickup_anchor && driver_id == Some(driver.id.as_str()) {
+                            driver.location = candidate.as_ref().map(|job| job.pickup);
+                        }
+                        let points = routing::plan_points(&driver, &jobs, candidate.as_ref());
+                        (driver.id, driver.location, points)
+                    })
+                    .collect::<Vec<_>>();
+                (revision, inputs)
+            };
+            let mut matrices = HashMap::new();
+            for (id, location, points) in inputs {
+                let matrix = self
+                    .routing
+                    .matrix(location, points)
+                    .await
+                    .map_err(ApiError::unprocessable)?;
+                matrices.insert(id, matrix);
+            }
+            if self.db()?.total_changes() == revision {
+                return Ok(PreparedTravel {
+                    revision,
+                    approximate: false,
+                    matrices,
+                });
+            }
+        }
+        Err(planning_changed())
     }
 
     fn db(&self) -> ApiResult<MutexGuard<'_, Connection>> {
@@ -128,51 +213,75 @@ impl AppState {
 
     /// A bounded server-side sweep, independent of foreground clients. The cursor
     /// rotates past attempted jobs so blocked older work cannot starve the queue.
-    pub fn dispatch_ready(&self) -> Result<usize, String> {
-        self.dispatch_ready_inner().map_err(|error| error.message)
+    pub async fn dispatch_ready(&self) -> Result<usize, String> {
+        self.dispatch_ready_inner()
+            .await
+            .map_err(|error| error.message)
     }
 
-    fn dispatch_ready_inner(&self) -> ApiResult<usize> {
+    async fn dispatch_ready_inner(&self) -> ApiResult<usize> {
+        // GPS updates, shift changes and the timer share one bounded sweep.
+        let Ok(_permit) = self.dispatch_workers.clone().try_acquire_owned() else {
+            return Ok(0);
+        };
         const MAX_DISPATCH_PER_TICK: usize = 32;
-        let now = self.clock.now();
-        let mut db = self.db()?;
-        let mut candidates = Vec::new();
-        for team in db::delivery_teams(&db)? {
-            for job in db::planning_deliveries(&db, &team)? {
-                if auto_dispatch_due(&job, now) {
-                    candidates.push((job.ready_at, job.id, team.clone()));
+        let candidates = {
+            let now = self.clock.now();
+            let db = self.db()?;
+            let mut candidates = Vec::new();
+            for team in db::delivery_teams(&db)? {
+                for job in db::planning_deliveries(&db, &team)? {
+                    if auto_dispatch_due(&job, now) {
+                        candidates.push((job.ready_at, job.id, team.clone()));
+                    }
                 }
             }
-        }
-        candidates.sort();
-        let mut cursor = self
-            .dispatch_cursor
-            .lock()
-            .map_err(|_| ApiError::internal("Dispatcher lock poisoned"))?;
-        let within_cohort = |candidate: &(i64, String, String), cursor: &DispatchCursor| {
-            let key = (candidate.0, candidate.1.clone());
-            cursor.after.as_ref().is_none_or(|after| &key > after)
-                && cursor.high_water.as_ref().is_some_and(|end| &key <= end)
-        };
-        if !candidates
-            .iter()
-            .any(|candidate| within_cohort(candidate, &cursor))
-        {
-            cursor.after = None;
-            cursor.high_water = candidates.last().map(|(at, id, _)| (*at, id.clone()));
-        }
-        // Snapshot the cohort boundary: continuous new arrivals cannot keep
-        // moving its end and prevent old blocked jobs from being retried.
-        candidates.retain(|candidate| within_cohort(candidate, &cursor));
-        let mut assigned = 0;
-        for (ready_at, id, team) in candidates.into_iter().take(MAX_DISPATCH_PER_TICK) {
-            cursor.after = Some((ready_at, id.clone()));
-            let tx = db.transaction()?;
-            let mut job = db::delivery(&tx, &team, &id)?;
-            if auto_dispatch_due(&job, now) && auto_assign(&tx, &team, &mut job, now)? {
-                assigned += 1;
+            candidates.sort();
+            let mut cursor = self
+                .dispatch_cursor
+                .lock()
+                .map_err(|_| ApiError::internal("Dispatcher lock poisoned"))?;
+            let within_cohort = |candidate: &(i64, String, String), cursor: &DispatchCursor| {
+                let key = (candidate.0, candidate.1.clone());
+                cursor.after.as_ref().is_none_or(|after| &key > after)
+                    && cursor.high_water.as_ref().is_some_and(|end| &key <= end)
+            };
+            if !candidates
+                .iter()
+                .any(|candidate| within_cohort(candidate, &cursor))
+            {
+                cursor.after = None;
+                cursor.high_water = candidates.last().map(|(at, id, _)| (*at, id.clone()));
             }
-            tx.commit()?;
+            candidates.retain(|candidate| within_cohort(candidate, &cursor));
+            candidates.truncate(MAX_DISPATCH_PER_TICK);
+            if let Some((ready_at, id, _)) = candidates.last() {
+                cursor.after = Some((*ready_at, id.clone()));
+            }
+            candidates
+        };
+        let mut assigned = 0;
+        for (_, id, team) in candidates {
+            let outcome: ApiResult<bool> = async {
+                let travel = self.prepare_travel(&team, Some(&id), None, false).await?;
+                let mut db = self.db()?;
+                travel.verify(&db)?;
+                let tx = db.transaction()?;
+                let mut job = db::delivery(&tx, &team, &id)?;
+                let now = self.clock.now();
+                let assigned = auto_dispatch_due(&job, now)
+                    && auto_assign(&tx, &team, &mut job, now, &travel)?;
+                tx.commit()?;
+                Ok(assigned)
+            }
+            .await;
+            match outcome {
+                Ok(true) => assigned += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(reason = %error.message, "One automatic dispatch deferred; continuing the bounded batch")
+                }
+            }
         }
         Ok(assigned)
     }
@@ -185,12 +294,53 @@ impl AppState {
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 ticks.tick().await;
-                if let Err(error) = state.dispatch_ready() {
+                if let Err(error) = state.dispatch_ready().await {
                     tracing::error!(%error, "Automatic dispatch will retry on the next tick");
                 }
             }
         })
     }
+}
+
+struct PreparedTravel {
+    revision: u64,
+    approximate: bool,
+    matrices: HashMap<String, TravelMatrix>,
+}
+struct MissingTravel;
+impl TravelTimes for MissingTravel {
+    fn seconds(&self, _from: Coordinate, _to: Coordinate) -> Option<i64> {
+        None
+    }
+    fn estimate(&self) -> routing::TravelEstimate {
+        routing::TravelEstimate {
+            mode: routing::TravelMode::ApproximateFallback,
+            notice: Some("Stima stradale non disponibile: aggiorna il percorso.".into()),
+            ..Default::default()
+        }
+    }
+}
+impl PreparedTravel {
+    fn times(&self, driver: &str) -> &dyn TravelTimes {
+        if self.approximate {
+            &Approximate
+        } else {
+            self.matrices
+                .get(driver)
+                .map(|matrix| matrix as &dyn TravelTimes)
+                .unwrap_or(&MissingTravel)
+        }
+    }
+    fn verify(&self, db: &Connection) -> ApiResult<()> {
+        if db.total_changes() == self.revision {
+            Ok(())
+        } else {
+            Err(planning_changed())
+        }
+    }
+}
+fn planning_changed() -> ApiError {
+    ApiError::conflict("Planning state changed while calculating road times; refresh and retry")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -478,41 +628,43 @@ async fn shift(
     if !(1..=8).contains(&input.capacity) {
         return Err(ApiError::bad_request("Capacity must be between 1 and 8"));
     }
-    let db = state.db()?;
-    let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
-    let jobs = db::planning_deliveries(&db, &principal.team_id)?;
-    let has_work = jobs.iter().any(|j| {
-        j.driver_id.as_deref() == Some(&principal.id)
-            && matches!(
-                j.status,
-                DeliveryStatus::Assigned | DeliveryStatus::PickedUp
-            )
-    });
-    if !input.active && has_work {
-        return Err(ApiError::conflict(
-            "Complete or reassign outstanding work before ending the shift",
-        ));
-    }
-    driver.active = input.active;
-    driver.capacity = input.capacity;
-    let route = planner::evaluate(
-        &driver,
-        &db::route_keys(&db, &principal.team_id, &driver.id)?,
-        &jobs,
-        state.clock.now(),
-    );
-    if route
-        .warnings
-        .iter()
-        .any(|w| w.to_lowercase().contains("capacity"))
-    {
-        return Err(ApiError::unprocessable(
-            "Capacity is too small for the committed route",
-        ));
-    }
-    db::save_driver(&db, &principal.team_id, &driver)?;
-    drop(db);
-    if let Err(error) = state.dispatch_ready() {
+    let driver = {
+        let db = state.db()?;
+        let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
+        let jobs = db::planning_deliveries(&db, &principal.team_id)?;
+        let has_work = jobs.iter().any(|j| {
+            j.driver_id.as_deref() == Some(&principal.id)
+                && matches!(
+                    j.status,
+                    DeliveryStatus::Assigned | DeliveryStatus::PickedUp
+                )
+        });
+        if !input.active && has_work {
+            return Err(ApiError::conflict(
+                "Complete or reassign outstanding work before ending the shift",
+            ));
+        }
+        driver.active = input.active;
+        driver.capacity = input.capacity;
+        let route = planner::evaluate(
+            &driver,
+            &db::route_keys(&db, &principal.team_id, &driver.id)?,
+            &jobs,
+            state.clock.now(),
+        );
+        if route
+            .warnings
+            .iter()
+            .any(|w| w.to_lowercase().contains("capacity"))
+        {
+            return Err(ApiError::unprocessable(
+                "Capacity is too small for the committed route",
+            ));
+        }
+        db::save_driver(&db, &principal.team_id, &driver)?;
+        driver
+    };
+    if let Err(error) = state.dispatch_ready().await {
         tracing::warn!(%error, "Shift saved; automatic dispatch will retry");
     }
     Ok(Json(driver))
@@ -530,18 +682,20 @@ async fn location(
             "Coordinates must be finite latitude/longitude values",
         ));
     }
-    let db = state.db()?;
-    let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
-    if !driver.active {
-        return Err(ApiError::conflict(
-            "Start a shift before reporting location",
-        ));
-    }
-    driver.location = Some(coordinate);
-    driver.location_updated_at = Some(state.clock.now());
-    db::save_driver(&db, &principal.team_id, &driver)?;
-    drop(db);
-    if let Err(error) = state.dispatch_ready() {
+    let driver = {
+        let db = state.db()?;
+        let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
+        if !driver.active {
+            return Err(ApiError::conflict(
+                "Start a shift before reporting location",
+            ));
+        }
+        driver.location = Some(coordinate);
+        driver.location_updated_at = Some(state.clock.now());
+        db::save_driver(&db, &principal.team_id, &driver)?;
+        driver
+    };
+    if let Err(error) = state.dispatch_ready().await {
         tracing::warn!(%error, "Location saved; automatic dispatch will retry");
     }
     Ok(Json(driver))
@@ -628,6 +782,34 @@ impl Idempotency {
         )?;
         Ok(())
     }
+}
+
+// A previously committed retry must remain replayable even if native planning is
+// busy or unrelated GPS writes make a new snapshot unstable. Preserve each
+// endpoint's existing target/ownership authorization before replaying.
+fn planning_replay(
+    state: &AppState,
+    principal: &Principal,
+    key: Option<&Idempotency>,
+    id: &str,
+    target_driver: Option<&str>,
+    require_ownership: bool,
+) -> ApiResult<Option<Delivery>> {
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    let db = state.db()?;
+    let job = db::delivery(&db, &principal.team_id, id)?;
+    if let Some(driver) = target_driver {
+        db::driver(&db, &principal.team_id, driver)?;
+    }
+    if require_ownership && job.driver_id.as_deref() != Some(principal.id.as_str()) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "Delivery is not assigned to this driver",
+        ));
+    }
+    key.replay(&db, principal)
 }
 
 async fn create_delivery(
@@ -732,7 +914,23 @@ async fn readiness(
         ));
     }
     let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/readiness"), &input)?;
-    let now = state.clock.now();
+    if let Some(saved) = planning_replay(&state, &principal, key.as_ref(), &id, None, false)? {
+        return Ok(Json(saved));
+    }
+    let travel = match state
+        .prepare_travel(&principal.team_id, Some(&id), None, false)
+        .await
+    {
+        Ok(travel) => travel,
+        Err(error) => {
+            if let Some(saved) =
+                planning_replay(&state, &principal, key.as_ref(), &id, None, false)?
+            {
+                return Ok(Json(saved));
+            }
+            return Err(error);
+        }
+    };
     let mut db = state.db()?;
     let tx = db.transaction()?;
     // Team ownership and capability always precede idempotency replay.
@@ -745,6 +943,8 @@ async fn readiness(
     {
         return Ok(Json(saved));
     }
+    travel.verify(&tx)?;
+    let now = state.clock.now();
     if matches!(
         job.status,
         DeliveryStatus::PickedUp | DeliveryStatus::Delivered
@@ -759,7 +959,7 @@ async fn readiness(
     // Confirming an already-confirmed order is a no-op, even with a new key:
     // repeated taps must not extend its original pickup target.
     if !(input.ready_in_minutes == 0 && job.readiness_state == ReadinessState::Ready) {
-        let mut jobs = ensure_onboard_guards(&tx, &principal.team_id, now)?;
+        let mut jobs = ensure_onboard_guards(&tx, &principal.team_id, now, &travel)?;
         job.ready_at = now.saturating_add(input.ready_in_minutes * 60);
         job.readiness_state = if input.ready_in_minutes == 0 {
             ReadinessState::Ready
@@ -778,7 +978,14 @@ async fn readiness(
         if let Some(driver_id) = &job.driver_id {
             let driver = db::driver(&tx, &principal.team_id, driver_id)?;
             let current = db::route_keys(&tx, &principal.team_id, driver_id)?;
-            let (keys, _) = planner::replan_readiness(&driver, &current, &jobs, &job, now);
+            let (keys, _) = planner::replan_readiness_with_travel(
+                &driver,
+                &current,
+                &jobs,
+                &job,
+                now,
+                travel.times(&driver.id),
+            );
             db::save_route(&tx, &principal.team_id, driver_id, &keys)?;
         }
         // Record the fact even if the updated plan is late. GET route exposes
@@ -786,7 +993,7 @@ async fn readiness(
         db::save_delivery(&tx, &principal.team_id, &job)?;
     }
     if auto_dispatch_due(&job, now) {
-        auto_assign(&tx, &principal.team_id, &mut job, now)?;
+        auto_assign(&tx, &principal.team_id, &mut job, now, &travel)?;
     }
     if let Some(key) = key {
         key.save(&tx, &principal, &job)?;
@@ -802,8 +1009,14 @@ fn auto_dispatch_due(job: &Delivery, now: i64) -> bool {
         && job.readiness_at().is_some_and(|ready| ready <= now)
 }
 
-fn auto_assign(db: &Connection, team_id: &str, job: &mut Delivery, now: i64) -> ApiResult<bool> {
-    let jobs = ensure_onboard_guards(db, team_id, now)?;
+fn auto_assign(
+    db: &Connection,
+    team_id: &str,
+    job: &mut Delivery,
+    now: i64,
+    travel: &PreparedTravel,
+) -> ApiResult<bool> {
+    let jobs = ensure_onboard_guards(db, team_id, now, travel)?;
     let mut choices = Vec::new();
     let mut active_drivers = 0;
     for driver in db::drivers(db, team_id)? {
@@ -811,10 +1024,21 @@ fn auto_assign(db: &Connection, team_id: &str, job: &mut Delivery, now: i64) -> 
             active_drivers += 1;
         }
         let current = db::route_keys(db, team_id, &driver.id)?;
-        if let Some((keys, route)) =
-            planner::insert_for_dispatch(&driver, &current, &jobs, job, now)
-        {
-            let baseline = planner::evaluate(&driver, &current, &jobs, now);
+        if let Some((keys, route)) = planner::insert_for_dispatch_with_travel(
+            &driver,
+            &current,
+            &jobs,
+            job,
+            now,
+            travel.times(&driver.id),
+        ) {
+            let baseline = planner::evaluate_with_travel(
+                &driver,
+                &current,
+                &jobs,
+                now,
+                travel.times(&driver.id),
+            );
             let position_quality = if planner::location_is_fresh(&driver, now) {
                 0
             } else if driver.location.is_some() {
@@ -863,7 +1087,12 @@ fn auto_assign(db: &Connection, team_id: &str, job: &mut Delivery, now: i64) -> 
 
 /// Older serialized jobs lack the cumulative guard. Capture it once, within the
 /// first successful planning transaction, preserving their existing commitments.
-fn ensure_onboard_guards(db: &Connection, team_id: &str, now: i64) -> ApiResult<Vec<Delivery>> {
+fn ensure_onboard_guards(
+    db: &Connection,
+    team_id: &str,
+    now: i64,
+    travel: &PreparedTravel,
+) -> ApiResult<Vec<Delivery>> {
     let mut jobs = db::planning_deliveries(db, team_id)?;
     let pending: Vec<_> = jobs
         .iter()
@@ -876,11 +1105,12 @@ fn ensure_onboard_guards(db: &Connection, team_id: &str, now: i64) -> ApiResult<
         .collect();
     for (id, driver_id) in pending {
         let driver = db::driver(db, team_id, &driver_id)?;
-        let route = planner::evaluate(
+        let route = planner::evaluate_with_travel(
             &driver,
             &db::route_keys(db, team_id, &driver_id)?,
             &jobs,
             now,
+            travel.times(&driver.id),
         );
         if let Some(job) = jobs.iter_mut().find(|job| job.id == id) {
             job.onboard_deadline_at = planner::onboard_deadline(job, &route, now);
@@ -906,6 +1136,35 @@ async fn assign(
     let id = path_id(path)?;
     let input = json_body(body)?;
     let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/assign"), &input)?;
+    if let Some(saved) = planning_replay(
+        &state,
+        &principal,
+        key.as_ref(),
+        &id,
+        Some(&input.driver_id),
+        false,
+    )? {
+        return Ok(Json(saved));
+    }
+    let travel = match state
+        .prepare_travel(&principal.team_id, Some(&id), None, false)
+        .await
+    {
+        Ok(travel) => travel,
+        Err(error) => {
+            if let Some(saved) = planning_replay(
+                &state,
+                &principal,
+                key.as_ref(),
+                &id,
+                Some(&input.driver_id),
+                false,
+            )? {
+                return Ok(Json(saved));
+            }
+            return Err(error);
+        }
+    };
     let mut db = state.db()?;
     let tx = db.transaction()?;
     let mut job = db::delivery(&tx, &principal.team_id, &id)?;
@@ -918,6 +1177,7 @@ async fn assign(
     {
         return Ok(Json(saved));
     }
+    travel.verify(&tx)?;
     if matches!(
         job.status,
         DeliveryStatus::PickedUp | DeliveryStatus::Delivered
@@ -939,7 +1199,7 @@ async fn assign(
             "Driver location is older than 5 minutes; request an update",
         ));
     }
-    let jobs = ensure_onboard_guards(&tx, &principal.team_id, state.clock.now())?;
+    let jobs = ensure_onboard_guards(&tx, &principal.team_id, state.clock.now(), &travel)?;
     let current = db::route_keys(&tx, &principal.team_id, &driver.id)?;
     if current
         .iter()
@@ -952,12 +1212,19 @@ async fn assign(
             "Driver route limit reached (32 outstanding stops)",
         ));
     }
-    let (keys, _) =
-        planner::insert(&driver, &current, &jobs, &job, state.clock.now()).ok_or_else(|| {
-            ApiError::unprocessable(
-                "No feasible insertion: check capacity, readiness, deadline, and maximum ride time",
-            )
-        })?;
+    let (keys, _) = planner::insert_with_travel(
+        &driver,
+        &current,
+        &jobs,
+        &job,
+        state.clock.now(),
+        travel.times(&driver.id),
+    )
+    .ok_or_else(|| {
+        ApiError::unprocessable(
+            "No feasible insertion: check capacity, readiness, deadline, and maximum ride time",
+        )
+    })?;
     if let Some(change) = route_after_removal(
         &tx,
         &principal.team_id,
@@ -965,6 +1232,7 @@ async fn assign(
         &driver.id,
         &jobs,
         state.clock.now(),
+        &travel,
     )? {
         if change.introduces_violation {
             return Err(ApiError::unprocessable("Reassignment introduces a new constraint violation in the previous driver's remaining route"));
@@ -1007,6 +1275,29 @@ async fn status(
         ));
     }
     let key = Idempotency::parse(&headers, &format!("/deliveries/{id}/status"), &input)?;
+    if let Some(saved) = planning_replay(&state, &principal, key.as_ref(), &id, None, true)? {
+        return Ok(Json(saved));
+    }
+    let travel = if input.status == DeliveryStatus::PickedUp {
+        Some(
+            match state
+                .prepare_travel(&principal.team_id, Some(&id), Some(&principal.id), true)
+                .await
+            {
+                Ok(travel) => travel,
+                Err(error) => {
+                    if let Some(saved) =
+                        planning_replay(&state, &principal, key.as_ref(), &id, None, true)?
+                    {
+                        return Ok(Json(saved));
+                    }
+                    return Err(error);
+                }
+            },
+        )
+    } else {
+        None
+    };
     let mut db = state.db()?;
     let tx = db.transaction()?;
     let mut job = db::delivery(&tx, &principal.team_id, &id)?;
@@ -1023,6 +1314,9 @@ async fn status(
         .flatten()
     {
         return Ok(Json(saved));
+    }
+    if let Some(travel) = &travel {
+        travel.verify(&tx)?;
     }
     let driver = db::driver(&tx, &principal.team_id, &principal.id)?;
     if !driver.active {
@@ -1075,7 +1369,16 @@ async fn status(
         let mut pickup_anchor = driver.clone();
         pickup_anchor.location = Some(job.pickup);
         pickup_anchor.location_updated_at = Some(now);
-        let committed = planner::evaluate(&pickup_anchor, &keys, &jobs, now);
+        let committed = planner::evaluate_with_travel(
+            &pickup_anchor,
+            &keys,
+            &jobs,
+            now,
+            travel
+                .as_ref()
+                .expect("pickup has a prepared matrix")
+                .times(&driver.id),
+        );
         job.onboard_deadline_at = planner::onboard_deadline(&job, &committed, now);
     }
     db::save_delivery(&tx, &principal.team_id, &job)?;
@@ -1103,6 +1406,7 @@ fn route_after_removal(
     target_driver: &str,
     jobs: &[Delivery],
     now: i64,
+    travel: &PreparedTravel,
 ) -> ApiResult<Option<SourceRouteChange>> {
     let Some(source_id) = candidate.driver_id.as_deref() else {
         return Ok(None);
@@ -1112,14 +1416,15 @@ fn route_after_removal(
     }
     let source = db::driver(db, team_id, source_id)?;
     let mut keys = db::route_keys(db, team_id, source_id)?;
-    let before = planner::evaluate(&source, &keys, jobs, now);
+    let before = planner::evaluate_with_travel(&source, &keys, jobs, now, travel.times(&source.id));
     keys.retain(|key| key.delivery_id != candidate.id);
     let remaining: Vec<Delivery> = jobs
         .iter()
         .filter(|job| job.id != candidate.id)
         .cloned()
         .collect();
-    let route = planner::evaluate(&source, &keys, &remaining, now);
+    let route =
+        planner::evaluate_with_travel(&source, &keys, &remaining, now, travel.times(&source.id));
     let introduces_violation = route
         .warnings
         .iter()
@@ -1141,14 +1446,19 @@ fn route_after_removal(
     }))
 }
 
-fn get_route(state: &AppState, team_id: &str, driver_id: &str) -> ApiResult<Route> {
+async fn get_route(state: &AppState, team_id: &str, driver_id: &str) -> ApiResult<Route> {
+    let travel = state
+        .prepare_travel(team_id, None, Some(driver_id), false)
+        .await?;
     let db = state.db()?;
+    travel.verify(&db)?;
     let driver = db::driver(&db, team_id, driver_id)?;
-    Ok(planner::evaluate(
+    Ok(planner::evaluate_with_travel(
         &driver,
         &db::route_keys(&db, team_id, driver_id)?,
         &db::planning_deliveries(&db, team_id)?,
         state.clock.now(),
+        travel.times(driver_id),
     ))
 }
 async fn own_route(
@@ -1156,7 +1466,9 @@ async fn own_route(
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<Route>> {
     principal.require("driver")?;
-    Ok(Json(get_route(&state, &principal.team_id, &principal.id)?))
+    Ok(Json(
+        get_route(&state, &principal.team_id, &principal.id).await?,
+    ))
 }
 async fn driver_route(
     State(state): State<AppState>,
@@ -1165,7 +1477,7 @@ async fn driver_route(
 ) -> ApiResult<Json<Route>> {
     principal.require("dispatcher")?;
     let id = path_id(path)?;
-    Ok(Json(get_route(&state, &principal.team_id, &id)?))
+    Ok(Json(get_route(&state, &principal.team_id, &id).await?))
 }
 async fn suggestions(
     State(state): State<AppState>,
@@ -1174,7 +1486,11 @@ async fn suggestions(
 ) -> ApiResult<Json<Vec<Suggestion>>> {
     principal.require("dispatcher")?;
     let id = path_id(path)?;
+    let travel = state
+        .prepare_travel(&principal.team_id, Some(&id), None, false)
+        .await?;
     let db = state.db()?;
+    travel.verify(&db)?;
     let job = db::delivery(&db, &principal.team_id, &id)?;
     if matches!(
         job.status,
@@ -1201,13 +1517,34 @@ async fn suggestions(
         {
             continue;
         }
-        if route_after_removal(&db, &principal.team_id, &job, &driver.id, &jobs, now)?
-            .is_some_and(|change| change.introduces_violation)
+        if route_after_removal(
+            &db,
+            &principal.team_id,
+            &job,
+            &driver.id,
+            &jobs,
+            now,
+            &travel,
+        )?
+        .is_some_and(|change| change.introduces_violation)
         {
             continue;
         }
-        if let Some((_, route)) = planner::insert(&driver, &current, &jobs, &job, now) {
-            let baseline = planner::evaluate(&driver, &current, &jobs, now);
+        if let Some((_, route)) = planner::insert_with_travel(
+            &driver,
+            &current,
+            &jobs,
+            &job,
+            now,
+            travel.times(&driver.id),
+        ) {
+            let baseline = planner::evaluate_with_travel(
+                &driver,
+                &current,
+                &jobs,
+                now,
+                travel.times(&driver.id),
+            );
             let priority = planner::incremental_priority_cost(&route, &baseline, &jobs);
             result.push((
                 priority,
@@ -1244,8 +1581,8 @@ mod dispatch_tests {
         }
     }
 
-    #[test]
-    fn bounded_sweeps_rotate_past_blocked_work_and_never_assign_twice() {
+    #[tokio::test]
+    async fn bounded_sweeps_rotate_past_blocked_work_and_never_assign_twice() {
         let dir = tempfile::tempdir().unwrap();
         let state =
             AppState::open_with_clock(dir.path().join("dispatch.db"), true, Arc::new(FixedClock))
@@ -1281,16 +1618,16 @@ mod dispatch_tests {
             }
         }
         assert_eq!(
-            state.dispatch_ready().unwrap(),
+            state.dispatch_ready().await.unwrap(),
             0,
             "first batch contains 32 physically oversized jobs"
         );
         assert_eq!(
-            state.dispatch_ready().unwrap(),
+            state.dispatch_ready().await.unwrap(),
             1,
             "later feasible job must not starve behind oversized work"
         );
-        assert_eq!(state.dispatch_ready().unwrap(), 0);
+        assert_eq!(state.dispatch_ready().await.unwrap(), 0);
         let db = state.db().unwrap();
         assert_eq!(
             db::delivery(&db, "demo", &good_id).unwrap().status,
@@ -1307,8 +1644,8 @@ mod dispatch_tests {
         );
     }
 
-    #[test]
-    fn a_fixed_cohort_retries_old_work_despite_continuous_new_arrivals() {
+    #[tokio::test]
+    async fn a_fixed_cohort_retries_old_work_despite_continuous_new_arrivals() {
         let dir = tempfile::tempdir().unwrap();
         let state =
             AppState::open_with_clock(dir.path().join("fair.db"), true, Arc::new(FixedClock))
@@ -1344,7 +1681,7 @@ mod dispatch_tests {
                 db::save_delivery(&db, "demo", &make_job(index, 8)).unwrap();
             }
         }
-        assert_eq!(state.dispatch_ready().unwrap(), 0);
+        assert_eq!(state.dispatch_ready().await.unwrap(), 0);
         {
             let db = state.db().unwrap();
             let mut driver = db::driver(&db, "demo", "driver-1").unwrap();
@@ -1358,12 +1695,294 @@ mod dispatch_tests {
                     db::save_delivery(&db, "demo", &make_job(index, 8)).unwrap();
                 }
             }
-            state.dispatch_ready().unwrap();
+            state.dispatch_ready().await.unwrap();
         }
         let db = state.db().unwrap();
         assert_eq!(
             db::delivery(&db, "demo", &old.id).unwrap().status,
             DeliveryStatus::Assigned
         );
+    }
+}
+
+#[cfg(test)]
+mod routing_snapshot_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now(&self) -> i64 {
+            1000
+        }
+    }
+    fn setup() -> (AppState, Arc<routing::TestControl>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let (routing, control) = RoutingService::controlled();
+        let state =
+            AppState::open_with_clock(dir.path().join("routing.db"), true, Arc::new(FixedClock))
+                .unwrap()
+                .with_routing(routing);
+        {
+            let db = state.db().unwrap();
+            let mut driver = db::driver(&db, "demo", "driver-1").unwrap();
+            driver.active = true;
+            driver.capacity = 2;
+            driver.location = Some(Coordinate {
+                lat: 36.715,
+                lng: 15.09,
+            });
+            driver.location_updated_at = Some(1000);
+            db::save_driver(&db, "demo", &driver).unwrap();
+        }
+        (state, control, dir)
+    }
+    fn job(state: &AppState, id: &str, due: bool) -> Delivery {
+        let mut job = NewDelivery {
+            shop_name: "Synthetic".into(),
+            pickup_address: "A".into(),
+            dropoff_address: "B".into(),
+            pickup: Coordinate {
+                lat: 36.716,
+                lng: 15.09,
+            },
+            dropoff: Coordinate {
+                lat: 36.717,
+                lng: 15.091,
+            },
+            ready_at: Some(1000),
+            deadline_at: 5000,
+            load_units: 1,
+            max_ride_seconds: 1800,
+            restaurant_id: None,
+        }
+        .into_delivery(1000);
+        job.id = id.into();
+        if due {
+            job.readiness_revision = 1;
+        }
+        db::save_delivery(&state.db().unwrap(), "demo", &job).unwrap();
+        job
+    }
+    fn principal(driver: bool) -> Principal {
+        let role = if driver { "driver" } else { "dispatcher" };
+        Principal {
+            id: if driver { "driver-1" } else { "dispatcher-1" }.into(),
+            name: "Fixture".into(),
+            role: role.into(),
+            roles: vec![role.into()],
+            team_id: "demo".into(),
+            team_name: "Demo".into(),
+        }
+    }
+    fn headers(key: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", key.parse().unwrap());
+        headers
+    }
+    #[tokio::test]
+    async fn matrix_await_releases_sql_and_retries_changed_gps() {
+        let (state, control, _dir) = setup();
+        let candidate = job(&state, "a", false);
+        control.block_next.store(true, Ordering::SeqCst);
+        let planned = {
+            let state = state.clone();
+            tokio::spawn(async move { state.prepare_travel("demo", Some("a"), None, false).await })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            control.started.notified(),
+        )
+        .await
+        .unwrap();
+        let new_location = Coordinate {
+            lat: 36.714,
+            lng: 15.09,
+        };
+        {
+            let db = state
+                .db
+                .try_lock()
+                .expect("SQL must be unlocked during native work");
+            let mut driver = db::driver(&db, "demo", "driver-1").unwrap();
+            driver.location = Some(new_location);
+            db::save_driver(&db, "demo", &driver).unwrap();
+        }
+        control.release.notify_one();
+        let prepared = planned.await.unwrap().unwrap();
+        prepared.verify(&state.db().unwrap()).unwrap();
+        assert!(control.calls.load(Ordering::SeqCst) >= 2);
+        assert!(prepared
+            .times("driver-1")
+            .seconds(new_location, candidate.pickup)
+            .is_some());
+        assert_eq!(
+            prepared.times("driver-1").seconds(
+                Coordinate {
+                    lat: 36.715,
+                    lng: 15.09
+                },
+                candidate.pickup
+            ),
+            None
+        );
+    }
+    #[tokio::test]
+    async fn pickup_matrix_uses_restaurant_origin_without_overwriting_reported_gps() {
+        let (state, _control, _dir) = setup();
+        let candidate = job(&state, "a", false);
+        let driver = db::driver(&state.db().unwrap(), "demo", "driver-1").unwrap();
+        let gps = driver.location.unwrap();
+        let pickup = state
+            .prepare_travel("demo", Some("a"), Some("driver-1"), true)
+            .await
+            .unwrap();
+        let times = pickup.times("driver-1");
+        assert!(times.seconds(candidate.pickup, candidate.dropoff).is_some());
+        assert_eq!(times.seconds(gps, candidate.dropoff), None);
+        let stored = db::driver(&state.db().unwrap(), "demo", "driver-1").unwrap();
+        assert_eq!(stored.location, driver.location);
+        assert_eq!(stored.location_updated_at, driver.location_updated_at);
+        let ordinary = state
+            .prepare_travel("demo", Some("a"), Some("driver-1"), false)
+            .await
+            .unwrap();
+        assert!(ordinary
+            .times("driver-1")
+            .seconds(gps, candidate.pickup)
+            .is_some());
+    }
+    #[tokio::test]
+    async fn committed_retries_and_dropoff_do_not_wait_for_routing() {
+        let (state, control, _dir) = setup();
+        job(&state, "a", false);
+        for repeat in [false, true] {
+            control.fail_next.store(repeat, Ordering::SeqCst);
+            let before = control.calls.load(Ordering::SeqCst);
+            let _ = assign(
+                State(state.clone()),
+                Extension(principal(false)),
+                Ok(Path("a".into())),
+                headers("assign-replay"),
+                Ok(Json(AssignInput {
+                    driver_id: "driver-1".into(),
+                })),
+            )
+            .await
+            .unwrap();
+            if repeat {
+                assert_eq!(before, control.calls.load(Ordering::SeqCst));
+            }
+        }
+        for repeat in [false, true] {
+            control.fail_next.store(repeat, Ordering::SeqCst);
+            let before = control.calls.load(Ordering::SeqCst);
+            let _ = readiness(
+                State(state.clone()),
+                Extension(principal(false)),
+                Ok(Path("a".into())),
+                headers("readiness-replay"),
+                Ok(Json(ReadinessInput {
+                    ready_in_minutes: 0,
+                    expected_revision: 0,
+                })),
+            )
+            .await
+            .unwrap();
+            if repeat {
+                assert_eq!(before, control.calls.load(Ordering::SeqCst));
+            }
+        }
+        for repeat in [false, true] {
+            control.fail_next.store(repeat, Ordering::SeqCst);
+            let before = control.calls.load(Ordering::SeqCst);
+            let _ = status(
+                State(state.clone()),
+                Extension(principal(true)),
+                Ok(Path("a".into())),
+                headers("pickup-replay"),
+                Ok(Json(StatusInput {
+                    status: DeliveryStatus::PickedUp,
+                })),
+            )
+            .await
+            .unwrap();
+            if repeat {
+                assert_eq!(before, control.calls.load(Ordering::SeqCst));
+            }
+        }
+        control.fail_next.store(true, Ordering::SeqCst);
+        let before = control.calls.load(Ordering::SeqCst);
+        let Json(delivered) = status(
+            State(state.clone()),
+            Extension(principal(true)),
+            Ok(Path("a".into())),
+            headers("dropoff-no-routing"),
+            Ok(Json(StatusInput {
+                status: DeliveryStatus::Delivered,
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(delivered.status, DeliveryStatus::Delivered);
+        assert_eq!(before, control.calls.load(Ordering::SeqCst));
+        assert!(control.fail_next.load(Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn one_failed_preparation_cannot_starve_later_ready_work() {
+        let (state, control, _dir) = setup();
+        job(&state, "a", true);
+        job(&state, "b", true);
+        control.fail_next.store(true, Ordering::SeqCst);
+        assert_eq!(state.dispatch_ready().await.unwrap(), 1);
+        {
+            let db = state.db().unwrap();
+            assert_eq!(
+                db::delivery(&db, "demo", "a").unwrap().status,
+                DeliveryStatus::Pending
+            );
+            assert_eq!(
+                db::delivery(&db, "demo", "b").unwrap().status,
+                DeliveryStatus::Assigned
+            );
+        }
+        assert_eq!(state.dispatch_ready().await.unwrap(), 1);
+    }
+    #[tokio::test]
+    async fn readiness_time_is_captured_after_native_wait() {
+        struct MutableClock(std::sync::atomic::AtomicI64);
+        impl Clock for MutableClock {
+            fn now(&self) -> i64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+        let (mut state, control, _dir) = setup();
+        job(&state, "a", false);
+        let clock = Arc::new(MutableClock(std::sync::atomic::AtomicI64::new(1000)));
+        state.clock = clock.clone();
+        control.block_next.store(true, Ordering::SeqCst);
+        let task = tokio::spawn(async move {
+            readiness(
+                State(state),
+                Extension(principal(false)),
+                Ok(Path("a".into())),
+                headers("readiness-clock"),
+                Ok(Json(ReadinessInput {
+                    ready_in_minutes: 5,
+                    expected_revision: 0,
+                })),
+            )
+            .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            control.started.notified(),
+        )
+        .await
+        .unwrap();
+        clock.0.store(1060, Ordering::SeqCst);
+        control.release.notify_one();
+        let Json(job) = task.await.unwrap().unwrap();
+        assert_eq!(job.readiness_updated_at, Some(1060));
+        assert_eq!(job.ready_at, 1360);
     }
 }

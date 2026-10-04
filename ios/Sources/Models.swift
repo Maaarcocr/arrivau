@@ -174,7 +174,7 @@ struct Delivery: Codable, Identifiable, Equatable {
     var localizedDispatchWaitingReason: String? {
         switch dispatchWaitingReason {
         case "no_active_driver": return "Nessun corriere in turno. L’assegnazione riproverà automaticamente."
-        case "capacity_or_route_limit": return "I corrieri in turno hanno il carico o il percorso al completo. L’assegnazione riproverà appena possibile."
+        case "capacity_or_route_limit": return "Percorso non assegnabile: verifica capacità, numero di tappe e viabilità. L’assegnazione riproverà appena possibile."
         case .some: return "Assegnazione in attesa. Controlla i corrieri in turno."
         case .none: return nil
         }
@@ -196,6 +196,16 @@ struct RouteStop: Codable, Identifiable, Equatable {
     var id: String { "\(deliveryId)-\(kind.rawValue)" }
     var title: String { kind.title }
 }
+struct RouteTravelEstimate: Codable, Equatable {
+    let mode: String
+    let approximate: Bool
+    let notice: String?
+    let mapDate: String?
+    let attribution: String?
+    static let legacy = RouteTravelEstimate(mode: "approximate", approximate: true,
+        notice: "Tempi di viaggio approssimativi: stima in linea d'aria, senza viabilità o traffico.",
+        mapDate: nil, attribution: nil)
+}
 struct DriverRoute: Codable, Equatable {
     let driverId: String
     let stops: [RouteStop]
@@ -205,6 +215,12 @@ struct DriverRoute: Codable, Equatable {
     let warnings: [String]
     let notices: [String]
     let estimatesAvailable: Bool
+    let travelEstimate: RouteTravelEstimate?
+    var unavailableEstimateMessage: String {
+        warnings.contains { $0.hasPrefix("Percorso stradale non raggiungibile per ") }
+            ? "Percorso non raggiungibile; orari non disponibili"
+            : "Posizione non disponibile; orari da verificare"
+    }
     var localizedWarnings: [String] { warnings.map(ItalianPresentation.routeWarning) }
     var localizedNotices: [String] {
         notices.map(ItalianPresentation.routeNotice).reduce(into: []) { result, text in
@@ -213,12 +229,12 @@ struct DriverRoute: Codable, Equatable {
     }
 
     init(driverId: String, stops: [RouteStop], travelSeconds: Int, finishAt: Int,
-         feasible: Bool, warnings: [String], notices: [String] = [], estimatesAvailable: Bool = true) {
+         feasible: Bool, warnings: [String], notices: [String] = [], estimatesAvailable: Bool = true, travelEstimate: RouteTravelEstimate? = nil) {
         self.driverId = driverId; self.stops = stops; self.travelSeconds = travelSeconds
         self.finishAt = finishAt; self.feasible = feasible; self.warnings = warnings; self.notices = notices
-        self.estimatesAvailable = estimatesAvailable
+        self.estimatesAvailable = estimatesAvailable; self.travelEstimate = travelEstimate
     }
-    private enum CodingKeys: String, CodingKey { case driverId, stops, travelSeconds, finishAt, feasible, warnings, notices, estimatesAvailable }
+    private enum CodingKeys: String, CodingKey { case driverId, stops, travelSeconds, finishAt, feasible, warnings, notices, estimatesAvailable, travelEstimate }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         driverId = try values.decode(String.self, forKey: .driverId)
@@ -229,6 +245,7 @@ struct DriverRoute: Codable, Equatable {
         warnings = try values.decode([String].self, forKey: .warnings)
         notices = try values.decodeIfPresent([String].self, forKey: .notices) ?? []
         estimatesAvailable = try values.decodeIfPresent(Bool.self, forKey: .estimatesAvailable) ?? true
+        travelEstimate = try values.decodeIfPresent(RouteTravelEstimate.self, forKey: .travelEstimate)
     }
 }
 struct Suggestion: Codable, Identifiable, Equatable {

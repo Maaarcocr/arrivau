@@ -5,7 +5,12 @@ edition = "2021"
 publish = false
 default-run = "arrivau-api"
 
+[features]
+default = []
+embedded-osrm = ["dep:osrm_interface"]
+
 [dependencies]
+osrm_interface = { version = "=0.8.2", optional = true, default-features = false, features = ["native"] }
 axum = "0.8"
 argon2 = { version = "0.5", features = ["std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
@@ -22,3 +27,9 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"
+
+
+[[bin]]
+name = "arrivau-routing-benchmark"
+path = "src/bin/arrivau-routing-benchmark.rs"
+required-features = ["embedded-osrm"]

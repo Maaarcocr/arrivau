@@ -29,6 +29,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("Non-loopback requires production mode, ARRIVAU_TLS_PROXY=1 and ARRIVAU_ALLOW_NON_LOOPBACK=1 for private HTTPS-proxy ingress".into());
     }
+    let routing =
+        arrivau_api::routing::RoutingService::from_env().map_err(std::io::Error::other)?;
     let state = match mode.as_str() {
         "demo" => {
             if env::var_os("ARRIVAU_AUTH_CONFIG").is_some() { return Err("Demo mode cannot load production account configuration".into()); }
@@ -48,7 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             AppState::open_production(path,config)
         }
         _ => return Err("Set ARRIVAU_MODE=production with account/HTTPS configuration, or explicitly choose ARRIVAU_MODE=demo for loopback fixtures".into()),
-    }.map_err(std::io::Error::other)?;
+    }.map_err(std::io::Error::other)?.with_routing(routing);
     let listener = tokio::net::TcpListener::bind(address).await?;
     let dispatcher = state.spawn_dispatcher(std::time::Duration::from_secs(5));
     axum::serve(listener, app(state))

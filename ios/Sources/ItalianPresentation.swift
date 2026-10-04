@@ -108,6 +108,7 @@ enum ItalianPresentation {
         "Ready-in minutes must be between 0 and 120": "Indica un numero di minuti compreso tra 0 e 120.",
         "Readiness cannot change after pickup": "La disponibilità non può cambiare dopo il ritiro.",
         "Readiness changed; refresh the delivery and try again": "La disponibilità è cambiata. Aggiorna la consegna e riprova.",
+        "Planning state changed while calculating road times; refresh and retry": "Il percorso è cambiato durante il calcolo. Aggiorna i dati e riprova.",
         "Set readiness before choosing a driver": "Indica quando sarà pronta prima di scegliere un corriere.",
         "Suggestions are only available before pickup": "I suggerimenti sono disponibili solo prima del ritiro."
     ]
@@ -122,6 +123,7 @@ enum ItalianPresentation {
         default: break
         }
         let prefixes = [
+            ("Percorso stradale non raggiungibile per ", "Percorso stradale non raggiungibile per la consegna "),
             ("Readiness is unknown for ", "Disponibilità da definire per la consegna "),
             ("Onboard delivery delay exceeded for ", "Tempo a bordo superato per la consegna "),
             ("Duplicate stop for ", "Tappa duplicata per la consegna "),

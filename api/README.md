@@ -178,8 +178,11 @@ silently expired. Do not independently prune them while clients can retry old ac
   completion, ordered route stops and retry records commit transactionally
 - The insertion planner checks capacity, readiness, pickup-before-dropoff, deadline,
   elapsed onboard time and the previous driver's route when reassigning
-- Travel remains Haversine × 1.3 at 25 km/h plus 60 seconds per stop, without roads,
-  traffic, one-way restrictions or global optimization. Human review is required
+- Default travel is Haversine × 1.3 at 25 km/h plus 60 seconds per stop. Optional
+  [embedded OSRM](../docs/embedded-routing.md) adds regional offline road times and
+  one-way restrictions, with explicit approximate fallback and no live traffic.
+  Native queries release SQLite and revalidate the snapshot before committing.
+  Human review remains required
 - A driver's location must be at most 300 seconds old for new assignments. Existing
   work stays visible with warnings. At most 32 outstanding route stops are allowed
 - Drivers complete only their committed next stop; pickup readiness is enforced.
@@ -208,4 +211,4 @@ acceptance checklist; a passing Rust test suite does not establish those outcome
 
 ## Restaurants and automatic readiness dispatch
 
-New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version3 prevents unsafe older-backend rollback; take a verified backup before upgrading. This change retains the approximate travel model.
+New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version3 prevents unsafe older-backend rollback; take a verified backup before upgrading. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.

@@ -35,3 +35,8 @@ xcuserdata/
 /arrivau-signing/
 *.key.pem
 *.certSigningRequest
+
+# Optional, operator-prepared native routing graph and build outputs
+/.osrm-install/
+*.osrm.*
+*.osm.pbf

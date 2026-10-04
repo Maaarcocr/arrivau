@@ -598,7 +598,7 @@ final class DeliveryStore: ObservableObject {
                (stop.kind == .pickup && result.status == .pickedUp) || (stop.kind == .dropoff && result.status == .delivered) {
                 self.route = DriverRoute(driverId: route.driverId, stops: Array(route.stops.dropFirst()),
                                          travelSeconds: route.travelSeconds, finishAt: route.finishAt,
-                                         feasible: route.feasible, warnings: route.warnings, notices: route.notices, estimatesAvailable: route.estimatesAvailable)
+                                         feasible: route.feasible, warnings: route.warnings, notices: route.notices, estimatesAvailable: route.estimatesAvailable, travelEstimate: route.travelEstimate)
             }
         }
     }

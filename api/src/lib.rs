@@ -1,6 +1,7 @@
 pub mod auth;
 mod db;
 mod error;
+mod invites;
 pub mod model;
 pub mod planner;
 pub mod routing;
@@ -18,7 +19,6 @@ use axum::{
 };
 use error::{ApiError, ApiResult};
 use model::*;
-use rand_core::{OsRng, RngCore};
 use routing::{Approximate, RoutingService, TravelMatrix, TravelTimes};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -203,6 +203,19 @@ impl AppState {
             }
         }
         Err(planning_changed())
+    }
+
+    // Recheck durable membership after reading the body and under the mutation transaction.
+    fn require_current_driver(&self, db: &Connection, principal: &Principal) -> ApiResult<()> {
+        if let Authentication::Production(config) = self.authentication.as_ref() {
+            let account =
+                auth::account_by_id(db, config, &principal.id)?.ok_or_else(auth::unauthorized)?;
+            if account.team_id(config) != principal.team_id {
+                return Err(auth::unauthorized());
+            }
+            account.principal(config).require("driver")?;
+        }
+        Ok(())
     }
 
     fn db(&self) -> ApiResult<MutexGuard<'_, Connection>> {
@@ -460,6 +473,8 @@ pub fn app(state: AppState) -> Router {
         .route("/me", get(me))
         .route("/session", get(session_identity).delete(logout))
         .route("/drivers", get(list_drivers))
+        .route("/invites", post(invites::issue))
+        .route("/invites/{id}", axum::routing::delete(invites::revoke))
         .route(
             "/restaurants",
             get(list_restaurants).post(create_restaurant),
@@ -480,6 +495,7 @@ pub fn app(state: AppState) -> Router {
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),
         )
         .route("/v1/session", post(login))
+        .route("/v1/invites/redeem", post(invites::redeem))
         .nest("/v1", v1)
         .fallback(|| async { ApiError::not_found("Endpoint not found") })
         .method_not_allowed_fallback(|| async {
@@ -523,11 +539,7 @@ async fn login(
     }
     let username = input.username.trim().to_ascii_lowercase();
     auth::reserve_login(&*state.db()?, &username, state.clock.now())?;
-    let account = config
-        .accounts
-        .iter()
-        .find(|a| a.username == username)
-        .cloned();
+    let account = auth::account_by_username(&*state.db()?, config, &username)?;
     // Unknown usernames still perform one Argon2 verification to avoid a cheap timing oracle.
     let hash = account
         .as_ref()
@@ -551,17 +563,17 @@ async fn login(
     .await
     .map_err(ApiError::internal)?;
     let account = account.filter(|_| valid).ok_or_else(auth::unauthorized)?;
-    let mut bytes = [0u8; 32];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .map_err(ApiError::internal)?;
-    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let token = auth::random_token()?;
     let now = state.clock.now();
     let expires_at = now + config.session_ttl_seconds;
-    let db = state.db()?;
-    db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now])?;
-    db.execute("DELETE FROM sessions WHERE account_id=?1 AND token_hash NOT IN (SELECT token_hash FROM sessions WHERE account_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 9)", [&account.id])?;
-    db.execute("INSERT INTO sessions(token_hash,account_id,account_fingerprint,expires_at,created_at,team_id) VALUES (?1,?2,?3,?4,?5,?6)",params![auth::digest(&token),account.id,account.fingerprint(config),expires_at,now,account.team_id(config)])?;
+    let mut db = state.db()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let current = auth::account_by_id(&tx, config, &account.id)?.ok_or_else(auth::unauthorized)?;
+    if current.fingerprint(config) != account.fingerprint(config) {
+        return Err(auth::unauthorized());
+    }
+    auth::save_session(&tx, &account, config, &token, now, expires_at)?;
+    tx.commit()?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -629,7 +641,9 @@ async fn shift(
         return Err(ApiError::bad_request("Capacity must be between 1 and 8"));
     }
     let driver = {
-        let db = state.db()?;
+        let mut connection = state.db()?;
+        let db = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        state.require_current_driver(&db, &principal)?;
         let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
         let jobs = db::planning_deliveries(&db, &principal.team_id)?;
         let has_work = jobs.iter().any(|j| {
@@ -662,6 +676,7 @@ async fn shift(
             ));
         }
         db::save_driver(&db, &principal.team_id, &driver)?;
+        db.commit()?;
         driver
     };
     if let Err(error) = state.dispatch_ready().await {
@@ -683,7 +698,9 @@ async fn location(
         ));
     }
     let driver = {
-        let db = state.db()?;
+        let mut connection = state.db()?;
+        let db = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        state.require_current_driver(&db, &principal)?;
         let mut driver = db::driver(&db, &principal.team_id, &principal.id)?;
         if !driver.active {
             return Err(ApiError::conflict(
@@ -693,6 +710,7 @@ async fn location(
         driver.location = Some(coordinate);
         driver.location_updated_at = Some(state.clock.now());
         db::save_driver(&db, &principal.team_id, &driver)?;
+        db.commit()?;
         driver
     };
     if let Err(error) = state.dispatch_ready().await {
@@ -1299,7 +1317,8 @@ async fn status(
         None
     };
     let mut db = state.db()?;
-    let tx = db.transaction()?;
+    let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    state.require_current_driver(&tx, &principal)?;
     let mut job = db::delivery(&tx, &principal.team_id, &id)?;
     if job.driver_id.as_deref() != Some(principal.id.as_str()) {
         return Err(ApiError::new(

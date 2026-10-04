@@ -302,7 +302,7 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     for table in ["deliveries", "route_stops", "idempotency"] {
         assert_eq!(

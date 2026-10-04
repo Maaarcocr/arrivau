@@ -3,6 +3,7 @@ import SwiftUI
 struct DispatcherView: View {
     @EnvironmentObject private var store: DeliveryStore
     @State private var showingCreate = false
+    @State private var showingInvite = false
     @State private var showingLegacyReview = false
     @State private var legacyReview: DeliveryStore.LegacyCreationReview?
     private var openDeliveries: [Delivery] {
@@ -59,6 +60,12 @@ struct DispatcherView: View {
                 }
             }
             Section {
+                if !store.isDemo {
+                    Button { showingInvite = true } label: {
+                        Label("Invita un corriere", systemImage: "person.badge.plus")
+                    }
+                    .disabled(store.isMutating).accessibilityIdentifier("invite_driver")
+                }
                 ExpandableDetails("Corrieri · \(store.drivers.filter(\.active).count) in turno", identifier: "drivers_details") {
                     ForEach(store.drivers) { driver in
                         VStack(alignment: .leading, spacing: 5) {
@@ -93,6 +100,7 @@ struct DispatcherView: View {
         .accessibilityIdentifier("dispatcher_screen")
         .refreshable { await store.refresh(force: true) }
         .sheet(isPresented: $showingCreate) { NewDeliveryView() }
+        .sheet(isPresented: $showingInvite) { CreateDriverInviteView() }
         .confirmationDialog("Rimuovere il recupero locale?", isPresented: $showingLegacyReview,
                             titleVisibility: .visible, presenting: legacyReview) { review in
             Button("Ho verificato: rimuovi il recupero", role: .destructive) {

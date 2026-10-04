@@ -81,7 +81,7 @@ Configure 1–100 accounts, including a dispatcher. IDs/usernames contain 1–64
 letters, digits, dot, underscore or hyphen, starting with a letter or digit;
 usernames must be lowercase. Session
 TTL must be 300–86400 seconds. Teams and capabilities come exclusively from this configuration.
-There is no public signup, role-selection endpoint, or password-reset endpoint.
+There is no open signup, role/team-selection endpoint, or password-reset endpoint. A configured account with dispatcher capability may issue one-use driver-only invitations for its own team; invited accounts are persisted in SQLite and must not be copied into this configuration. See [invitation operation and release gate](../docs/invites.md).
 
 ## Production-mode configuration
 
@@ -129,7 +129,7 @@ cross-fleet database reuse; legacy demo data is not imported into a pilot.
 - Sessions use 32 cryptographically random bytes, are stored only as SHA-256
   hashes, expire at a fixed deadline, and survive process restarts. Each account
   retains at most ten live sessions; no automatic refresh is implemented
-- Changing an account's hash, username, name or capabilities, or removing the account,
+- Changing a configured account's hash, username, name or capabilities, or removing it,
   revokes its sessions on the next restart. Team reassignments of previously bound
   account IDs are rejected rather than silently transferring access/history.
   Restart is required to apply config
@@ -149,6 +149,8 @@ cross-fleet database reuse; legacy demo data is not imported into a pilot.
 Production accepts no demo bearer tokens and seeds no fixture drivers. Account
 login is unavailable in demo mode. Demo session identity has `expires_at: null`;
 its public fixture tokens cannot truly be revoked and must never leave loopback.
+
+Invited accounts can be disabled and all their sessions revoked with the offline operator helper documented in `docs/invites.md`. Disabling preserves their team/history and is not account deletion. Removing a team from configuration disables its invited accounts on restart without relabeling their records.
 
 ## Durable retry contract
 
@@ -211,4 +213,4 @@ acceptance checklist; a passing Rust test suite does not establish those outcome
 
 ## Restaurants and automatic readiness dispatch
 
-New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version3 prevents unsafe older-backend rollback; take a verified backup before upgrading. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.
+New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version4 also protects invite-account state and prevents unsafe older-backend rollback; take a verified backup before upgrading. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.

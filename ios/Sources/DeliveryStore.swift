@@ -10,6 +10,10 @@ final class DeliveryStore: ObservableObject {
     var deliveries: [Delivery] {
         role == .driver ? availableDeliveries.filter { $0.driverId == principal?.id } : availableDeliveries
     }
+    @Published private(set) var pendingInvite: InviteLink?
+    @Published private(set) var inviteOutcomeUncertain = false
+    @Published private(set) var inviteErrorMessage: String?
+    @Published private(set) var isRedeemingInvite = false
     @Published private(set) var principal: Principal?
     @Published private var availableDeliveries: [Delivery] = []
     @Published private(set) var restaurants: [Restaurant] = []
@@ -56,6 +60,8 @@ final class DeliveryStore: ObservableObject {
     private var locationTask: Task<Void, Never>?
     private var expiryTask: Task<Void, Never>?
     private var revocationTasks: [UUID: Task<Void, Never>] = [:]
+    // Never persisted: interrupted redemptions use normal login recovery.
+    private var uncertainInviteTokens: Set<String> = []
     private var sessionId = UUID()
     private var refreshId = UUID()
     private var viewId = UUID()
@@ -145,6 +151,175 @@ final class DeliveryStore: ObservableObject {
         }
     }
 
+    /// Opening a link never changes the server or logs an existing user out.
+    func receiveInvite(_ input: String) {
+        guard !isDemo else { errorMessage = "Gli inviti sono disponibili solo nella prova pilota."; return }
+        guard let invitation = InviteLink(input: input) else {
+            errorMessage = "Invito non valido. Incolla il link Arrivau completo o il codice ricevuto dal responsabile."
+            return
+        }
+        guard principal == nil else { errorMessage = Self.alreadySignedInInviteMessage; return }
+        guard !canRetryRestore else {
+            errorMessage = "Verifica o dimentica prima l’accesso salvato, poi riapri l’invito."
+            return
+        }
+        guard !isMutating || isRestoringSession else {
+            errorMessage = "Attendi la fine dell’accesso in corso, poi riapri l’invito."
+            return
+        }
+        errorMessage = nil
+        pendingInvite = invitation
+        inviteOutcomeUncertain = uncertainInviteTokens.contains(invitation.token)
+        inviteErrorMessage = inviteOutcomeUncertain ? InviteCredentials.recoveryMessage : nil
+    }
+
+    func dismissInvite() {
+        if isRedeemingInvite, pendingInvite != nil {
+            markInviteUncertain()
+            // The HTTP request may have committed. Its late result is revoked, never installed.
+            sessionId = UUID()
+            isMutating = false
+            isRedeemingInvite = false
+            errorMessage = InviteCredentials.recoveryMessage
+        }
+        pendingInvite = nil
+        inviteErrorMessage = nil
+    }
+
+    private static let alreadySignedInInviteMessage = "Hai già effettuato l’accesso. Per usare l’invito con un altro account, esci prima e riapri il link."
+
+    private func markInviteUncertain() {
+        if let pendingInvite { uncertainInviteTokens.insert(pendingInvite.token) }
+        inviteOutcomeUncertain = true
+        inviteErrorMessage = InviteCredentials.recoveryMessage
+    }
+
+    /// A redemption is sent only once at a time, and never automatically replayed.
+    /// The account can exist even when its response, or local Keychain installation, fails.
+    func redeemInvite(username: String, password: String) async -> Bool {
+        guard !isDemo, !isMutating, principal == nil, !canRetryRestore,
+              let invitation = pendingInvite, !inviteOutcomeUncertain else { return false }
+        if let message = InviteCredentials.validationError(username: username, password: password) {
+            inviteErrorMessage = message
+            return false
+        }
+        let endpoint: URL
+        do { endpoint = try APIConfiguration.validatedURL(apiURL, mode: .pilot) }
+        catch { inviteErrorMessage = ItalianPresentation.errorMessage(error); return false }
+        didAttemptRestore = true
+        let attempt = UUID()
+        sessionId = attempt
+        isMutating = true
+        isRedeemingInvite = true
+        inviteErrorMessage = nil
+        errorMessage = nil
+        var dispatched = false
+        var accountCreated = false
+        defer { if sessionId == attempt { isMutating = false; isRedeemingInvite = false } }
+        do {
+            try Task.checkCancellation()
+            let anonymous = APIClient(baseURL: endpoint, token: "", session: urlSession)
+            dispatched = true
+            let result = try await anonymous.redeemInvite(token: invitation.token, username: username, password: password)
+            accountCreated = true
+            let api = APIClient(baseURL: endpoint, token: result.token, session: urlSession)
+            guard sessionId == attempt, !Task.isCancelled else {
+                if sessionId == attempt { markInviteUncertain() }
+                if !result.token.isEmpty { try? await api.revokeSession() }
+                return false
+            }
+            guard !result.token.isEmpty, result.user.role == "driver", result.user.roles == ["driver"],
+                  InviteTeamIdentity.isValid(id: result.user.teamId, name: result.user.teamName),
+                  result.expiresAt > Int(Date().timeIntervalSince1970) else {
+                if !result.token.isEmpty { try? await api.revokeSession() }
+                throw APIError(message: "Il server ha restituito una sessione non valida.", mutationOutcomeUncertain: true)
+            }
+            do {
+                try storage.saveSession(SavedSession(endpoint: endpoint.absoluteString, token: result.token, expiresAt: result.expiresAt))
+                try install(api, user: result.user, expiresAt: result.expiresAt, redeemingInvite: true)
+            } catch {
+                try? storage.clearSession()
+                try? await api.revokeSession()
+                throw error
+            }
+            inviteOutcomeUncertain = false
+            inviteErrorMessage = nil
+            await refresh(force: true)
+            guard sessionId == attempt else { return false }
+            startPolling()
+            return true
+        } catch {
+            guard sessionId == attempt else { return false }
+            let failure = error as? APIError
+            let unresolvedResponse = error is URLError || error is CancellationError
+                || failure?.mutationOutcomeUncertain == true || (300..<400).contains(failure?.statusCode ?? 0)
+            if accountCreated || (dispatched && unresolvedResponse) {
+                markInviteUncertain()
+            } else {
+                inviteErrorMessage = ItalianPresentation.errorMessage(error)
+            }
+            return false
+        }
+    }
+
+    func createInvite(name: String) async -> DriverInvite? {
+        guard !isDemo, validateSession(), role == .dispatcher, let issuer = principal,
+              issuer.supports(.dispatcher), let api = client, !isMutating else { return nil }
+        guard InviteTeamIdentity.isValid(id: issuer.teamId, name: issuer.teamName) else {
+            errorMessage = "La squadra dell’account non è valida. Accedi di nuovo prima di invitare un corriere."
+            return nil
+        }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let message = InviteCredentials.nameValidationError(name) { errorMessage = message; return nil }
+        let session = sessionId
+        isMutating = true
+        errorMessage = nil
+        defer { if session == sessionId { isMutating = false } }
+        do {
+            try Task.checkCancellation()
+            let invite = try await api.createInvite(name: name)
+            guard sessionId == session, !Task.isCancelled else {
+                try? await api.revokeInvite(id: invite.id)
+                return nil
+            }
+            guard invite.role == "driver", invite.link != nil, UUID(uuidString: invite.id) != nil,
+                  InviteTeamIdentity.isValid(id: invite.teamId, name: invite.teamName),
+                  invite.teamId == issuer.teamId, invite.teamName == issuer.teamName,
+                  invite.expiresAt > Int(Date().timeIntervalSince1970) else {
+                try? await api.revokeInvite(id: invite.id)
+                throw APIError(message: "Il server ha restituito un invito non valido. Non condividerlo.")
+            }
+            return invite
+        } catch {
+            guard sessionId == session else { return nil }
+            if !handleUnauthorized(error) {
+                if error is URLError || error is CancellationError || (error as? APIError)?.mutationOutcomeUncertain == true {
+                    errorMessage = "Creazione dell’invito non confermata. Nessun link disponibile da condividere; un eventuale invito non condiviso scadrà entro 24 ore. Riprova solo se vuoi creare un nuovo invito."
+                } else { errorMessage = ItalianPresentation.errorMessage(error) }
+            }
+            return nil
+        }
+    }
+
+    func revokeInvite(_ invite: DriverInvite) async -> Bool {
+        guard !isDemo, validateSession(), role == .dispatcher, let issuer = principal,
+              issuer.supports(.dispatcher), let api = client, !isMutating,
+              InviteTeamIdentity.isValid(id: issuer.teamId, name: issuer.teamName),
+              invite.teamId == issuer.teamId else { return false }
+        let session = sessionId
+        isMutating = true
+        errorMessage = nil
+        defer { if session == sessionId { isMutating = false } }
+        do {
+            try await api.revokeInvite(id: invite.id)
+            return sessionId == session && !Task.isCancelled
+        } catch {
+            guard sessionId == session else { return false }
+            if !handleUnauthorized(error) { errorMessage = "Revoca non confermata. \(ItalianPresentation.errorMessage(error))" }
+            return false
+        }
+    }
+
     /// Restore authority only after the server validates the saved opaque session.
     /// Location sharing always needs a new explicit opt-in after app launch/login.
     func restoreSession(retry: Bool = false) async {
@@ -159,7 +334,7 @@ final class DeliveryStore: ObservableObject {
         do {
             guard let saved = try storage.loadSession() else { return }
             guard saved.expiresAt > Int(Date().timeIntervalSince1970), !saved.token.isEmpty else {
-                invalidateSession(message: "Sessione scaduta. Accedi di nuovo.")
+                invalidateSession(message: "Sessione scaduta. Accedi di nuovo.", preservingInvite: true)
                 return
             }
             let endpoint = try APIConfiguration.validatedURL(saved.endpoint)
@@ -168,7 +343,7 @@ final class DeliveryStore: ObservableObject {
             let identity = try await api.identity()
             guard sessionId == attempt, !Task.isCancelled else { return }
             guard let expiresAt = identity.expiresAt, expiresAt > Int(Date().timeIntervalSince1970), identity.user.serverRole != nil else {
-                invalidateSession(message: "Sessione non valida. Accedi di nuovo.")
+                invalidateSession(message: "Sessione non valida. Accedi di nuovo.", preservingInvite: true)
                 return
             }
             try storage.saveSession(SavedSession(endpoint: endpoint.absoluteString, token: saved.token, expiresAt: expiresAt))
@@ -177,7 +352,7 @@ final class DeliveryStore: ObservableObject {
             startPolling()
         } catch {
             guard sessionId == attempt else { return }
-            if handleUnauthorized(error) { return }
+            if handleUnauthorized(error, preservingInvite: true) { return }
             canRetryRestore = true
             errorMessage = "Accesso salvato non verificato. \(ItalianPresentation.errorMessage(error))"
         }
@@ -207,7 +382,7 @@ final class DeliveryStore: ObservableObject {
     }
     #endif
 
-    private func install(_ api: APIClient, user: Principal, expiresAt: Int?) throws {
+    private func install(_ api: APIClient, user: Principal, expiresAt: Int?, redeemingInvite: Bool = false) throws {
         let scope = CreationScope.current(endpoint: api.baseURL.absoluteString, user: user)
         let pending = user.supports(.dispatcher) ? try storage.loadCreation(scope: scope) : nil
         let restaurantRecovery = user.supports(.dispatcher) ? try storage.loadRestaurant(scope: scope) : nil
@@ -233,6 +408,11 @@ final class DeliveryStore: ObservableObject {
         availableDeliveries = []; drivers = []; currentDriver = nil; route = nil
         pendingActions = [:]; readinessNeedsRefresh = []; lastSyncedAt = nil; syncErrorMessage = nil; locationErrorMessage = nil
         scheduleExpiry()
+        if pendingInvite != nil {
+            pendingInvite = nil
+            inviteErrorMessage = nil
+            if !redeemingInvite { errorMessage = Self.alreadySignedInInviteMessage }
+        }
     }
 
     /// Select an already authorized capability without changing account, team or bearer.
@@ -280,7 +460,14 @@ final class DeliveryStore: ObservableObject {
         for task in pending { await task.value }
     }
 
-    private func invalidateSession(message: String?) {
+    private func invalidateSession(message: String?, preservingInvite: Bool = false) {
+        // A cold-launch invite survives rejection of an older saved session. Explicit logout,
+        // cancellation and invalidation of an active account still discard the invitation.
+        let queuedInvite = preservingInvite && !isRedeemingInvite ? pendingInvite : nil
+        if isRedeemingInvite { markInviteUncertain() }
+        pendingInvite = queuedInvite
+        inviteErrorMessage = queuedInvite != nil && inviteOutcomeUncertain ? InviteCredentials.recoveryMessage : nil
+        isRedeemingInvite = false
         sessionId = UUID()
         viewId = UUID()
         refreshId = UUID()
@@ -293,7 +480,7 @@ final class DeliveryStore: ObservableObject {
         principal = nil; role = nil; client = nil; currentDriver = nil
         restaurants = []; pendingRestaurant = nil; restaurantReadId = UUID(); loadingRestaurants = false; restaurantLoadError = nil
         availableDeliveries = []; drivers = []; route = nil
-        errorMessage = message; syncErrorMessage = nil; locationErrorMessage = nil
+        errorMessage = queuedInvite == nil ? message : nil; syncErrorMessage = nil; locationErrorMessage = nil
         pendingCreation = nil; creationScope = nil; pendingActions = [:]; readinessNeedsRefresh = []; legacyPendingCreation = nil
         createOutcomeUncertain = false
         sessionExpiresAt = nil
@@ -306,9 +493,9 @@ final class DeliveryStore: ObservableObject {
         }
     }
 
-    private func handleUnauthorized(_ error: Error) -> Bool {
+    private func handleUnauthorized(_ error: Error, preservingInvite: Bool = false) -> Bool {
         guard (error as? APIError)?.isUnauthorized == true else { return false }
-        invalidateSession(message: "Sessione scaduta o revocata. La condivisione della posizione è ferma. Accedi di nuovo.")
+        invalidateSession(message: "Sessione scaduta o revocata. La condivisione della posizione è ferma. Accedi di nuovo.", preservingInvite: preservingInvite)
         return true
     }
     @discardableResult private func validateSession() -> Bool {

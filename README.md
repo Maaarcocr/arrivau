@@ -35,6 +35,10 @@ For an optional local Mac archive, run `./scripts/archive-ios.sh` with the same 
 
 A successful upload confirms transfer to Apple, not completed processing, tester access or public release. Check the [workflow](.github/workflows/testflight.yml), [Apple upload guidance](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/) and [TestFlight overview](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/) when troubleshooting. Hosted HTTPS, backups and real-device behavior are covered by the [pilot runbook](docs/pilot-runbook.md).
 
+## Driver invitations (draft)
+
+A dispatcher can privately share a one-use, 24-hour driver invitation for their own Squadra. The recipient opens the link or pastes its code and chooses their own username/password. Team and driver-only access come from the server; existing configured dual-role accounts are unchanged. This draft must stay unpublished until its [account-deletion release gate](docs/invites.md#app-store-release-gate) is resolved. See [rollout, team boundaries and recovery](docs/invites.md). Invitations do not install the app or grant TestFlight access.
+
 ## What is included
 
 - `api/`: Axum HTTP API, Argon2id authentication, opaque sessions, server role checks, SQLite state and constrained insertion planner
@@ -93,7 +97,7 @@ The CI also builds the Release configuration for a generic physical iOS device w
 
 ## Pilot limits and safety
 
-- Individual operator-provisioned accounts, one team per account and one server process. Server-enforced team isolation; no self-service signup/reset, public team administration, audit-log service, billing or customer marketplace
+- Individual operator-provisioned accounts, one team per account and one server process. Server-enforced team isolation; invite-only driver signup, no self-service reset, public team administration, audit-log service, billing or customer marketplace
 - SQLite survives process restart on a persistent local disk; the operator owns backups, restore tests, retention, security and monitoring. Do not scale replicas or use network storage
 - Dispatchers save restaurants, create unassigned orders, and later mark them ready now or in a number of minutes. The server assigns automatically when readiness arrives, including least-bad timing fallbacks with warnings. Only the assigned driver confirms pickup/drop-off
 - The default travel model is Haversine × 1.3 at 25 km/h. [Optional embedded OSRM](docs/embedded-routing.md) provides offline road-time matrices with a separately prepared regional map. Approximation/fallback is labelled, traffic is not live, and the insertion planner is not globally optimal; people retain safety, food handling and driving decisions

@@ -92,12 +92,26 @@ struct APIClient {
     }
     private struct ErrorBody: Decodable { let error: String }
     private struct LoginBody: Encodable { let username: String; let password: String }
+    private struct InviteBody: Encodable { let name: String }
+    private struct RedeemInviteBody: Encodable { let token: String; let username: String; let password: String }
     private struct ShiftBody: Encodable { let active: Bool; let capacity: Int }
     private struct AssignmentBody: Encodable { let driverId: String }
     private struct StatusBody: Encodable { let status: DeliveryStatus }
 
     func login(username: String, password: String) async throws -> LoginSession {
         try await post("v1/session", body: LoginBody(username: username, password: password))
+    }
+    func createInvite(name: String) async throws -> DriverInvite {
+        try await post("v1/invites", body: InviteBody(name: name))
+    }
+    func revokeInvite(id: String) async throws {
+        guard UUID(uuidString: id) != nil else { throw APIError(message: "Invito non valido.") }
+        _ = try await response("v1/invites/\(id)", method: "DELETE", body: nil)
+    }
+    func redeemInvite(token: String, username: String, password: String) async throws -> LoginSession {
+        // Even an accidentally authenticated caller must not send an existing bearer here.
+        let anonymous = APIClient(baseURL: baseURL, token: "", session: session)
+        return try await anonymous.post("v1/invites/redeem", body: RedeemInviteBody(token: token, username: username, password: password))
     }
     func identity() async throws -> SessionIdentity { try await get("v1/session") }
     func revokeSession() async throws { _ = try await response("v1/session", method: "DELETE", body: nil) }

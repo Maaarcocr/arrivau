@@ -13,7 +13,7 @@ Follow [the pilot runbook](docs/pilot-runbook.md) for:
 3. Configuring a signed iPhone build with your endpoint, team and bundle ID
 4. Running the two-phone delivery and interruption checklist
 
-[The TestFlight guide](docs/testflight.md) includes an archive-only command and the explicit upload handoff. No server, Apple account, credentials or TestFlight build is created automatically. The owner supplies hosting and Apple signing/access.
+[The TestFlight guide](docs/testflight.md) includes an archive-only command and the explicit upload handoff. [Manual GitHub Actions signing/upload](docs/testflight-ci.md) is also prepared for building without a connected Mac; it requires owner-supplied signing assets and an explicit upload choice. No server, Apple account, credentials or TestFlight build is created automatically. The owner supplies hosting and Apple signing/access.
 
 Deployment templates: `deploy/Dockerfile`, `deploy/arrivau.service`, `deploy/pilot.env.example`, `deploy/Caddyfile.example`. Read [API configuration](api/README.md) before using them. Keep account files, password hashes, sessions and databases out of Git/logs.
 

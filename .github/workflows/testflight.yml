@@ -1,0 +1,102 @@
+name: Manual TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Archive verifies then deletes the IPA; upload also sends it to App Store Connect
+        type: choice
+        options: [archive, upload]
+        default: archive
+        required: true
+      build_number:
+        description: New positive integer build number (1–9999)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arrivau-testflight
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Check manual main-only opt-in
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate request before accessing signing secrets
+        env:
+          SELECTED_ACTION: ${{ inputs.action }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          SIGNING_ENABLED: ${{ vars.TESTFLIGHT_SIGNING_ENABLED }}
+          REQUIRE_APPROVAL: ${{ vars.TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/main ]] || {
+            echo 'Run this workflow manually with main selected.' >&2; exit 1;
+          }
+          [[ "$SIGNING_ENABLED" == true ]] || {
+            echo 'Owner setup is incomplete: TESTFLIGHT_SIGNING_ENABLED must be true.' >&2; exit 1;
+          }
+          [[ "$REQUIRE_APPROVAL" == '' || "$REQUIRE_APPROVAL" == false || "$REQUIRE_APPROVAL" == true ]] || {
+            echo 'TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL must be true, false, or unset.' >&2; exit 1;
+          }
+          [[ "$SELECTED_ACTION" == archive || "$SELECTED_ACTION" == upload ]]
+          [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]{0,3}$ ]]
+
+  approval:
+    name: Optional owner-configured environment gate
+    needs: preflight
+    if: vars.TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Configure this environment and its protections BEFORE enabling the optional gate.
+    # This job has no secrets; repository secrets in the signing job are not isolated by it.
+    environment: testflight
+    steps:
+      - run: echo 'The optional environment gate has completed.'
+
+  signing:
+    name: Sign, verify, and explicitly selected upload
+    needs: [preflight, approval]
+    if: >-
+      always() && !cancelled() && needs.preflight.result == 'success' &&
+      ((vars.TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL == 'true' && needs.approval.result == 'success') ||
+       (vars.TESTFLIGHT_REQUIRE_ENVIRONMENT_APPROVAL != 'true' && needs.approval.result == 'skipped'))
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install project generator before exposing credentials
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+          xcodegen --version
+      - name: Archive and verify; upload only when explicitly selected
+        id: signing
+        env:
+          TESTFLIGHT_SIGNING_ENABLED: ${{ vars.TESTFLIGHT_SIGNING_ENABLED }}
+          ARRIVAU_TEAM_ID: ${{ vars.ARRIVAU_TEAM_ID }}
+          ARRIVAU_BUNDLE_ID: ${{ vars.ARRIVAU_BUNDLE_ID }}
+          ARRIVAU_API_URL: ${{ vars.ARRIVAU_API_URL }}
+          SELECTED_ACTION: ${{ inputs.action }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          APPLE_DISTRIBUTION_P12_BASE64: ${{ secrets.APPLE_DISTRIBUTION_P12_BASE64 }}
+          APPLE_DISTRIBUTION_P12_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_P12_PASSWORD }}
+          APPLE_APP_STORE_PROFILE_BASE64: ${{ secrets.APPLE_APP_STORE_PROFILE_BASE64 }}
+          ASC_PRIVATE_KEY_BASE64: ${{ inputs.action == 'upload' && secrets.ASC_PRIVATE_KEY_BASE64 || '' }}
+          ASC_KEY_ID: ${{ inputs.action == 'upload' && secrets.ASC_KEY_ID || '' }}
+          ASC_ISSUER_ID: ${{ inputs.action == 'upload' && secrets.ASC_ISSUER_ID || '' }}
+        run: ./scripts/testflight-ci.sh "$SELECTED_ACTION" "$BUILD_NUMBER"
+      - name: Always remove temporary signing material and private build products
+        if: always()
+        run: ./scripts/testflight-ci.sh cleanup

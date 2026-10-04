@@ -1,5 +1,7 @@
 # Archive and TestFlight handoff
 
+For building without a connected Mac, use the new [manual GitHub Actions signing/upload guide](testflight-ci.md). Its default action validates an archive; upload is a separate explicit selection after secure owner setup. The instructions below remain an optional local-Xcode route.
+
 This repository prepares an archive workflow. **Nothing here automatically uploads a build.** Do not put Apple IDs, account passwords, App Store Connect keys, certificates or provisioning profiles in chat or Git. Use Xcode's account UI or a separately approved secure credential setup.
 
 ## Prerequisites supplied by the owner
@@ -38,4 +40,4 @@ No signed archive or successful Apple upload has been established merely by an u
 
 ## Future assisted publishing
 
-Assisted upload can use a connected Mac with Xcode and secure Apple setup, or a separately approved CI-signing setup. Team access, credentials and each consequential upload must be explicitly configured/authorized first. This change does not create an App Store Connect API key, add repository secrets or enable an upload workflow. Avoid adding persistent Apple credentials until the chosen upload route is clear.
+Assisted upload can use a connected Mac with Xcode and secure Apple setup, or a separately approved CI-signing setup. Team access, credentials and each consequential upload must be explicitly configured/authorized first. The manual CI workflow is prepared in `testflight.yml`, but this change does not create an App Store Connect API key, add repository secrets or run it. Its default is archive-only; see the CI guide for the explicit signing opt-in and upload choice. Avoid adding persistent Apple credentials until the chosen upload route is clear.

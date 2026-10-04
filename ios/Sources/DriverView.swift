@@ -200,7 +200,7 @@ private struct DriverShiftSheet: View {
                     if let updated = store.currentDriver?.locationUpdatedAt {
                         LocationAgeLabel(timestamp: updated, accessibilityID: "location_sent")
                     }
-                    Text("Interrompendo la condivisione o cambiando ruolo, gli aggiornamenti si fermano. L’ultima posizione rimane alla centrale.")
+                    Text("Passare tra Centrale e Corriere nello stesso account mantiene il consenso già dato. Ferma la condivisione, termina il turno o esci per interrompere gli aggiornamenti. L’ultima posizione rimane alla centrale.")
                         .font(.caption).foregroundStyle(.secondary)
                 } header: { Text("Condivisione posizione") }
                 if active {

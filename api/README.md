@@ -1,4 +1,4 @@
-# Rust API: supervised single-fleet pilot
+# Rust API: supervised team-isolated pilot
 
 The loopback fixture demo and individually authenticated phone pilot are separate
 modes and use separate SQLite databases. This repository prepares an operator-run
@@ -14,7 +14,8 @@ From the repository root:
 
 The script explicitly selects demo mode, binds `127.0.0.1:8080`, and defaults to
 `arrivau-demo.sqlite3`. `ARRIVAU_DEMO=1` remains a legacy explicit opt-in. Demo
-mode seeds two fixture drivers and accepts the three public demo bearer strings.
+mode seeds two original fixture drivers plus an isolated dual-role review fixture
+and accepts public demo bearer strings.
 Never proxy it, bind it to a LAN, or enter customer data. Non-loopback binding
 is rejected even when production ingress flags are supplied. It cannot load a
 production account configuration, and demo databases cannot become pilot databases.
@@ -22,8 +23,9 @@ production account configuration, and demo databases cannot become pilot databas
 ## Operator-managed pilot accounts
 
 Use one account per person, with stable IDs that are never recycled for someone
-else. Driver account IDs are also driver IDs in domain records. One database and
-configuration represent exactly one fleet; there is no multi-tenant server.
+else. Driver-capable account IDs are also driver IDs in domain records. One database
+and configuration hold operator-managed private teams. Each account has exactly
+one team; there is no platform-wide administrator API.
 
 Create a private, operator-managed JSON file outside the repository:
 
@@ -50,6 +52,15 @@ Create a private, operator-managed JSON file outside the repository:
 }
 ```
 
+The old configuration above remains supported: `fleet_id` is both the stable
+deployment ID and default/legacy team ID, and `role` grants one capability. To add
+an isolated team, supply `teams: [{"id":"...","name":"..."}]` (including the
+original fleet ID) and `team_id` on its accounts. Accounts can use
+`roles: ["dispatcher", "driver"]` for both capabilities. An optional `role` must
+belong to those capabilities; otherwise dispatcher is the dual-role default.
+The implicit legacy team display name is its ID; explicitly list it to give it
+a friendly name. See [the complete configuration and migration guide](../docs/teams-and-review.md).
+
 These placeholders deliberately fail validation. No production account/password
 is supplied in the repository. Generate each hash locally:
 
@@ -69,7 +80,7 @@ Argon2id v19, 19 MiB memory, two iterations, one lane, random 16-byte salt, and
 Configure 1–100 accounts, including a dispatcher. IDs/usernames contain 1–64 ASCII
 letters, digits, dot, underscore or hyphen, starting with a letter or digit;
 usernames must be lowercase. Session
-TTL must be 300–86400 seconds. Roles come exclusively from this configuration.
+TTL must be 300–86400 seconds. Teams and capabilities come exclusively from this configuration.
 There is no public signup, role-selection endpoint, or password-reset endpoint.
 
 ## Production-mode configuration
@@ -108,7 +119,8 @@ cross-fleet database reuse; legacy demo data is not imported into a pilot.
 
 - `POST /v1/session` with `{ "username": "...", "password": "..." }` returns
   HTTP 201 with `{ "token": "...", "expires_at": 1790000000, "user":
-  { "id": "...", "name": "...", "role": "driver" } }`
+  { "id": "...", "name": "...", "role": "driver", "roles": ["driver"],
+    "team_id": "...", "team_name": "..." } }`
 - `GET /v1/session` with `Authorization: Bearer <token>` returns `user` and
   `expires_at`; `GET /v1/me` retains the original user-only response
 - `DELETE /v1/session` revokes the presented session and returns HTTP 204
@@ -117,8 +129,10 @@ cross-fleet database reuse; legacy demo data is not imported into a pilot.
 - Sessions use 32 cryptographically random bytes, are stored only as SHA-256
   hashes, expire at a fixed deadline, and survive process restarts. Each account
   retains at most ten live sessions; no automatic refresh is implemented
-- Changing an account's hash, username, name or role, or removing the account,
-  revokes its sessions on the next restart. Restart is required to apply config
+- Changing an account's hash, username, name or capabilities, or removing the account,
+  revokes its sessions on the next restart. Team reassignments of previously bound
+  account IDs are rejected rather than silently transferring access/history.
+  Restart is required to apply config
   edits. Removing a driver disables new assignments but preserves route/history
   for dispatcher recovery. Resolve/reassign outstanding work before removal
 - For an emergency lost-device revocation, change that individual's hash or remove
@@ -147,8 +161,8 @@ Do not automatically mint a new key when the server may already have committed.
 The original successful response and request fingerprint commit in the same SQLite
 transaction as the domain mutation. Repeating the same authenticated account's key
 and request returns the original response, even after restart/new login. Reusing a
-key for a different endpoint, target or body returns 409. Account scopes are
-independent, and role/ownership checks still apply. Keys are optional for legacy
+key for a different endpoint, target or body returns 409. Team/account scopes are
+independent, and capability/team/ownership checks still apply. Keys are optional for legacy
 clients; requests without a key keep the original strict transition behavior.
 
 Only successful writes are recorded; rejected requests can be corrected and retried.
@@ -158,7 +172,8 @@ silently expired. Do not independently prune them while clients can retry old ac
 
 ## Domain behavior and limits
 
-- Server-enforced dispatcher/driver roles and driver ownership on protected routes
+- Server-enforced team boundaries, dispatcher/driver capabilities and driver ownership on protected routes
+- Dual-capability accounts can dispatch and operate their own driver profile in one team; dispatcher permission never authorizes completing another driver’s stops
 - SQLite serializes small-fleet planning and writes. Assignment, reassignment,
   completion, ordered route stops and retry records commit transactionally
 - The insertion planner checks capacity, readiness, pickup-before-dropoff, deadline,
@@ -185,7 +200,8 @@ cargo test --locked --manifest-path api/Cargo.toml
 Tests use actual ephemeral TCP listeners, temporary on-disk SQLite, fake clocks and
 explicit test-only passwords. Coverage includes original dispatch/planning flows,
 individual login, role isolation, fixture rejection, expiry, logout, restart,
-password/account revocation, login limits, database mode/fleet separation, startup
+password/account revocation, login limits, database mode/fleet separation, team isolation,
+legacy migration/restart, dual-role self-assignment, startup
 misconfiguration, and durable/conflicting create/assignment/completion retries.
 Physical-iPhone behavior and a real TLS deployment require the separate operator
 acceptance checklist; a passing Rust test suite does not establish those outcomes.

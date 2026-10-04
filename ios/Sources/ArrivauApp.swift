@@ -30,20 +30,47 @@ struct RootView: View {
     var body: some View {
         Group {
             if let role = store.role {
-                NavigationStack {
-                    Group {
-                        if role == .dispatcher { DispatcherView() }
-                        else { DriverView() }
-                    }
-                    .toolbar {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button { store.logout() } label: {
-                                Label(store.isDemo ? "Cambia ruolo" : "Esci", systemImage: "person.crop.circle")
+                VStack(spacing: 0) {
+                    if store.principal?.teamTitle != nil || store.canSwitchRole {
+                        VStack(spacing: 8) {
+                            if let team = store.principal?.teamTitle {
+                                Text("Squadra: \(team)").font(.caption).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("team_identity")
                             }
-                                .accessibilityIdentifier("switch_role")
-                                .disabled(store.isDemo && store.isMutating)
+                            if store.canSwitchRole {
+                                Picker("Vista", selection: Binding(
+                                    get: { role },
+                                    set: { selected in
+                                        if store.switchRole(to: selected) { Task { await store.refresh(force: true) } }
+                                    }
+                                )) {
+                                    ForEach(store.availableRoles, id: \.self) { option in Text(option.title).tag(option) }
+                                }
+                                .pickerStyle(.segmented).accessibilityIdentifier("role_picker")
+                                .disabled(store.isMutating)
+                                if store.locationSharing {
+                                    AccountLocationSharingNotice(location: store.location)
+                                }
+                            }
+                        }.padding(.horizontal).padding(.vertical, 8)
+                    }
+                    NavigationStack {
+                        Group {
+                            if role == .dispatcher { DispatcherView() }
+                            else { DriverView() }
+                        }
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button { store.logout() } label: {
+                                    Label(store.isDemo ? "Cambia account" : "Esci", systemImage: "person.crop.circle")
+                                }
+                                    .accessibilityIdentifier("switch_role")
+                                    .disabled(store.isDemo && store.isMutating)
+                            }
                         }
                     }
+                    // Discard old navigation/sheets, never the shared session or driver state.
+                    .id(role)
                 }
             } else { LoginView() }
         }
@@ -53,6 +80,25 @@ struct RootView: View {
         )) {
             Button("OK", role: .cancel) { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "Riprova.") }
+    }
+}
+
+/// Observe sensor/permission state directly so Centrale never claims a failed upload succeeded.
+private struct AccountLocationSharingNotice: View {
+    @EnvironmentObject private var store: DeliveryStore
+    @ObservedObject var location: LocationReporter
+    var body: some View {
+        HStack {
+            Label(store.locationErrorMessage ?? location.message,
+                  systemImage: location.permissionDenied || store.locationErrorMessage != nil ? "location.slash" : "location.fill")
+                .font(.caption).foregroundStyle(.secondary)
+                .accessibilityIdentifier("account_location_sharing")
+            Spacer()
+            Button("Ferma") { store.setLocationSharing(false) }
+                .font(.caption.weight(.semibold))
+                .accessibilityLabel("Ferma condivisione posizione")
+                .accessibilityIdentifier("stop_account_location")
+        }
     }
 }
 
@@ -118,7 +164,7 @@ struct LoginView: View {
                 TextField("https://api.esempio.it", text: $store.apiURL)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                     .accessibilityIdentifier("api_url").disabled(store.isMutating)
-                Text("Usa l’indirizzo HTTPS e le credenziali forniti dal responsabile. Il server assegna il ruolo; non serve sceglierlo qui.")
+                Text("Usa l’indirizzo HTTPS e le credenziali forniti dal responsabile. Il server assegna la squadra e le funzioni disponibili per il tuo account.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section {
@@ -137,11 +183,11 @@ struct LoginView: View {
                         Task { await store.login(as: role) }
                     } label: {
                         HStack(spacing: 14) {
-                            Image(systemName: role == .dispatcher ? "list.clipboard" : "bicycle")
+                            Image(systemName: role == .driver1 || role == .driver2 ? "bicycle" : "list.clipboard")
                                 .font(.title2).frame(width: 30)
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(role == .dispatcher ? "Gestisci le consegne" : "Consegna come \(role.title)").font(.headline)
-                                Text(role == .dispatcher ? "Crea le consegne e scegli un corriere" : "Vedi la prossima tappa e parti")
+                                Text(role == .dual ? "Centrale e corriere" : (role == .dispatcher ? "Gestisci le consegne" : "Consegna come \(role.title)")).font(.headline)
+                                Text(role == .dual ? "Un account, una squadra di revisione isolata" : (role == .dispatcher ? "Crea le consegne e scegli un corriere" : "Vedi la prossima tappa e parti"))
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: 0)

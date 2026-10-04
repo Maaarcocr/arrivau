@@ -17,6 +17,7 @@ import warnings
 NAMES = (
     "00-login", "01-dispatcher-jobs", "02-new-delivery", "03-driver-route",
     "04-driver-shift", "05-driver-assignment", "06-address-search", "07-delivery-timing",
+    "dual-account-centrale", "dual-account-corriere",
 )
 PNG = b"\x89PNG\r\n\x1a\n"
 ZSTD = b"\x28\xb5\x2f\xfd"

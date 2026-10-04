@@ -182,12 +182,12 @@ async fn demo_gate_auth_roles_and_json_validation() {
     let me: Value = server.get("/v1/me", DISPATCHER).await.json().await.unwrap();
     assert_eq!(
         me,
-        json!({"id":"dispatcher-1","name":"Dispatcher","role":"dispatcher"})
+        json!({"id":"dispatcher-1","name":"Dispatcher","role":"dispatcher","roles":["dispatcher"],"team_id":"demo","team_name":"Squadra demo"})
     );
     let me: Value = server.get("/v1/me", DRIVER_1).await.json().await.unwrap();
     assert_eq!(
         me,
-        json!({"id":"driver-1","name":"Driver 1","role":"driver"})
+        json!({"id":"driver-1","name":"Driver 1","role":"driver","roles":["driver"],"team_id":"demo","team_name":"Squadra demo"})
     );
     error_is_json(
         server.get("/v1/drivers", DRIVER_1).await,

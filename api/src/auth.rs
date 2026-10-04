@@ -1,4 +1,4 @@
-//! Single-fleet pilot accounts are provisioned offline, never by a public signup.
+//! Operator-managed team accounts are provisioned offline, never by a public signup.
 //! The configuration is authoritative on startup; account changes invalidate sessions.
 use crate::{
     error::{ApiError, ApiResult},
@@ -20,14 +20,28 @@ pub struct Account {
     pub id: String,
     pub username: String,
     pub name: String,
+    #[serde(default)]
     pub role: String,
+    #[serde(default)]
+    pub roles: Option<Vec<String>>,
+    #[serde(default)]
+    pub team_id: Option<String>,
     pub password_hash: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Team {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProductionConfig {
     pub fleet_id: String,
+    #[serde(default)]
+    pub teams: Vec<Team>,
     pub session_ttl_seconds: i64,
     pub accounts: Vec<Account>,
 }
@@ -43,6 +57,23 @@ impl ProductionConfig {
         if self.accounts.is_empty() || self.accounts.len() > 100 {
             return Err("Configure 1–100 individual accounts".into());
         }
+        let mut team_ids = HashSet::new();
+        for team in &self.teams {
+            if !valid_identifier(&team.id)
+                || !team_ids.insert(&team.id)
+                || team.name.trim().is_empty()
+                || team.name.len() > 240
+            {
+                return Err("Teams need unique stable ids and names of 1–240 bytes".into());
+            }
+        }
+        if self.teams.len() > 100 || (!self.teams.is_empty() && !team_ids.contains(&self.fleet_id))
+        {
+            return Err(
+                "Configure at most 100 teams including fleet_id, the permanent legacy/default team"
+                    .into(),
+            );
+        }
         let (mut ids, mut names) = (HashSet::new(), HashSet::new());
         for account in &self.accounts {
             if !valid_identifier(&account.id)
@@ -52,9 +83,27 @@ impl ProductionConfig {
                 || !names.insert(&account.username)
                 || account.name.trim().is_empty()
                 || account.name.len() > 240
-                || !matches!(account.role.as_str(), "driver" | "dispatcher")
             {
                 return Err("Accounts need unique ids and lowercase usernames, names, and driver/dispatcher roles".into());
+            }
+            let roles = account.capabilities();
+            if roles.is_empty()
+                || roles
+                    .iter()
+                    .any(|role| !matches!(role.as_str(), "driver" | "dispatcher"))
+                || account
+                    .roles
+                    .as_ref()
+                    .is_some_and(|r| r.len() != roles.len())
+                || (!account.role.is_empty() && !roles.contains(&account.role))
+            {
+                return Err("Accounts need one or both unique driver/dispatcher capabilities; role must belong to roles".into());
+            }
+            let team = account.team_id(self);
+            if !valid_identifier(team)
+                || (team != self.fleet_id && !team_ids.contains(&team.to_owned()))
+            {
+                return Err("Every account must belong to a configured team".into());
             }
             let hash =
                 PasswordHash::new(&account.password_hash).map_err(|_| "Invalid password hash")?;
@@ -80,7 +129,7 @@ impl ProductionConfig {
                 );
             }
         }
-        if !self.accounts.iter().any(|a| a.role == "dispatcher") {
+        if !self.accounts.iter().any(|a| a.has_role("dispatcher")) {
             return Err("Configure at least one dispatcher".into());
         }
         Ok(())
@@ -114,21 +163,71 @@ pub(crate) fn digest(value: &str) -> String {
 }
 
 impl Account {
-    pub(crate) fn principal(&self) -> Principal {
+    pub(crate) fn capabilities(&self) -> Vec<String> {
+        let mut roles = self
+            .roles
+            .clone()
+            .unwrap_or_else(|| vec![self.role.clone()]);
+        roles.sort();
+        roles.dedup();
+        roles
+    }
+    pub(crate) fn has_role(&self, role: &str) -> bool {
+        self.capabilities().iter().any(|r| r == role)
+    }
+    pub(crate) fn primary_role(&self) -> String {
+        if !self.role.is_empty() {
+            self.role.clone()
+        } else if self.has_role("dispatcher") {
+            "dispatcher".into()
+        } else {
+            "driver".into()
+        }
+    }
+    pub(crate) fn team_id<'a>(&'a self, config: &'a ProductionConfig) -> &'a str {
+        self.team_id.as_deref().unwrap_or(&config.fleet_id)
+    }
+    pub(crate) fn principal(&self, config: &ProductionConfig) -> Principal {
+        let team_id = self.team_id(config);
         Principal {
             id: self.id.clone(),
             name: self.name.clone(),
-            role: self.role.clone(),
+            role: self.primary_role(),
+            roles: self.capabilities(),
+            team_id: team_id.into(),
+            team_name: config
+                .teams
+                .iter()
+                .find(|t| t.id == team_id)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| team_id.into()),
         }
     }
-    pub(crate) fn fingerprint(&self) -> String {
+    pub(crate) fn fingerprint(&self, config: &ProductionConfig) -> String {
+        let role = self.primary_role();
+        // Preserve existing single-role sessions when upgrading an unchanged legacy config.
+        // New capabilities or non-default team identity use an explicitly scoped fingerprint.
+        if self.team_id(config) == config.fleet_id && self.capabilities() == vec![role.clone()] {
+            return digest(
+                &serde_json::to_string(&(
+                    &self.id,
+                    &self.username,
+                    &self.name,
+                    &role,
+                    &self.password_hash,
+                ))
+                .expect("strings serialize"),
+            );
+        }
         digest(
             &serde_json::to_string(&(
                 &self.id,
                 &self.username,
                 &self.name,
-                &self.role,
+                &role,
                 &self.password_hash,
+                self.capabilities(),
+                self.team_id(config),
             ))
             .expect("strings serialize"),
         )
@@ -137,24 +236,55 @@ impl Account {
 
 pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiResult<()> {
     let tx = db.transaction()?;
-    // Removed accounts remain in domain history, but cannot authenticate or receive work.
-    let drivers = crate::db::drivers(&tx)?;
-    for mut driver in drivers {
-        if !config
-            .accounts
-            .iter()
-            .any(|a| a.id == driver.id && a.role == "driver")
+    // Permanent bindings prevent removed/re-added accounts and driver IDs from moving history.
+    // Validate ALL identities before modifying profiles or revoking sessions.
+    for account in &config.accounts {
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT team_id FROM account_teams WHERE account_id=?1",
+                [&account.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if existing
+            .as_deref()
+            .is_some_and(|team| team != account.team_id(config))
         {
-            driver.active = false;
-            crate::db::save_driver(&tx, &driver)?;
+            return Err(ApiError::bad_request(
+                "An existing account ID cannot move teams; provision a new unique ID",
+            ));
         }
     }
     for account in &config.accounts {
-        if account.role == "driver" {
+        tx.execute(
+            "INSERT OR IGNORE INTO account_teams(account_id,team_id) VALUES (?1,?2)",
+            params![account.id, account.team_id(config)],
+        )?;
+    }
+    let driver_rows: Vec<(String, String)> = {
+        let mut stmt = tx.prepare("SELECT team_id,body FROM drivers")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for (team_id, body) in driver_rows {
+        let mut driver: crate::model::Driver = serde_json::from_str(&body)?;
+        if !config
+            .accounts
+            .iter()
+            .any(|a| a.id == driver.id && a.has_role("driver") && a.team_id(config) == team_id)
+        {
+            driver.active = false;
+            crate::db::save_driver(&tx, &team_id, &driver)?;
+        }
+    }
+    for account in &config.accounts {
+        if account.has_role("driver") {
             let existing: Option<String> = tx
-                .query_row("SELECT body FROM drivers WHERE id=?1", [&account.id], |r| {
-                    r.get(0)
-                })
+                .query_row(
+                    "SELECT body FROM drivers WHERE id=?1 AND team_id=?2",
+                    params![account.id, account.team_id(config)],
+                    |r| r.get(0),
+                )
                 .optional()?;
             let mut driver = match existing {
                 Some(body) => serde_json::from_str::<crate::model::Driver>(&body)?,
@@ -168,21 +298,20 @@ pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiR
                 },
             };
             driver.name = account.name.clone();
-            tx.execute("INSERT INTO drivers(id,body) VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body", params![driver.id,serde_json::to_string(&driver)?])?;
+            tx.execute("INSERT INTO drivers(id,team_id,body) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET body=excluded.body WHERE drivers.team_id=excluded.team_id",
+                params![driver.id,account.team_id(config),serde_json::to_string(&driver)?])?;
         }
     }
-    let sessions: Vec<(String, String, String)> = {
+    let sessions: Vec<(String, String, String, String)> = {
         let mut stmt =
-            tx.prepare("SELECT token_hash,account_id,account_fingerprint FROM sessions")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            tx.prepare("SELECT token_hash,account_id,account_fingerprint,team_id FROM sessions")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         rows.collect::<Result<_, _>>()?
     };
-    for (token, id, fingerprint) in sessions {
-        if !config
-            .accounts
-            .iter()
-            .any(|a| a.id == id && a.fingerprint() == fingerprint)
-        {
+    for (token, id, fingerprint, team) in sessions {
+        if !config.accounts.iter().any(|a| {
+            a.id == id && a.team_id(config) == team && a.fingerprint(config) == fingerprint
+        }) {
             tx.execute("DELETE FROM sessions WHERE token_hash=?1", [token])?;
         }
     }
@@ -220,15 +349,17 @@ pub(crate) fn session(
         return Err(unauthorized());
     }
     let token_hash = digest(token);
-    let row: Option<(String,String,i64)> = db.query_row("SELECT account_id,account_fingerprint,expires_at FROM sessions WHERE token_hash=?1 AND expires_at>?2",params![token_hash,now],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let (id, fingerprint, expires_at) = row.ok_or_else(unauthorized)?;
+    let row: Option<(String,String,i64,String)> = db.query_row("SELECT account_id,account_fingerprint,expires_at,team_id FROM sessions WHERE token_hash=?1 AND expires_at>?2",params![token_hash,now],|r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+    let (id, fingerprint, expires_at, team_id) = row.ok_or_else(unauthorized)?;
     let account = config
         .accounts
         .iter()
-        .find(|a| a.id == id && a.fingerprint() == fingerprint)
+        .find(|a| {
+            a.id == id && a.fingerprint(config) == fingerprint && a.team_id(config) == team_id
+        })
         .ok_or_else(unauthorized)?;
     Ok(Session {
-        principal: account.principal(),
+        principal: account.principal(config),
         expires_at: Some(expires_at),
         token_hash: Some(token_hash),
     })

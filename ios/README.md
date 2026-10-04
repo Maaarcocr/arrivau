@@ -1,6 +1,6 @@
 # Native iOS pilot
 
-The normal app now signs in to a configured HTTPS pilot service using individual credentials and server-assigned roles. It securely stores expiring sessions in the Keychain, restores them only after server verification, revokes on reachable logout, and clears private state/GPS on signout or expiry. Release has no demo chooser or fixture tokens.
+The normal app now signs in to a configured HTTPS pilot service using individual credentials and server-assigned team memberships and capabilities. It securely stores expiring sessions in the Keychain, restores them only after server verification, revokes on reachable logout, and clears private state/GPS on signout or expiry. Release has no demo chooser or fixture tokens.
 
 Start with [the pilot runbook](../docs/pilot-runbook.md) and [TestFlight publishing steps](../README.md#publish-to-testflight). `ARRIVAU_API_URL` is a non-secret build setting embedded in Info.plist; when blank, the login screen asks for the HTTPS root origin. `scripts/archive-ios.sh` validates configuration and only builds a local archive.
 
@@ -22,7 +22,7 @@ Requirements: Xcode 26+ with an iOS 17+ simulator runtime, XcodeGen, Rust/Cargo 
 2. `cd ios && xcodegen generate`
 3. Open `Arrivau.xcodeproj` and run the `Arrivau` scheme on an iPhone simulator in Debug.
 4. Add `--demo` to the Debug launch arguments. The demo login screen defaults to `http://localhost:8080`, connecting to the Mac's loopback API. Choose Corriere 1 and tap **Avvia turno e condividi posizione**. This button explicitly opts into foreground location sharing. For manual simulator use choose a custom Pachino location (latitude `36.7163`, longitude `15.0908`) under Simulator → Features → Location → Custom Location. Alternatively add `--uitesting` to Debug launch arguments for deterministic Pachino samples; the UI clearly labels simulated location.
-5. Switch to Gestisci le consegne, tap **Nuova consegna**, choose pickup and destination from Maps search, then **Scegli il corriere**. Driver suggestions load automatically in the same flow; tap **Assegna a Corriere 1**. Switch back to Corriere 1 to work the ordered pickup and drop-off stops. Role switches stop local tracking but do not end server-side shifts or discard assigned work.
+5. Switch to Gestisci le consegne, tap **Nuova consegna**, choose pickup and destination from Maps search, then **Scegli il corriere**. Driver suggestions load automatically in the same flow; tap **Assegna a Corriere 1**. Switch back to Corriere 1 to work the ordered pickup and drop-off stops. Switching demo accounts stops local tracking but does not end server-side shifts or discard assigned work. For one dual-capability account, use the in-session Centrale / Corriere picker; existing explicit location consent continues across these views, and a visible status/stop control remains available.
 
 No remote API host is permitted by this demo. A physical device cannot reach the Mac using `localhost`; use the HTTPS pilot login described above. Release builds have no HTTP ATS exception and compile out public demo fixture tokens. Pilot sessions use the Keychain; passwords are not saved.
 
@@ -53,7 +53,7 @@ No Always permission is requested: Apple supports continued standard updates wit
 
 CoreLocation uses continuous updates without a distance filter and requests approximately 100 m accuracy. Only fresh sensor samples (under one minute old) are submitted, at most once every 30 seconds. Cached positions are never reposted to make the server timestamp look fresh. iOS may still withhold or pause delivery of useful samples; verify stationary, moving, locked-screen, Maps handoff, revoked permission, poor network, low-power and battery behavior on a physical device before deployment. Review battery/accuracy tradeoffs. Failed uploads are surfaced; the next fresh sample retries naturally.
 
-Disabling sharing, successfully ending a shift, or switching roles stops the manager and cancels pending uploads. A rejected shift end keeps the active shift and its existing opt-ins. Leaving the foreground pauses tracking unless the screen-lock option was explicitly enabled. An in-flight request already accepted by the server cannot be withdrawn.
+Disabling sharing, successfully ending a shift, or signing out/switching demo accounts stops the manager and cancels pending uploads. Switching Centrale / Corriere views within one server-authorized dual account preserves existing foreground/background opt-ins without starting tracking, starting or ending a shift, or changing the bearer. Only the driver's explicit actions may enable sharing; either view can stop it through the visible status/stop control. Session restoration never restores location opt-ins. A rejected shift end keeps the active shift and its existing opt-ins. Leaving the foreground pauses tracking unless the screen-lock option was explicitly enabled. An in-flight request already accepted by the server cannot be withdrawn.
 
 Primary Apple references: [background location updates](https://developer.apple.com/documentation/corelocation/cllocationmanager/allowsbackgroundlocationupdates), [location authorization](https://developer.apple.com/documentation/corelocation/requesting-authorization-to-use-location-services), [local-network ATS configuration](https://developer.apple.com/documentation/bundleresources/information-property-list/nsapptransportsecurity/nsallowslocalnetworking).
 
@@ -79,6 +79,8 @@ The fixture uses `Pizzeria Pachino Demo`, the sample Pachino pickup/drop-off, a 
 The Xcode `.xcresult` artifact contains the attachments. GitHub Actions exports the named screenshots for separate download/sharing; the export step must include successful attachments, rather than only failures. Failure screenshots and an accessibility hierarchy remain separate diagnostics.
 
 
+The same export also requires `dual-account-centrale` and `dual-account-corriere`, showing the private team label and the same-account view picker.
+
 ## Minimal everyday flow
 
 - Driver home prioritizes the next stop, directions and pickup/drop-off completion. The ordered map, completed rows and shift/privacy controls are secondary. Capacity uses the driver's existing server setting; it is not a task required before every shift.
@@ -94,3 +96,13 @@ All app-owned screens, accessibility labels, validation and location-permission 
 
 The UI suite keeps cancellation, repeated-submit and pending-job reopening coverage, and checks repeated details expansion plus background/foreground interruptions. Physical-device location behavior still needs the validation described above.
 
+
+## One account, two views and one team
+
+The authenticated principal supplies `roles`, `team_id` and `team_name`. Missing `roles` falls back only to the legacy single `role`; an explicit empty/malformed capability list cannot grant that legacy privilege. Only accounts authorized for both functions see the Centrale / Corriere picker. The team label stays visible and cannot change membership. Dispatcher reads remain team-wide; the driver view filters work to the authenticated account's own driver ID and uses its own shift/route endpoints.
+
+The Debug demo has a separate **Centrale e corriere** account (`demo-dual`, driver `dual-1`, `demo-review` / `Squadra revisione`). It is isolated from the original demo team. Public demo tokens, chooser and sensor fixtures remain compiled out of Release. This fixture is not an App Review production credential; see [the review-team runbook](../docs/teams-and-review.md) for supervised server provisioning.
+
+Recovery records use endpoint + team + account identity, independent of selected view. A pre-team record cannot prove its original team, so it is quarantined: original addresses, readiness and request reference remain visible, but new creation/retry is blocked. After checking the original server outcome with the operator, the user may open **Ho verificato la consegna** and confirm removal of that one local recovery record. The confirmation warns that recreating an existing job could duplicate it and never deletes or replays server work. Cancel leaves the record intact. The removal checks the displayed request, current session/team and unchanged storage record; storage errors retain the block. Signing out does not silently discard uncertain work.
+
+Additional tests cover same-session dual views, own-driver filtering, disabled hidden actions, stale refresh/suggestion responses, blocked mid-mutation switching, team-scoped replay, legacy review cancellation/confirmation/errors/stale contexts, restored/reduced capabilities, and logout/expiry stopping tracking even from Centrale. The real-API dual UI lifecycle creates, self-assigns, picks up and delivers within the isolated review team, checks repeated/background switches and explicit pause/resume, and verifies original-demo data is unchanged. Native/macOS CI remains required; Linux structural parsing does not establish an Apple SDK build or simulator pass.

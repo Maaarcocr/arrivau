@@ -65,6 +65,377 @@ final class PilotSessionTests: XCTestCase {
         XCTAssertNil(storage.savedSession, file: file, line: line)
     }
 
+    private func useDualAccount(team: String = "review") {
+        backend.withState {
+            $0.user = Principal(id: "reviewer", name: "Revisione", role: "dispatcher",
+                                roles: ["dispatcher", "driver"], teamId: team, teamName: "Squadra \(team)")
+        }
+    }
+
+    private func teamDelivery(id: String, owner: String?, status: DeliveryStatus = .assigned) -> Delivery {
+        Delivery(id: id, shopName: "Pizzeria", pickupAddress: "Via Roma 1", pickup: .pachino,
+                 dropoffAddress: "Via Garibaldi 8", dropoff: .pachino, readyAt: 1, deadlineAt: 2_000_000_000,
+                 loadUnits: 1, maxRideSeconds: 1800, status: status, driverId: owner,
+                 createdAt: 1, pickedUpAt: nil, deliveredAt: nil)
+    }
+
+    func testDualViewsUseOneSessionAndNeverStartShiftOrTrackingOnTheirOwn() async {
+        useDualAccount()
+        await store.login(username: "reviewer", password: "test-only-password")
+        let saved = storage.savedSession
+        XCTAssertEqual(store.role, .dispatcher)
+        XCTAssertEqual(store.availableRoles, [.dispatcher, .driver])
+        XCTAssertTrue(store.canSwitchRole)
+        XCTAssertEqual(store.principal?.teamTitle, "Squadra review")
+        for _ in 0..<3 {
+            XCTAssertTrue(store.switchRole(to: .driver))
+            await store.refresh(force: true)
+            XCTAssertEqual(store.currentDriver?.id, "reviewer")
+            XCTAssertFalse(store.locationSharing)
+            XCTAssertFalse(store.backgroundLocationSharing)
+            XCTAssertFalse(store.switchRole(to: .driver), "Repeated selection is a no-op")
+            XCTAssertTrue(store.switchRole(to: .dispatcher))
+            await store.refresh(force: true)
+        }
+        XCTAssertEqual(storage.savedSession, saved)
+        XCTAssertEqual(backend.withState { $0.requests.filter { $0.method == "POST" && $0.path == "/v1/session" }.count }, 1)
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.method == "POST" && ["/v1/shift", "/v1/location"].contains($0.path) } })
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+    }
+
+    func testExplicitDriverSharingSurvivesViewsAndInterruptionUntilStopped() async throws {
+        useDualAccount()
+        let own = teamDelivery(id: "own", owner: "reviewer")
+        let other = teamDelivery(id: "other", owner: "another-driver")
+        backend.withState { $0.active = true; $0.jobs = [own, other] }
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertEqual(Set(store.deliveries.map(\.id)), ["own", "other"])
+        XCTAssertTrue(store.switchRole(to: .driver))
+        await store.refresh(force: true)
+        XCTAssertEqual(store.deliveries.map(\.id), ["own"])
+        let ownRoute = try XCTUnwrap(store.route)
+        XCTAssertEqual(ownRoute.driverId, "reviewer")
+        XCTAssertEqual(ownRoute.stops.map(\.deliveryId), ["own", "own"])
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        for _ in 0..<2 {
+            XCTAssertTrue(store.switchRole(to: .dispatcher))
+            await store.refresh(force: true)
+            XCTAssertTrue(store.locationSharing)
+            XCTAssertTrue(store.backgroundLocationSharing)
+            XCTAssertEqual(store.currentDriver?.active, true)
+            XCTAssertEqual(store.route, ownRoute)
+            store.setForeground(false)
+            XCTAssertTrue(store.locationSharing)
+            XCTAssertTrue(store.backgroundLocationSharing)
+            XCTAssertTrue(store.switchRole(to: .driver))
+            await store.refresh(force: true)
+            XCTAssertEqual(store.deliveries, [own])
+        }
+        XCTAssertTrue(store.switchRole(to: .dispatcher))
+        store.setLocationSharing(false)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertTrue(store.switchRole(to: .driver))
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertEqual(store.route, ownRoute)
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.method == "POST" && $0.path == "/v1/shift" } })
+    }
+
+    func testOwnDriverActionsCannotRunFromHiddenOrUnauthorizedView() async throws {
+        useDualAccount()
+        let own = teamDelivery(id: "own", owner: "reviewer")
+        backend.withState { $0.active = true; $0.jobs = [own] }
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertTrue(store.switchRole(to: .driver))
+        await store.refresh(force: true)
+        let before = backend.withState { $0.requests.count }
+        let created = await store.create(Fixtures.newDelivery)
+        let assigned = await store.assign(deliveryId: "own", driverId: "reviewer")
+        let suggestions = await store.suggestions(for: "own")
+        XCTAssertNil(created); XCTAssertFalse(assigned); XCTAssertNil(suggestions)
+        XCTAssertEqual(backend.withState { $0.requests.count }, before)
+        XCTAssertTrue(store.switchRole(to: .dispatcher))
+        await store.completeNextStop(own)
+        await store.setShift(active: false, capacity: 5)
+        await store.startShiftAndShareLocation()
+        store.setLocationSharing(true)
+        XCTAssertFalse(store.locationSharing, "Only the visible driver action can opt in")
+        XCTAssertEqual(backend.withState { $0.requests.count }, before)
+        XCTAssertEqual(store.route?.stops.first?.kind, .pickup)
+        XCTAssertEqual(store.currentDriver?.active, true)
+    }
+
+    func testDualDispatcherLogoutImmediatelyStopsDriverOptInsAndLateSamples() async {
+        useDualAccount()
+        backend.withState { $0.active = true }
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertTrue(store.switchRole(to: .driver))
+        await store.refresh(force: true)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        XCTAssertTrue(store.switchRole(to: .dispatcher))
+        XCTAssertTrue(store.locationSharing)
+        store.logout()
+        assertSignedOut(store)
+        let writes = backend.withState { $0.locationWrites }
+        store.location.onCoordinate?(.pachino)
+        await store.awaitPendingRevocations()
+        XCTAssertEqual(backend.withState { $0.locationWrites }, writes)
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+        XCTAssertFalse(store.switchRole(to: .driver))
+    }
+
+    func testDualDispatcherExpiryStopsSharingWithoutNavigation() async {
+        useDualAccount()
+        backend.withState { $0.active = true; $0.expiresAt = Int(Date().timeIntervalSince1970) + 3 }
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertTrue(store.switchRole(to: .driver))
+        await store.refresh(force: true)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        XCTAssertTrue(store.switchRole(to: .dispatcher))
+        let invalidated = expectation(description: "Dual dispatcher expiry stops driver sharing")
+        let observation = store.$principal.dropFirst().filter { $0 == nil }.sink { _ in invalidated.fulfill() }
+        await fulfillment(of: [invalidated], timeout: 6)
+        observation.cancel()
+        assertSignedOut(store)
+        XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
+    }
+
+    func testSingleRoleCannotSelectUnassignedCapability() async {
+        for assigned in [UserRole.dispatcher, .driver] {
+            let candidate = makeStore()
+            backend.withState { $0.user = Principal(id: "single", name: "Solo", role: assigned.rawValue) }
+            await candidate.login(username: "single", password: "test-only-password")
+            XCTAssertFalse(candidate.canSwitchRole)
+            XCTAssertFalse(candidate.switchRole(to: assigned == .driver ? .dispatcher : .driver))
+            XCTAssertEqual(candidate.role, assigned)
+            candidate.logout()
+        }
+    }
+
+    func testDelayedRefreshCannotSignOutOrReplaceNewView() async {
+        useDualAccount()
+        await store.login(username: "reviewer", password: "test-only-password")
+        let started = expectation(description: "Old dispatcher refresh sent")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.nextReadPath = "/v1/drivers"; $0.nextReadStatus = 401
+            $0.nextReadGate = release; $0.onNextRead = { started.fulfill() }
+        }
+        let old = Task { await store.refresh(force: true) }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(store.switchRole(to: .driver))
+        await store.refresh(force: true)
+        let ownRoute = store.route
+        release.signal()
+        await old.value
+        XCTAssertEqual(store.role, .driver)
+        XCTAssertEqual(store.principal?.id, "reviewer")
+        XCTAssertEqual(store.route, ownRoute)
+        XCTAssertNil(store.errorMessage)
+        XCTAssertNil(store.syncErrorMessage)
+    }
+
+    func testHiddenSuggestionsCannotSignOutAfterRepeatedViewChanges() async {
+        useDualAccount()
+        await store.login(username: "reviewer", password: "test-only-password")
+        let started = expectation(description: "Old suggestions sent")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.nextReadPath = "/v1/deliveries/pending/suggestions"; $0.nextReadStatus = 401
+            $0.nextReadGate = release; $0.onNextRead = { started.fulfill() }
+        }
+        let old = Task { await store.suggestions(for: "pending") }
+        await fulfillment(of: [started], timeout: 5)
+        XCTAssertTrue(store.switchRole(to: .driver))
+        XCTAssertTrue(store.switchRole(to: .dispatcher))
+        release.signal()
+        let result = await old.value
+        XCTAssertNil(result)
+        XCTAssertEqual(store.role, .dispatcher)
+        XCTAssertEqual(store.principal?.id, "reviewer")
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testSwitchDuringCreateWaitsAndLateResultCannotRestoreLoggedOutTeam() async throws {
+        useDualAccount()
+        await store.login(username: "reviewer", password: "test-only-password")
+        let started = expectation(description: "Create sent")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState { $0.createGate = release; $0.onCreate = { started.fulfill() } }
+        let create = Task { await store.create(Fixtures.newDelivery) }
+        await fulfillment(of: [started], timeout: 5)
+        let pending = try XCTUnwrap(store.pendingCreation)
+        XCTAssertFalse(store.switchRole(to: .driver), "Do not interrupt a mutation with hidden navigation")
+        XCTAssertEqual(store.role, .dispatcher)
+        store.logout()
+        await store.awaitPendingRevocations()
+        useDualAccount(team: "other")
+        await store.login(username: "reviewer", password: "test-only-password")
+        release.signal()
+        let result = await create.value
+        XCTAssertNil(result)
+        XCTAssertEqual(store.principal?.teamId, "other")
+        XCTAssertTrue(store.deliveries.isEmpty)
+        XCTAssertNil(store.pendingCreation)
+        XCTAssertTrue(storage.creations.values.contains(pending))
+    }
+
+    func testPendingCreationSurvivesViewsButCannotCrossTeamWithSameAccountID() async throws {
+        useDualAccount()
+        await store.login(username: "reviewer", password: "test-only-password")
+        backend.withState { $0.lostCreateResponses = 1 }
+        _ = await store.create(Fixtures.newDelivery)
+        let pending = try XCTUnwrap(store.pendingCreation)
+        let scope = CreationScope.current(endpoint: endpoint, user: try XCTUnwrap(store.principal))
+        XCTAssertEqual(storage.creations[scope], pending)
+        XCTAssertTrue(store.switchRole(to: .driver))
+        let hiddenRetry = await store.retryPendingCreation()
+        XCTAssertNil(hiddenRetry)
+        XCTAssertEqual(store.pendingCreation, pending)
+        store.logout()
+        await store.awaitPendingRevocations()
+        useDualAccount(team: "other")
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertNil(store.pendingCreation)
+        XCTAssertFalse(store.legacyCreationNeedsReview)
+        XCTAssertTrue(store.deliveries.isEmpty)
+        store.logout()
+        await store.awaitPendingRevocations()
+        useDualAccount()
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertEqual(store.pendingCreation, pending)
+        let replay = await store.retryPendingCreation()
+        XCTAssertEqual(replay?.id, "created-1")
+        XCTAssertEqual(backend.withState { $0.committedCreates }, 1)
+        XCTAssertTrue(storage.creations.isEmpty)
+    }
+
+    func testLegacyPendingCreationIsQuarantinedWhenTeamCannotBeProven() async {
+        useDualAccount()
+        let pending = PendingCreation(idempotencyKey: "legacy-request", delivery: Fixtures.newDelivery)
+        let scope = CreationScope.legacy(endpoint: endpoint, accountId: "reviewer")
+        storage.creations[scope] = pending
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertTrue(store.legacyCreationNeedsReview)
+        XCTAssertNil(store.pendingCreation, "An unscoped request must not become replayable in a team")
+        XCTAssertEqual(store.legacyPendingCreation, pending, "Original details remain available for operator review")
+        let result = await store.create(Fixtures.newDelivery)
+        let retry = await store.retryPendingCreation()
+        XCTAssertNil(result); XCTAssertNil(retry)
+        XCTAssertEqual(storage.creations[scope], pending, "Never silently discard uncertain work")
+        XCTAssertEqual(backend.withState { $0.createAttempts }, 0)
+    }
+
+    func testLegacyReviewPreparationOrCancellationDoesNotClearOrTransmit() async throws {
+        useDualAccount()
+        let pending = PendingCreation(idempotencyKey: "legacy-request", delivery: Fixtures.newDelivery)
+        let scope = CreationScope.legacy(endpoint: endpoint, accountId: "reviewer")
+        storage.creations[scope] = pending
+        await store.login(username: "reviewer", password: "test-only-password")
+        let requests = backend.withState { $0.requests.count }
+        let review = try XCTUnwrap(store.prepareLegacyCreationReview())
+        XCTAssertEqual(review.pending, pending)
+        // Dismissing the confirmation simply drops this value: there is no destructive preparation.
+        XCTAssertTrue(store.legacyCreationNeedsReview)
+        XCTAssertEqual(storage.creations[scope], pending)
+        XCTAssertEqual(backend.withState { $0.requests.count }, requests)
+    }
+
+    func testConfirmedLegacyReviewClearsOnlyTheDisplayedLocalRecord() async throws {
+        useDualAccount()
+        let pending = PendingCreation(idempotencyKey: "legacy-request", delivery: Fixtures.newDelivery)
+        let scope = CreationScope.legacy(endpoint: endpoint, accountId: "reviewer")
+        storage.creations[scope] = pending
+        storage.creations["unrelated-account"] = pending
+        await store.login(username: "reviewer", password: "test-only-password")
+        let requests = backend.withState { $0.requests.count }
+        let review = try XCTUnwrap(store.prepareLegacyCreationReview())
+        XCTAssertTrue(store.clearLegacyCreationAfterReview(review))
+        XCTAssertFalse(store.legacyCreationNeedsReview)
+        XCTAssertNil(storage.creations[scope])
+        XCTAssertEqual(storage.creations["unrelated-account"], pending)
+        XCTAssertFalse(store.clearLegacyCreationAfterReview(review), "A repeated confirmation does nothing")
+        XCTAssertEqual(backend.withState { $0.requests.count }, requests, "No server work is deleted or replayed")
+    }
+
+    func testLegacyClearStorageFailureKeepsRecoveryBlockedAndCanRetrySameReview() async throws {
+        useDualAccount()
+        let pending = PendingCreation(idempotencyKey: "legacy-request", delivery: Fixtures.newDelivery)
+        let scope = CreationScope.legacy(endpoint: endpoint, accountId: "reviewer")
+        storage.creations[scope] = pending
+        let failing = FaultingPilotStorage(base: storage)
+        failing.failCreationClear = true
+        let candidate = makeStore(storage: failing)
+        await candidate.login(username: "reviewer", password: "test-only-password")
+        let review = try XCTUnwrap(candidate.prepareLegacyCreationReview())
+        XCTAssertFalse(candidate.clearLegacyCreationAfterReview(review))
+        XCTAssertTrue(candidate.legacyCreationNeedsReview)
+        XCTAssertEqual(storage.creations[scope], pending)
+        XCTAssertNotNil(candidate.errorMessage)
+        let blocked = await candidate.create(Fixtures.newDelivery)
+        XCTAssertNil(blocked)
+        XCTAssertEqual(backend.withState { $0.createAttempts }, 0)
+        failing.failCreationClear = false
+        XCTAssertTrue(candidate.clearLegacyCreationAfterReview(review))
+        XCTAssertFalse(candidate.legacyCreationNeedsReview)
+    }
+
+    func testLegacyConfirmationFromEarlierSessionCannotClearOtherTeam() async throws {
+        useDualAccount()
+        let pending = PendingCreation(idempotencyKey: "legacy-request", delivery: Fixtures.newDelivery)
+        let scope = CreationScope.legacy(endpoint: endpoint, accountId: "reviewer")
+        storage.creations[scope] = pending
+        await store.login(username: "reviewer", password: "test-only-password")
+        let review = try XCTUnwrap(store.prepareLegacyCreationReview())
+        XCTAssertTrue(store.switchRole(to: .driver))
+        XCTAssertFalse(store.clearLegacyCreationAfterReview(review))
+        XCTAssertTrue(store.switchRole(to: .dispatcher))
+        XCTAssertFalse(store.clearLegacyCreationAfterReview(review), "An old confirmation cannot reappear after a round trip")
+        store.logout()
+        await store.awaitPendingRevocations()
+        useDualAccount(team: "other")
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertFalse(store.clearLegacyCreationAfterReview(review))
+        XCTAssertTrue(store.legacyCreationNeedsReview)
+        XCTAssertEqual(storage.creations[scope], pending)
+        let changed = PendingCreation(idempotencyKey: "newer-request", delivery: Fixtures.newDelivery)
+        let currentReview = try XCTUnwrap(store.prepareLegacyCreationReview())
+        storage.creations[scope] = changed
+        XCTAssertFalse(store.clearLegacyCreationAfterReview(currentReview))
+        XCTAssertEqual(storage.creations[scope], changed, "Do not delete a record changed since it was displayed")
+        XCTAssertTrue(store.legacyCreationNeedsReview)
+    }
+
+    func testDualRestoreResetsViewAndLocationConsentAndRechecksCapabilities() async {
+        useDualAccount()
+        backend.withState { $0.active = true }
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertTrue(store.switchRole(to: .driver))
+        await store.refresh(force: true)
+        store.setLocationSharing(true)
+        store.setBackgroundLocationSharing(true)
+        let restored = makeStore()
+        await restored.restoreSession()
+        XCTAssertEqual(restored.role, .dispatcher)
+        XCTAssertTrue(restored.canSwitchRole)
+        XCTAssertFalse(restored.locationSharing)
+        XCTAssertFalse(restored.backgroundLocationSharing)
+        backend.withState { $0.user = Principal(id: "reviewer", name: "Revisione", role: "dispatcher", roles: ["driver"], teamId: "review") }
+        let narrowed = makeStore()
+        await narrowed.restoreSession()
+        XCTAssertEqual(narrowed.role, .driver)
+        XCTAssertFalse(narrowed.canSwitchRole)
+        XCTAssertFalse(narrowed.switchRole(to: .dispatcher))
+        XCTAssertFalse(narrowed.locationSharing)
+    }
+
     func testLoginUsesServerRoleAndPostsOnlyUsernameAndPassword() async throws {
         backend.withState { $0.user = Principal(id: "courier-42", name: "Corriere pilota", role: "driver") }
         await store.login(username: "  dispatcher-looking-name  ", password: "test-only-password")
@@ -432,6 +803,7 @@ private final class FaultingPilotStorage: SessionStorage {
     let base: MemorySessionStorage
     var failCreationLoad = false
     var failCreationSave = false
+    var failCreationClear = false
     init(base: MemorySessionStorage) { self.base = base }
     func loadSession() throws -> SavedSession? { try base.loadSession() }
     func saveSession(_ value: SavedSession) throws { try base.saveSession(value) }
@@ -444,7 +816,10 @@ private final class FaultingPilotStorage: SessionStorage {
         if failCreationSave { throw APIError(message: "Test storage write failed") }
         try base.saveCreation(value, scope: scope)
     }
-    func clearCreation(scope: String) throws { try base.clearCreation(scope: scope) }
+    func clearCreation(scope: String) throws {
+        if failCreationClear { throw APIError(message: "Test storage clear failed") }
+        try base.clearCreation(scope: scope)
+    }
 }
 
 private final class PilotSessionURLProtocol: URLProtocol {
@@ -505,6 +880,13 @@ private final class PilotSessionBackend {
     var onLocation: (() -> Void)?
     var loginGate: DispatchSemaphore?
     var identityGate: DispatchSemaphore?
+    var jobs: [Delivery] = []
+    var nextReadPath: String?
+    var nextReadStatus = 200
+    var nextReadGate: DispatchSemaphore?
+    var onNextRead: (() -> Void)?
+    var createGate: DispatchSemaphore?
+    var onCreate: (() -> Void)?
     private var loginCount = 0
     private var creations: [String: Delivery] = [:]
 
@@ -544,6 +926,11 @@ private final class PilotSessionBackend {
                 received = state.onRevoke
                 return (204, Data())
             }
+            if method == "GET", path == state.nextReadPath {
+                gate = state.nextReadGate; received = state.onNextRead
+                state.nextReadPath = nil; state.nextReadGate = nil; state.onNextRead = nil
+                if state.nextReadStatus != 200 { return (state.nextReadStatus, Self.errorBody) }
+            }
             if method == "GET" && state.rejectProtectedReads { return (401, Self.errorBody) }
             let driver = Driver(id: state.user.id, name: state.user.name, active: state.active, capacity: 5,
                                 location: nil, locationUpdatedAt: nil)
@@ -551,11 +938,15 @@ private final class PilotSessionBackend {
             case ("GET", "/v1/drivers"): return (200, try APIClient.encoder().encode([driver]))
             case ("GET", "/v1/shift"): return (200, try APIClient.encoder().encode(driver))
             case ("GET", "/v1/route"):
-                let route = DriverRoute(driverId: state.user.id, stops: [], travelSeconds: 0, finishAt: 0, feasible: true, warnings: [])
+                let stops = state.jobs.filter { $0.driverId == state.user.id && $0.status == .assigned }.flatMap { job in
+                    [RouteStop(deliveryId: job.id, kind: .pickup, address: job.pickupAddress, coordinate: job.pickup, arrivalAt: 1, departureAt: 2),
+                     RouteStop(deliveryId: job.id, kind: .dropoff, address: job.dropoffAddress, coordinate: job.dropoff, arrivalAt: 3, departureAt: 4)]
+                }
+                let route = DriverRoute(driverId: state.user.id, stops: stops, travelSeconds: 0, finishAt: 0, feasible: true, warnings: [])
                 return (200, try APIClient.encoder().encode(route))
             case ("GET", "/v1/deliveries"):
-                let prefix = "\(origin)|\(state.user.id)|"
-                let deliveries = state.creations.filter { $0.key.hasPrefix(prefix) }.map { $0.value }.sorted { $0.id < $1.id }
+                let prefix = "\(origin)|\(state.user.teamId ?? "legacy")|\(state.user.id)|"
+                let deliveries = state.jobs + state.creations.filter { $0.key.hasPrefix(prefix) }.map { $0.value }.sorted { $0.id < $1.id }
                 return (200, try APIClient.encoder().encode(deliveries))
             case ("POST", "/v1/location"):
                 state.locationWrites += 1; received = state.onLocation
@@ -563,8 +954,9 @@ private final class PilotSessionBackend {
                 return (200, try APIClient.encoder().encode(driver))
             case ("POST", "/v1/deliveries"):
                 state.createAttempts += 1
+                gate = state.createGate; received = state.onCreate
                 guard let key = request.value(forHTTPHeaderField: "Idempotency-Key"), !key.isEmpty else { return (400, Self.errorBody) }
-                let scope = "\(origin)|\(state.user.id)|\(key)"
+                let scope = "\(origin)|\(state.user.teamId ?? "legacy")|\(state.user.id)|\(key)"
                 let input = try APIClient.decoder().decode(NewDelivery.self, from: body)
                 let delivery: Delivery
                 if let existing = state.creations[scope] { delivery = existing }
@@ -592,8 +984,11 @@ private final class PilotSessionBackend {
     }
 
     private static let errorBody = Data(#"{"error":"Test request rejected"}"#.utf8)
-    private static func userBody(_ user: Principal) -> [String: String] {
-        ["id": user.id, "name": user.name, "role": user.role]
+    private static func userBody(_ user: Principal) -> [String: Any] {
+        var result: [String: Any] = ["id": user.id, "name": user.name, "role": user.role, "roles": user.roles]
+        if let teamId = user.teamId { result["team_id"] = teamId }
+        if let teamName = user.teamName { result["team_name"] = teamName }
+        return result
     }
     private static func json(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value) }
     private static func body(of request: URLRequest) throws -> Data {

@@ -3,6 +3,8 @@ import SwiftUI
 struct DispatcherView: View {
     @EnvironmentObject private var store: DeliveryStore
     @State private var showingCreate = false
+    @State private var showingLegacyReview = false
+    @State private var legacyReview: DeliveryStore.LegacyCreationReview?
     private var openDeliveries: [Delivery] {
         store.deliveries.filter { $0.status != .delivered }.sorted {
             if ($0.status == .pending) != ($1.status == .pending) { return $0.status == .pending }
@@ -21,11 +23,29 @@ struct DispatcherView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("create_delivery")
-                    .disabled(store.pendingCreation != nil || store.isMutating)
+                    .disabled(store.pendingCreation != nil || store.legacyCreationNeedsReview || store.isMutating)
+                    if store.legacyCreationNeedsReview {
+                        Text("C’è una richiesta non confermata della configurazione precedente, senza una squadra verificabile. Per evitare duplicati o invii alla squadra sbagliata, le nuove creazioni sono sospese. Verifica con il responsabile sul vecchio server se la consegna esiste, poi rimuovi soltanto questo recupero locale.")
+                            .font(.subheadline).foregroundStyle(.orange)
+                            .accessibilityIdentifier("legacy_creation_review")
+                        if let legacy = store.legacyPendingCreation {
+                            ExpandableDetails("Richiesta precedente", identifier: "legacy_creation_details") {
+                                Text(legacy.delivery.shopName).font(.headline)
+                                Text("Ritiro: \(legacy.delivery.pickupAddress)")
+                                Text("Destinazione: \(legacy.delivery.dropoffAddress)")
+                                Text("Pronta: \(legacy.delivery.readyAt.epochDate.italianDateTime)")
+                                Text("Riferimento richiesta: \(legacy.idempotencyKey)").font(.caption).textSelection(.enabled)
+                                Button("Ho verificato la consegna") {
+                                    legacyReview = store.prepareLegacyCreationReview()
+                                    showingLegacyReview = legacyReview != nil
+                                }.disabled(store.isMutating).accessibilityIdentifier("review_legacy_creation")
+                            }
+                        }
+                    }
                     if store.pendingCreation != nil {
                         Text("C’è una creazione da verificare. Riprova la stessa richiesta prima di crearne un’altra.").font(.subheadline)
                         Button("Verifica la creazione in sospeso") { Task { _ = await store.retryPendingCreation() } }
-                            .disabled(store.isMutating).accessibilityIdentifier("retry_pending_creation")
+                            .disabled(store.isMutating || store.legacyCreationNeedsReview).accessibilityIdentifier("retry_pending_creation")
                     }
                 }.padding(.vertical, 6)
             }
@@ -73,6 +93,16 @@ struct DispatcherView: View {
         .accessibilityIdentifier("dispatcher_screen")
         .refreshable { await store.refresh(force: true) }
         .sheet(isPresented: $showingCreate) { NewDeliveryView() }
+        .confirmationDialog("Rimuovere il recupero locale?", isPresented: $showingLegacyReview,
+                            titleVisibility: .visible, presenting: legacyReview) { review in
+            Button("Ho verificato: rimuovi il recupero", role: .destructive) {
+                store.clearLegacyCreationAfterReview(review)
+                legacyReview = nil
+            }.accessibilityIdentifier("confirm_clear_legacy_creation")
+            Button("Annulla", role: .cancel) { legacyReview = nil }
+        } message: { _ in
+            Text("Conferma solo dopo aver verificato con il responsabile sul vecchio server se la consegna esiste. Verrà rimossa soltanto questa richiesta salvata su questo iPhone; nessuna consegna sul server viene cancellata. Una nuova creazione potrebbe duplicare una consegna già esistente.")
+        }
     }
 }
 

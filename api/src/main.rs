@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if !config_path.is_absolute() { return Err("ARRIVAU_AUTH_CONFIG must be an absolute operator-managed file path".into()); }
             let contents = std::fs::read_to_string(config_path)?;
             let config: ProductionConfig = serde_json::from_str(&contents)?;
-            tracing::info!(%address,"Configured single-fleet pilot; HTTPS termination and access control required at proxy");
+            tracing::info!(%address,"Configured team-isolated pilot; HTTPS termination and access control required at proxy");
             AppState::open_production(path,config)
         }
         _ => return Err("Set ARRIVAU_MODE=production with account/HTTPS configuration, or explicitly choose ARRIVAU_MODE=demo for loopback fixtures".into()),

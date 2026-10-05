@@ -56,8 +56,8 @@ struct AccountView: View {
             get: { store.isReviewingAccountDeletion },
             set: { if !$0 { store.cancelAccountDeletionReview() } }
         )) { AccountDeletionView() }
-        .confirmationDialog(hasActiveShift ? "Uscire con un turno attivo?" : "Uscire dall’account?",
-                            isPresented: $confirmingLogout, titleVisibility: .visible) {
+        .alert(hasActiveShift ? "Uscire con un turno attivo?" : "Uscire dall’account?",
+               isPresented: $confirmingLogout) {
             Button("Esci", role: .destructive) { store.logout() }
                 .accessibilityIdentifier("confirm_logout")
             Button("Annulla", role: .cancel) { }

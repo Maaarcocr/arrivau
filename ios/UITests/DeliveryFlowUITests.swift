@@ -151,8 +151,8 @@ final class DeliveryFlowUITests: XCTestCase {
         captureScreen("03-driver-route", showing: app.staticTexts["next_stop_title"])
         tap(app.buttons["switch_role"])
         tap(app.buttons["account_logout"])
-        XCTAssertTrue(app.buttons["confirm_logout"].waitForExistence(timeout: 5))
-        tapModalButton(app.buttons["cancel_logout"])
+        XCTAssertTrue(app.alerts["Uscire con un turno attivo?"].waitForExistence(timeout: 5))
+        tapModalButton(app.alerts.buttons["Annulla"])
         XCTAssertTrue(app.buttons["account_logout"].exists)
         tap(app.buttons["close_account"])
         XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 5))
@@ -284,7 +284,7 @@ final class DeliveryFlowUITests: XCTestCase {
         assertDualAccountView("Centrale")
         XCTAssertFalse(element("account_location_sharing").exists)
         XCTAssertFalse(app.buttons["stop_account_location"].exists)
-        captureScreen("dual-account-centrale", showing: app.segmentedControls["role_picker"])
+        captureScreen("dual-account-centrale", showing: app.buttons["role_dispatcher"])
         selectAccountView("Corriere")
         waitForLabelContaining(app.buttons["shift_settings"], "Fuori turno")
         assertRoutineDriverHome()
@@ -941,10 +941,14 @@ final class DeliveryFlowUITests: XCTestCase {
         }
     }
 
+    private func roleButton(_ title: String) -> XCUIElement {
+        app.buttons[title == "Centrale" ? "role_dispatcher" : "role_driver"]
+    }
+
     private func assertDualAccountView(_ title: String) {
-        let picker = app.segmentedControls["role_picker"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 10))
-        XCTAssertTrue(picker.buttons[title].isSelected)
+        XCTAssertTrue(element("role_picker").waitForExistence(timeout: 10))
+        XCTAssertEqual(roleButton(title).value as? String, "Selezionato")
+        XCTAssertEqual(roleButton(title == "Centrale" ? "Corriere" : "Centrale").value as? String, "Non selezionato")
         XCTAssertFalse(app.staticTexts["team_identity"].exists, "Team details belong in Account, not repeated above every screen")
         XCTAssertFalse(app.buttons["login_dual"].exists, "Changing views must not log out or ask for another account")
         XCTAssertFalse(app.buttons["login_dispatcher"].exists)
@@ -952,19 +956,25 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func selectAccountView(_ title: String) {
-        let picker = app.segmentedControls["role_picker"]
-        // The containing SwiftUI Picker is disabled during mutations; wait for it
-        // as well as its native segment before sending the single user tap.
-        waitUntilEnabled(picker)
-        let segment = picker.buttons[title]
-        print("Role switch to \(title): app state=\(app.state.rawValue), picker enabled=\(picker.isEnabled), target selected=\(segment.isSelected), driver screen=\(element("driver_screen").exists), shift settings=\(app.buttons["shift_settings"].exists), create delivery=\(app.buttons["create_delivery"].exists)")
-        tap(segment)
+        let control = element("role_picker")
+        let target = roleButton(title)
+        // Each explicit role button exposes its own enabled state and full hit area.
+        waitUntilEnabled(target)
+        print("Role switch to \(title): app state=\(app.state.rawValue), target enabled=\(target.isEnabled), value=\(String(describing: target.value)), frame=\(target.frame)")
+        tap(target)
         let destination = title == "Centrale" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
         let arrived = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            segment.exists && segment.isSelected && destination.exists
+            target.exists && (target.value as? String) == "Selezionato" && destination.exists
         }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [arrived], timeout: 15), .completed,
-                       "Role switch to \(title) failed; target selected=\(segment.exists && segment.isSelected), destination=\(destination.exists), driver screen=\(element("driver_screen").exists), picker enabled=\(picker.exists && picker.isEnabled), app state=\(app.state.rawValue)")
+        let outcome = XCTWaiter.wait(for: [arrived], timeout: 15)
+        if outcome != .completed {
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "ux-role-switch-failure"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+        XCTAssertEqual(outcome, .completed,
+                       "Role switch to \(title) failed; target selected=\(target.exists && (target.value as? String) == "Selezionato"), destination=\(destination.exists), driver screen=\(element("driver_screen").exists), control exists=\(control.exists), app state=\(app.state.rawValue)")
         assertDualAccountView(title)
     }
 
@@ -1021,8 +1031,8 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["switch_role"])
         XCTAssertTrue(app.buttons["account_logout"].waitForExistence(timeout: 5))
         tap(app.buttons["account_logout"])
-        if app.buttons["confirm_logout"].waitForExistence(timeout: 2) {
-            tapModalButton(app.buttons["confirm_logout"])
+        if app.alerts.buttons["Esci"].waitForExistence(timeout: 2) {
+            tapModalButton(app.alerts.buttons["Esci"], captureLogout: true)
         }
         XCTAssertTrue(app.buttons["login_dispatcher"].waitForExistence(timeout: 5))
     }
@@ -1040,7 +1050,7 @@ final class DeliveryFlowUITests: XCTestCase {
 
     /// Modal transitions can expose an element before it is hittable. Never scroll a
     /// confirmation dialog into view: a swipe can dismiss it before its only tap.
-    private func tapModalButton(_ button: XCUIElement) {
+    private func tapModalButton(_ button: XCUIElement, captureLogout: Bool = false) {
         let ready = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == true AND hittable == true AND enabled == true"),
             object: button
@@ -1053,7 +1063,7 @@ final class DeliveryFlowUITests: XCTestCase {
             add(screenshot)
         }
         XCTAssertEqual(outcome, .completed, "Logout confirmation must become actionable without scrolling")
-        if button.identifier == "confirm_logout" {
+        if captureLogout {
             let screenshot = XCTAttachment(screenshot: app.screenshot())
             screenshot.name = "ux-active-logout"
             screenshot.lifetime = .keepAlways

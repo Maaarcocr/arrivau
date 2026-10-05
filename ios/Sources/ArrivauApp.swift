@@ -42,16 +42,7 @@ struct RootView: View {
                 VStack(spacing: 0) {
                     if store.canSwitchRole {
                         VStack(spacing: 8) {
-                            Picker("Vista", selection: Binding(
-                                get: { store.role ?? role },
-                                set: { selected in
-                                    if store.switchRole(to: selected) { Task { await store.refresh(force: true) } }
-                                }
-                            )) {
-                                ForEach(store.availableRoles, id: \.self) { option in Text(option.title).tag(option) }
-                            }
-                            .pickerStyle(.segmented).accessibilityIdentifier("role_picker")
-                            .disabled(store.isMutating)
+                            AccountRoleSwitcher()
                             if store.locationSharing {
                                 AccountLocationSharingNotice(location: store.location)
                             }
@@ -113,6 +104,39 @@ struct RootView: View {
         )) {
             Button("OK", role: .cancel) { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "Riprova.") }
+    }
+}
+
+/// Ordinary buttons keep each authorized view's full touch target and selection explicit.
+private struct AccountRoleSwitcher: View {
+    @EnvironmentObject private var store: DeliveryStore
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(store.availableRoles, id: \.self) { option in
+                Button {
+                    if store.switchRole(to: option) { Task { await store.refresh(force: true) } }
+                } label: {
+                    Text(option.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(store.role == option ? Color.primary : Color.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(store.role == option ? Color(.secondarySystemGroupedBackground) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 9))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("role_\(option.rawValue)")
+                .accessibilityValue(store.role == option ? "Selezionato" : "Non selezionato")
+                .accessibilityAddTraits(store.role == option ? .isSelected : [])
+                .disabled(store.isMutating)
+            }
+        }
+        .padding(4)
+        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Vista")
+        .accessibilityIdentifier("role_picker")
     }
 }
 

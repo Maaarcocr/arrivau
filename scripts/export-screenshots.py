@@ -20,8 +20,8 @@ NAMES = (
     "dual-account-centrale", "dual-account-corriere",
     "ux-pilot-login", "ux-invite-entry", "ux-account", "ux-new-shift", "ux-driver-waiting", "ux-active-logout",
 )
-# Captured only by the isolated-demo login helper on failure; never required on success.
-OPTIONAL_NAMES = ("demo-login-failure", "ux-logout-presentation")
+# Captured only by isolated-demo failure diagnostics; never required on success.
+OPTIONAL_NAMES = ("demo-login-failure", "ux-logout-presentation", "ux-role-switch-failure")
 EXPORT_NAMES = NAMES + OPTIONAL_NAMES
 PNG = b"\x89PNG\r\n\x1a\n"
 ZSTD = b"\x28\xb5\x2f\xfd"

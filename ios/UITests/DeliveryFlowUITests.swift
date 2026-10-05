@@ -838,7 +838,23 @@ final class DeliveryFlowUITests: XCTestCase {
     private func login(_ role: String) {
         tap(app.buttons["login_\(role)"])
         let destination = role == "dispatcher" || role == "dual" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
-        XCTAssertTrue(destination.waitForExistence(timeout: 20), "Check the running Rust API and fresh database")
+        // Poll the expected screen without attaching an XCUIElement as the
+        // waiter's diagnostic object. The same destination and budget still apply.
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            destination.exists
+        }, object: nil)
+        let outcome = XCTWaiter.wait(for: [ready], timeout: 20)
+        var details = "Check the running Rust API and fresh database"
+        if outcome != .completed {
+            let login = app.buttons["login_\(role)"]
+            let loginExists = login.exists
+            let enabled = loginExists && login.isEnabled
+            let hittable = loginExists && login.isHittable
+            let errorAlert = app.alerts["Operazione non riuscita"].exists
+            details += "; app state=\(app.state.rawValue), login exists=\(loginExists), enabled=\(enabled), hittable=\(hittable)"
+            details += ", loading=\(app.progressIndicators.firstMatch.exists), error alert=\(errorAlert)"
+        }
+        XCTAssertEqual(outcome, .completed, details)
         XCTAssertTrue(app.buttons["switch_role"].exists, "Account settings must preserve the existing sign-out control")
         XCTAssertFalse(app.buttons["account_settings"].exists, "Public demo accounts must never offer self-deletion")
     }
@@ -905,11 +921,15 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(settings.wait(for: .runningForeground, timeout: 10))
         // State updates are asynchronous; require a real background transition
         // before resuming. Never treat the foreground state as a passing fallback.
-        let background = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
-            guard let application = object as? XCUIApplication else { return false }
-            return application.state == .runningBackground || application.state == .runningBackgroundSuspended
-        }, object: app)
-        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 5), .completed,
+        // Supplying a background XCUIElement as the expectation object makes
+        // XCTest capture its accessibility hierarchy for diagnostics. Poll the
+        // process state directly instead, without that unrelated snapshot work.
+        let application = app!
+        let background = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let state = application.state
+            return state == .runningBackground || state == .runningBackgroundSuspended
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 10), .completed,
                        "App switch did not reach a background state; Arrivau=\(app.state.rawValue), Settings=\(settings.state.rawValue)")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))

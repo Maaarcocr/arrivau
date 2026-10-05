@@ -206,6 +206,7 @@ enum StopKind: String, Codable {
 struct RouteStop: Codable, Identifiable, Equatable {
     /// Provider identity is absent on legacy/Apple-derived stops. Never infer it from coordinates.
     var googlePlaceId: String? = nil
+    var coordinateFetchedAt: Int? = nil
     let deliveryId: String
     let kind: StopKind
     let address: String
@@ -214,6 +215,12 @@ struct RouteStop: Codable, Identifiable, Equatable {
     let departureAt: Int
     var id: String { "\(deliveryId)-\(kind.rawValue)" }
     var title: String { kind.title }
+    /// Never display an expired Google cache if foreground refresh is interrupted.
+    func displayCoordinate(now: Int = Int(Date().timeIntervalSince1970)) -> Coordinate? {
+        guard googlePlaceId != nil else { return coordinate }
+        guard let fetched = coordinateFetchedAt, fetched <= now, now - fetched < 29 * 24 * 60 * 60 else { return nil }
+        return coordinate
+    }
 }
 struct RouteTravelEstimate: Codable, Equatable {
     let mode: String

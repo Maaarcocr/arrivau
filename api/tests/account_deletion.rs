@@ -1243,4 +1243,3 @@ async fn deletion_schema_missing_retry_metadata_fails_closed_without_recreating_
         1
     );
 }
-

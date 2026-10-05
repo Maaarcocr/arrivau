@@ -467,4 +467,3 @@ fn database_constraints_reject_cross_team_links_and_team_relabelling() {
         delivery().to_string()
     );
 }
-

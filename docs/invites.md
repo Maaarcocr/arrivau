@@ -14,6 +14,8 @@ Self-service deletion is available only to durable invite-created accounts. Oper
 
 This implementation provides an in-app deletion path for accounts created by the invite flow, following [Apple's account-deletion guidance](https://developer.apple.com/support/offering-account-deletion-in-your-app/). It is not an assurance of App Review acceptance or legal compliance. The existing manual disable command is a separate recovery tool and intentionally retains history.
 
+Confirmed deletion also clears that team’s temporary Google Places coordinate and failure caches. In-flight results and refresh snapshots from before deletion cannot repopulate them. This does not erase shared restaurant or other delivery records; their locations are resolved again when needed. Other teams’ caches are unchanged.
+
 Deletion removes records from the active database, not every historical copy or storage byte. Backups, SQLite WAL/free pages, previously exported data and other devices' cached displays are not remotely purged. Restoring an older backup can restore deleted data; the operator must reconcile deletions before reopening a restored service. This feature does not introduce an automatic backup-retention or forensic-erasure system.
 
 ## Smallest operator flow
@@ -74,3 +76,4 @@ The container image also includes `/usr/local/bin/arrivau-disable-invited-accoun
 - Completed, assigned and picked-up linked deliveries are removed consistently, with no dangling route stops or cached response resurrecting them
 - Assignment, readiness, pickup and automatic dispatch races either commit before the reviewed deletion or fail safely; unrelated team data stays intact
 - After success, sessions/GPS/private views clear; lost responses are reported as uncertain and are never automatically retried
+

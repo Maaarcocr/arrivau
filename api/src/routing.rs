@@ -166,9 +166,13 @@ pub fn plan_points(
         .chain(candidate)
     {
         if job.status != DeliveryStatus::PickedUp {
-            if let Some(point) = job.pickup { push_unique(&mut points, point); }
+            if let Some(point) = job.pickup {
+                push_unique(&mut points, point);
+            }
         }
-        if let Some(point) = job.dropoff { push_unique(&mut points, point); }
+        if let Some(point) = job.dropoff {
+            push_unique(&mut points, point);
+        }
     }
     points
 }
@@ -371,4 +375,3 @@ mod tests {
             .contains("Verifica il percorso"));
     }
 }
-

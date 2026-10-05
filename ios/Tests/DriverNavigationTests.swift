@@ -42,6 +42,16 @@ final class DriverNavigationTests: XCTestCase {
         XCTAssertNil(target?.coordinate)
         XCTAssertEqual(target?.googlePlaceID, destination.googlePlaceID)
     }
+    func testOverviewNeverUsesAnExpiredOrUndatedGoogleCoordinate() {
+        var google = stop()
+        XCTAssertNil(google.displayCoordinate(now: 1000))
+        google.coordinateFetchedAt = 1000
+        XCTAssertEqual(google.displayCoordinate(now: 1000), .pachino)
+        XCTAssertNil(google.displayCoordinate(now: 1000 + 29 * 24 * 60 * 60))
+        XCTAssertNil(google.displayCoordinate(now: 999))
+        google.googlePlaceId = nil
+        XCTAssertEqual(google.displayCoordinate(now: 999), .pachino)
+    }
     func testLegacyStopsNeverInventGooglePlaceIDs() throws {
         let legacy = Data(#"{"delivery_id":"d","kind":"pickup","address":"Via","coordinate":{"lat":36.7,"lng":15.1},"arrival_at":1,"departure_at":2}"#.utf8)
         XCTAssertNil(try APIClient.decoder().decode(RouteStop.self, from: legacy).googlePlaceId)

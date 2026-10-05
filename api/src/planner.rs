@@ -121,7 +121,10 @@ pub fn evaluate_with_travel(
             },
             (_, None) => {
                 route.estimates_available = false;
-                route.warnings.push(format!("Destination location unavailable for {}: select or refresh the Google place", job.id));
+                route.warnings.push(format!(
+                    "Destination location unavailable for {}: select or refresh the Google place",
+                    job.id
+                ));
                 0
             }
             (None, Some(_)) => 0, // No GPS or a previous missing destination.
@@ -918,7 +921,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod unavailable_destination_tests {
     use super::*;
@@ -933,12 +935,25 @@ mod unavailable_destination_tests {
         })).unwrap();
         let candidate = candidate.into_delivery(1000);
         let mut driver = Driver {
-            id:"driver".into(),name:"Driver".into(),active:true,capacity:2,
-            location:Some(Coordinate {lat:36.7,lng:15.1}),location_updated_at:Some(1000)
+            id: "driver".into(),
+            name: "Driver".into(),
+            active: true,
+            capacity: 2,
+            location: Some(Coordinate {
+                lat: 36.7,
+                lng: 15.1,
+            }),
+            location_updated_at: Some(1000),
         };
-        assert!(insert(&driver,&[],&[],&candidate,1000).is_none());
-        assert!(insert_for_dispatch_with_travel(&driver,&[],&[],&candidate,1000,&Approximate).is_none());
+        assert!(insert(&driver, &[], &[], &candidate, 1000).is_none());
+        assert!(
+            insert_for_dispatch_with_travel(&driver, &[], &[], &candidate, 1000, &Approximate)
+                .is_none()
+        );
         driver.location = None;
-        assert!(insert_for_dispatch_with_travel(&driver,&[],&[],&candidate,1000,&Approximate).is_none());
+        assert!(
+            insert_for_dispatch_with_travel(&driver, &[], &[], &candidate, 1000, &Approximate)
+                .is_none()
+        );
     }
 }

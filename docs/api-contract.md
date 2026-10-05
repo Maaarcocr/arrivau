@@ -187,3 +187,10 @@ References: [Place Details field masks and billing](https://developers.google.co
 [Places policies and attribution](https://developers.google.com/maps/documentation/places/web-service/policies).
 Review applicable Google/EEA terms for the deployment's billing region before
 activation; coordinate retention is a technical safeguard, not a blanket license.
+
+Confirmed invited-account deletion clears the affected team's transient Places
+coordinate/failure caches inside the deletion transaction. A cache-generation
+fence rejects late provider results and queued refresh work from pre-deletion
+snapshots. Other teams are unchanged; surviving restaurants and deliveries keep
+their IDs/original text and resolve their locations again on demand. This adds no
+new claim about deletion of backups, exported records or other devices.

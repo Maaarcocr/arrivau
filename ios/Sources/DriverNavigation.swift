@@ -25,7 +25,7 @@ struct NavigationDestination: Identifiable, Equatable {
               stop.coordinate?.isValid != false,
               stop.coordinate != nil || stop.googlePlaceId != nil else { return nil }
         return Self(accountID: principal.id, teamID: principal.teamId, stopID: stop.id, googlePlaceID: stop.googlePlaceId,
-                    coordinate: stop.coordinate, title: stop.title, address: stop.address)
+                    coordinate: stop.displayCoordinate(), title: stop.title, address: stop.address)
     }
 }
 

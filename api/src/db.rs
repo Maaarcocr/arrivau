@@ -254,7 +254,8 @@ pub fn open(
 pub fn restaurants(db: &Connection, team_id: &str) -> ApiResult<Vec<Restaurant>> {
     let mut stmt = db.prepare("SELECT body FROM restaurants WHERE team_id=?1 ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| crate::places::decode(db, team_id, &row?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 pub fn restaurant(db: &Connection, team_id: &str, id: &str) -> ApiResult<Restaurant> {
@@ -265,13 +266,21 @@ pub fn restaurant(db: &Connection, team_id: &str, id: &str) -> ApiResult<Restaur
             |row| row.get(0),
         )
         .optional()?;
-    crate::places::decode(db, team_id, &body.ok_or_else(|| ApiError::not_found("Restaurant not found"))?)
+    crate::places::decode(
+        db,
+        team_id,
+        &body.ok_or_else(|| ApiError::not_found("Restaurant not found"))?,
+    )
 }
 
 pub fn save_restaurant(db: &Connection, team_id: &str, restaurant: &Restaurant) -> ApiResult<()> {
     db.execute(
         "INSERT INTO restaurants(id,team_id,body) VALUES (?1,?2,?3)",
-        params![restaurant.id, team_id, crate::places::durable_json(restaurant)?],
+        params![
+            restaurant.id,
+            team_id,
+            crate::places::durable_json(restaurant)?
+        ],
     )?;
     Ok(())
 }
@@ -287,7 +296,8 @@ pub fn delivery_teams(db: &Connection) -> ApiResult<Vec<String>> {
 pub fn drivers(db: &Connection, team_id: &str) -> ApiResult<Vec<Driver>> {
     let mut stmt = db.prepare("SELECT body FROM drivers WHERE team_id=?1 ORDER BY id")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| crate::places::decode(db, team_id, &row?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 pub fn driver(db: &Connection, team_id: &str, id: &str) -> ApiResult<Driver> {
@@ -316,7 +326,8 @@ pub fn save_driver(db: &Connection, team_id: &str, driver: &Driver) -> ApiResult
 pub fn deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
     let mut stmt = db.prepare("SELECT body FROM deliveries WHERE team_id=?1 ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| crate::places::decode(db, team_id, &row?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 /// Planning never needs completed history. Keep every outstanding job, including
@@ -324,7 +335,8 @@ pub fn deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
 pub fn planning_deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
     let mut stmt = db.prepare("SELECT body FROM deliveries WHERE team_id=?1 AND status IN ('pending','assigned','picked_up') ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| crate::places::decode(db, team_id, &row?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 pub fn delivery(db: &Connection, team_id: &str, id: &str) -> ApiResult<Delivery> {
@@ -335,7 +347,11 @@ pub fn delivery(db: &Connection, team_id: &str, id: &str) -> ApiResult<Delivery>
             |r| r.get(0),
         )
         .optional()?;
-    crate::places::decode(db, team_id, &body.ok_or_else(|| ApiError::not_found("Delivery not found"))?)
+    crate::places::decode(
+        db,
+        team_id,
+        &body.ok_or_else(|| ApiError::not_found("Delivery not found"))?,
+    )
 }
 
 pub fn save_delivery(db: &Connection, team_id: &str, delivery: &Delivery) -> ApiResult<()> {
@@ -402,4 +418,3 @@ pub fn save_route(
     }
     Ok(())
 }
-

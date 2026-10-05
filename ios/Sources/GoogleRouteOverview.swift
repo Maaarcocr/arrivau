@@ -18,8 +18,17 @@ struct GoogleRouteOverview: View {
     let stops: [RouteStop]
     let driverLocation: Coordinate?
     private var apiKey: String? { GoogleNavigationConfiguration(info: Bundle.main.infoDictionary ?? [:]).apiKey }
+    private var testing: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--uitesting")
+        #else
+        false
+        #endif
+    }
     var body: some View {
-        if let apiKey {
+        if testing {
+            Text("Mappa simulata · test").font(.caption).foregroundStyle(.secondary)
+        } else if let apiKey {
             GoogleStopPins(stops: stops, driverLocation: driverLocation, apiKey: apiKey)
         } else {
             Text("Mappa Google non ancora configurata. Le tappe restano disponibili nell’elenco.")
@@ -45,7 +54,7 @@ private struct GoogleStopPins: UIViewRepresentable {
         map.clear()
         var coordinates: [Coordinate] = []
         for (index, stop) in stops.enumerated() {
-            guard stop.googlePlaceId != nil, let coordinate = stop.coordinate, coordinate.isValid else { continue }
+            guard stop.googlePlaceId != nil, let coordinate = stop.displayCoordinate(), coordinate.isValid else { continue }
             coordinates.append(coordinate)
             let marker = GMSMarker(position: coordinate.clCoordinate)
             marker.title = "\(index + 1). \(stop.title)"

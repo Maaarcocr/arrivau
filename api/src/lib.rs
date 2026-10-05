@@ -4,8 +4,8 @@ mod db;
 mod error;
 mod invites;
 pub mod model;
-pub mod planner;
 pub mod places;
+pub mod planner;
 pub mod routing;
 
 use axum::{
@@ -145,17 +145,37 @@ impl AppState {
     }
 
     async fn resolve_place(&self, team: &str, id: &str) -> ApiResult<(Coordinate, i64)> {
+        let generation = places::generation(&*self.db()?, team)?;
+        self.resolve_place_in_generation(team, id, generation).await
+    }
+
+    async fn resolve_place_in_generation(
+        &self,
+        team: &str,
+        id: &str,
+        generation: i64,
+    ) -> ApiResult<(Coordinate, i64)> {
         if !places::valid_place_id(id) {
             return Err(ApiError::bad_request("Invalid Google Place ID"));
         }
-        if !matches!(self.authentication.as_ref(), Authentication::Demo) && id.starts_with("arrivau-test-") {
-            return Err(ApiError::bad_request("Test Place IDs are unavailable in production"));
+        if !matches!(self.authentication.as_ref(), Authentication::Demo)
+            && id.starts_with("arrivau-test-")
+        {
+            return Err(ApiError::bad_request(
+                "Test Place IDs are unavailable in production",
+            ));
         }
-        if let Some(cached) = places::cached(&*self.db()?, team, id)? {
-            return Ok(cached);
-        }
-        if places::retry_blocked(&*self.db()?, team, id)? {
-            return Err(places::unavailable());
+        {
+            let db = self.db()?;
+            if places::generation(&db, team)? != generation {
+                return Err(places::unavailable());
+            }
+            if let Some(cached) = places::cached(&db, team, id)? {
+                return Ok(cached);
+            }
+            if places::retry_blocked(&db, team, id)? {
+                return Err(places::unavailable());
+            }
         }
         let result = if matches!(self.authentication.as_ref(), Authentication::Demo) {
             match places::demo_coordinate(id) {
@@ -165,39 +185,64 @@ impl AppState {
         } else {
             self.places.resolve(id).await
         };
+        let db = self.db()?;
+        if places::generation(&db, team)? != generation {
+            return Err(places::unavailable());
+        }
         let coordinate = match result {
             Ok(coordinate) => coordinate,
             Err(error) => {
-                places::failed(&*self.db()?, team, id, self.clock.now())?;
+                places::failed(&db, team, id, self.clock.now())?;
                 return Err(error);
             }
         };
         let now = self.clock.now();
-        places::save(&*self.db()?, team, id, coordinate, now)?;
+        places::save(&db, team, id, coordinate, now)?;
         Ok((coordinate, now))
     }
 
     /// Refresh only destinations involved in this planning operation. Provider
     /// failure leaves null coordinates and the planner retains structural stops
     /// with estimates unavailable, so neither assignment mode can use stale data.
-    async fn refresh_places(&self, team: &str, candidate: Option<&str>, driver: Option<&str>) -> ApiResult<()> {
-        self.refresh_places_with_budget(team, candidate, driver, std::time::Duration::from_secs(9)).await
+    async fn refresh_places(
+        &self,
+        team: &str,
+        candidate: Option<&str>,
+        driver: Option<&str>,
+    ) -> ApiResult<()> {
+        self.refresh_places_with_budget(team, candidate, driver, std::time::Duration::from_secs(9))
+            .await
     }
 
-    async fn refresh_places_with_budget(&self, team: &str, candidate: Option<&str>, driver: Option<&str>, budget: std::time::Duration) -> ApiResult<()> {
-        let ids = {
+    async fn refresh_places_with_budget(
+        &self,
+        team: &str,
+        candidate: Option<&str>,
+        driver: Option<&str>,
+        budget: std::time::Duration,
+    ) -> ApiResult<()> {
+        let (ids, generation) = {
             let db = self.db()?;
             let mut ids = std::collections::BTreeSet::new();
             for job in db::planning_deliveries(&db, team)? {
-                if job.status == DeliveryStatus::Pending && candidate != Some(job.id.as_str()) { continue; }
-                if driver.is_some_and(|id| job.driver_id.as_deref() != Some(id))
-                    && candidate != Some(job.id.as_str()) { continue; }
-                if job.status != DeliveryStatus::PickedUp {
-                    if let Some(id) = job.pickup_google_place_id { ids.insert(id); }
+                if job.status == DeliveryStatus::Pending && candidate != Some(job.id.as_str()) {
+                    continue;
                 }
-                if let Some(id) = job.dropoff_google_place_id { ids.insert(id); }
+                if driver.is_some_and(|id| job.driver_id.as_deref() != Some(id))
+                    && candidate != Some(job.id.as_str())
+                {
+                    continue;
+                }
+                if job.status != DeliveryStatus::PickedUp {
+                    if let Some(id) = job.pickup_google_place_id {
+                        ids.insert(id);
+                    }
+                }
+                if let Some(id) = job.dropoff_google_place_id {
+                    ids.insert(id);
+                }
             }
-            ids
+            (ids, places::generation(&db, team)?)
         };
         let mut ids = ids.into_iter();
         let mut tasks = tokio::task::JoinSet::new();
@@ -206,15 +251,22 @@ impl AppState {
             let team = team.to_owned();
             tasks.spawn(async move {
                 // Never log provider bodies, key-bearing URLs or IDs.
-                let _ = state.resolve_place(&team, &id).await;
+                let _ = state
+                    .resolve_place_in_generation(&team, &id, generation)
+                    .await;
             });
         };
-        for id in ids.by_ref().take(4) { spawn(&mut tasks, id); }
+        for id in ids.by_ref().take(4) {
+            spawn(&mut tasks, id);
+        }
         let _ = tokio::time::timeout(budget, async {
             while tasks.join_next().await.is_some() {
-                if let Some(id) = ids.next() { spawn(&mut tasks, id); }
+                if let Some(id) = ids.next() {
+                    spawn(&mut tasks, id);
+                }
             }
-        }).await;
+        })
+        .await;
         // A dropped JoinSet cancels every unresolved lookup. Missing locations
         // remain null; no worker can keep modifying snapshots after this returns.
         tasks.abort_all();
@@ -269,9 +321,14 @@ impl AppState {
                             driver.location = candidate.as_ref().and_then(|job| job.pickup);
                         }
                         let points = routing::plan_points(&driver, &jobs, candidate.as_ref());
-                        let allow_cache = !jobs.iter().filter(|job| job.driver_id.as_deref() == Some(driver.id.as_str()))
+                        let allow_cache = !jobs
+                            .iter()
+                            .filter(|job| job.driver_id.as_deref() == Some(driver.id.as_str()))
                             .chain(candidate.iter())
-                            .any(|job| job.pickup_google_place_id.is_some() || job.dropoff_google_place_id.is_some());
+                            .any(|job| {
+                                job.pickup_google_place_id.is_some()
+                                    || job.dropoff_google_place_id.is_some()
+                            });
                         (driver.id, driver.location, points, allow_cache)
                     })
                     .collect::<Vec<_>>();
@@ -311,7 +368,8 @@ impl AppState {
     }
 
     fn db(&self) -> ApiResult<MutexGuard<'_, Connection>> {
-        let db = self.db
+        let db = self
+            .db
             .lock()
             .map_err(|_| ApiError::internal("Database lock poisoned"))?;
         places::purge(&db, self.clock.now())?;
@@ -327,7 +385,8 @@ impl AppState {
     }
 
     async fn dispatch_ready_inner(&self) -> ApiResult<usize> {
-        self.dispatch_ready_with_budget(std::time::Duration::from_secs(9)).await
+        self.dispatch_ready_with_budget(std::time::Duration::from_secs(9))
+            .await
     }
 
     async fn dispatch_ready_with_budget(&self, budget: std::time::Duration) -> ApiResult<usize> {
@@ -371,7 +430,9 @@ impl AppState {
         let mut assigned = 0;
         let sweep_started = tokio::time::Instant::now();
         for (ready_at, id, team) in candidates {
-            let Some(remaining) = budget.checked_sub(sweep_started.elapsed()) else { break; };
+            let Some(remaining) = budget.checked_sub(sweep_started.elapsed()) else {
+                break;
+            };
             let outcome: ApiResult<bool> = tokio::time::timeout(remaining, async {
                 let travel = self.prepare_travel(&team, Some(&id), None, false).await?;
                 let mut db = self.db()?;
@@ -384,8 +445,16 @@ impl AppState {
                 tx.commit()?;
                 Ok(assigned)
             })
-            .await.unwrap_or_else(|_| Err(ApiError::unprocessable("Dispatch refresh deadline reached; retrying remaining work next tick")));
-            self.dispatch_cursor.lock().map_err(|_| ApiError::internal("Dispatcher lock poisoned"))?.after = Some((ready_at, id));
+            .await
+            .unwrap_or_else(|_| {
+                Err(ApiError::unprocessable(
+                    "Dispatch refresh deadline reached; retrying remaining work next tick",
+                ))
+            });
+            self.dispatch_cursor
+                .lock()
+                .map_err(|_| ApiError::internal("Dispatcher lock poisoned"))?
+                .after = Some((ready_at, id));
             match outcome {
                 Ok(true) => assigned += 1,
                 Ok(false) => {}
@@ -969,7 +1038,12 @@ async fn create_delivery(
             input.pickup_google_place_id = restaurant.google_place_id;
         }
         input.validate().map_err(ApiError::bad_request)?;
-        if let Some(saved) = key.as_ref().map(|k| k.replay(&db, &principal)).transpose()?.flatten() {
+        if let Some(saved) = key
+            .as_ref()
+            .map(|k| k.replay(&db, &principal))
+            .transpose()?
+            .flatten()
+        {
             return Ok((StatusCode::CREATED, Json(saved)));
         }
     }
@@ -983,22 +1057,31 @@ async fn create_delivery(
     let mut db = state.db()?;
     let tx = db.transaction()?;
     // Another request may have committed while provider I/O was in flight.
-    if let Some(saved) = key.as_ref().map(|k| k.replay(&tx, &principal)).transpose()?.flatten() {
+    if let Some(saved) = key
+        .as_ref()
+        .map(|k| k.replay(&tx, &principal))
+        .transpose()?
+        .flatten()
+    {
         return Ok((StatusCode::CREATED, Json(saved)));
     }
     let mut delivery = input.into_delivery(state.clock.now());
     if let Some(id) = &delivery.pickup_google_place_id {
-        let (coordinate, at) = places::cached(&tx, &principal.team_id, id)?.ok_or_else(places::unavailable)?;
+        let (coordinate, at) =
+            places::cached(&tx, &principal.team_id, id)?.ok_or_else(places::unavailable)?;
         delivery.pickup = Some(coordinate);
         delivery.pickup_coordinate_fetched_at = Some(at);
     }
     if let Some(id) = &delivery.dropoff_google_place_id {
-        let (coordinate, at) = places::cached(&tx, &principal.team_id, id)?.ok_or_else(places::unavailable)?;
+        let (coordinate, at) =
+            places::cached(&tx, &principal.team_id, id)?.ok_or_else(places::unavailable)?;
         delivery.dropoff = Some(coordinate);
         delivery.dropoff_coordinate_fetched_at = Some(at);
     }
     db::save_delivery(&tx, &principal.team_id, &delivery)?;
-    if let Some(key) = key { key.save(&tx, &principal, &delivery)?; }
+    if let Some(key) = key {
+        key.save(&tx, &principal, &delivery)?;
+    }
     tx.commit()?;
     Ok((StatusCode::CREATED, Json(delivery)))
 }
@@ -1023,7 +1106,12 @@ async fn create_restaurant(
     let key = Idempotency::parse(&headers, "/restaurants", &input)?;
     {
         let db = state.db()?;
-        if let Some(saved) = key.as_ref().map(|key| key.replay_body::<Restaurant>(&db, &principal)).transpose()?.flatten() {
+        if let Some(saved) = key
+            .as_ref()
+            .map(|key| key.replay_body::<Restaurant>(&db, &principal))
+            .transpose()?
+            .flatten()
+        {
             db::restaurant(&db, &principal.team_id, &saved.id)?;
             return Ok((StatusCode::CREATED, Json(saved)));
         }
@@ -1033,13 +1121,19 @@ async fn create_restaurant(
     }
     let mut db = state.db()?;
     let tx = db.transaction()?;
-    if let Some(saved) = key.as_ref().map(|key| key.replay_body::<Restaurant>(&tx, &principal)).transpose()?.flatten() {
+    if let Some(saved) = key
+        .as_ref()
+        .map(|key| key.replay_body::<Restaurant>(&tx, &principal))
+        .transpose()?
+        .flatten()
+    {
         db::restaurant(&tx, &principal.team_id, &saved.id)?;
         return Ok((StatusCode::CREATED, Json(saved)));
     }
     let mut coordinate_fetched_at = None;
     if let Some(id) = &input.google_place_id {
-        let (coordinate, at) = places::cached(&tx, &principal.team_id, id)?.ok_or_else(places::unavailable)?;
+        let (coordinate, at) =
+            places::cached(&tx, &principal.team_id, id)?.ok_or_else(places::unavailable)?;
         input.coordinate = Some(coordinate);
         coordinate_fetched_at = Some(at);
     }
@@ -1053,7 +1147,9 @@ async fn create_restaurant(
         coordinate_fetched_at,
     };
     db::save_restaurant(&tx, &principal.team_id, &restaurant)?;
-    if let Some(key) = key { key.save(&tx, &principal, &restaurant)?; }
+    if let Some(key) = key {
+        key.save(&tx, &principal, &restaurant)?;
+    }
     tx.commit()?;
     Ok((StatusCode::CREATED, Json(restaurant)))
 }
@@ -2012,7 +2108,9 @@ mod routing_snapshot_tests {
             .await
             .unwrap();
         let times = pickup.times("driver-1");
-        assert!(times.seconds(candidate.pickup.unwrap(), candidate.dropoff.unwrap()).is_some());
+        assert!(times
+            .seconds(candidate.pickup.unwrap(), candidate.dropoff.unwrap())
+            .is_some());
         assert_eq!(times.seconds(gps, candidate.dropoff.unwrap()), None);
         let stored = db::driver(&state.db().unwrap(), "demo", "driver-1").unwrap();
         assert_eq!(stored.location, driver.location);
@@ -2162,7 +2260,6 @@ mod routing_snapshot_tests {
     }
 }
 
-
 #[cfg(test)]
 mod places_budget_tests {
     use super::*;
@@ -2172,25 +2269,32 @@ mod places_budget_tests {
     impl places::PlaceResolver for HangingResolver {
         fn resolve<'a>(&'a self, _: &'a str) -> places::ResolveFuture<'a> {
             Box::pin(async move {
-                self.0.fetch_add(1,Ordering::SeqCst);
+                self.0.fetch_add(1, Ordering::SeqCst);
                 std::future::pending().await
             })
         }
     }
     struct FixedClock;
-    impl Clock for FixedClock { fn now(&self) -> i64 { 1000 } }
+    impl Clock for FixedClock {
+        fn now(&self) -> i64 {
+            1000
+        }
+    }
 
     #[tokio::test]
     async fn stalled_refresh_is_bounded_and_cancels_outstanding_work() {
         let dir = tempfile::tempdir().unwrap();
         let resolver = Arc::new(HangingResolver(AtomicUsize::new(0)));
-        let state = AppState::open_with_clock(dir.path().join("budget.db"),true,Arc::new(FixedClock)).unwrap()
-            .with_places(places::PlacesService::with_resolver(resolver.clone()));
+        let state =
+            AppState::open_with_clock(dir.path().join("budget.db"), true, Arc::new(FixedClock))
+                .unwrap()
+                .with_places(places::PlacesService::with_resolver(resolver.clone()));
         let mut input: NewDelivery = serde_json::from_value(serde_json::json!({
             "shop_name":"My shop", "pickup_address":"My pickup", "dropoff_address":"My dropoff",
             "pickup_google_place_id":"ChIJpickup", "dropoff_google_place_id":"ChIJdropoff",
             "ready_at":1000, "deadline_at":5000,"load_units":1,"max_ride_seconds":1800
-        })).unwrap();
+        }))
+        .unwrap();
         {
             let db = state.db().unwrap();
             for index in 0..8 {
@@ -2199,29 +2303,52 @@ mod places_budget_tests {
                 let mut job = input.clone().into_delivery(1000);
                 job.status = DeliveryStatus::Assigned;
                 job.driver_id = Some("driver-1".into());
-                db::save_delivery(&db,"demo",&job).unwrap();
+                db::save_delivery(&db, "demo", &job).unwrap();
             }
         }
-        tokio::time::timeout(std::time::Duration::from_secs(1),
-            state.refresh_places_with_budget("demo",None,Some("driver-1"),std::time::Duration::from_millis(30)))
-            .await.unwrap().unwrap();
-        assert_eq!(resolver.0.load(Ordering::SeqCst),4,"only four provider lookups can be in flight");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            state.refresh_places_with_budget(
+                "demo",
+                None,
+                Some("driver-1"),
+                std::time::Duration::from_millis(30),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            resolver.0.load(Ordering::SeqCst),
+            4,
+            "only four provider lookups can be in flight"
+        );
         let db = state.db().unwrap();
-        let jobs = db::planning_deliveries(&db,"demo").unwrap();
-        assert_eq!(jobs.len(),8);
-        assert!(jobs.iter().all(|job|job.pickup.is_none() && job.dropoff.is_none()));
+        let jobs = db::planning_deliveries(&db, "demo").unwrap();
+        assert_eq!(jobs.len(), 8);
+        assert!(jobs
+            .iter()
+            .all(|job| job.pickup.is_none() && job.dropoff.is_none()));
     }
 
     #[tokio::test]
     async fn slow_first_candidate_does_not_starve_the_unattempted_remainder() {
         let dir = tempfile::tempdir().unwrap();
-        let state = AppState::open_with_clock(dir.path().join("fair-places.db"),true,Arc::new(FixedClock)).unwrap()
-            .with_places(places::PlacesService::with_resolver(Arc::new(HangingResolver(AtomicUsize::new(0)))));
+        let state = AppState::open_with_clock(
+            dir.path().join("fair-places.db"),
+            true,
+            Arc::new(FixedClock),
+        )
+        .unwrap()
+        .with_places(places::PlacesService::with_resolver(Arc::new(
+            HangingResolver(AtomicUsize::new(0)),
+        )));
         let input: NewDelivery = serde_json::from_value(serde_json::json!({
             "shop_name":"My shop", "pickup_address":"My pickup", "dropoff_address":"My dropoff",
             "pickup_google_place_id":"ChIJpickup", "dropoff_google_place_id":"ChIJdropoff",
             "ready_at":100, "deadline_at":5000,"load_units":1,"max_ride_seconds":1800
-        })).unwrap();
+        }))
+        .unwrap();
         let mut blocked = input.into_delivery(1000);
         blocked.readiness_revision = 1;
         let mut good = blocked.clone();
@@ -2229,21 +2356,40 @@ mod places_budget_tests {
         good.ready_at = 101;
         good.pickup_google_place_id = None;
         good.dropoff_google_place_id = None;
-        good.pickup = Some(Coordinate {lat:36.7,lng:15.1});
+        good.pickup = Some(Coordinate {
+            lat: 36.7,
+            lng: 15.1,
+        });
         good.dropoff = good.pickup;
         {
             let db = state.db().unwrap();
-            let mut driver = db::driver(&db,"demo","driver-1").unwrap();
+            let mut driver = db::driver(&db, "demo", "driver-1").unwrap();
             driver.active = true;
             driver.location = good.pickup;
             driver.location_updated_at = Some(1000);
-            db::save_driver(&db,"demo",&driver).unwrap();
-            db::save_delivery(&db,"demo",&blocked).unwrap();
-            db::save_delivery(&db,"demo",&good).unwrap();
+            db::save_driver(&db, "demo", &driver).unwrap();
+            db::save_delivery(&db, "demo", &blocked).unwrap();
+            db::save_delivery(&db, "demo", &good).unwrap();
         }
-        assert_eq!(state.dispatch_ready_with_budget(std::time::Duration::from_millis(30)).await.unwrap(),0);
-        assert_eq!(state.dispatch_ready_with_budget(std::time::Duration::from_secs(1)).await.unwrap(),1);
-        assert_eq!(db::delivery(&state.db().unwrap(),"demo",&good.id).unwrap().status,DeliveryStatus::Assigned);
+        assert_eq!(
+            state
+                .dispatch_ready_with_budget(std::time::Duration::from_millis(30))
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .dispatch_ready_with_budget(std::time::Duration::from_secs(1))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db::delivery(&state.db().unwrap(), "demo", &good.id)
+                .unwrap()
+                .status,
+            DeliveryStatus::Assigned
+        );
     }
-
 }

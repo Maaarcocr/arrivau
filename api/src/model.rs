@@ -279,7 +279,6 @@ pub struct Suggestion {
     pub route: Route,
 }
 
-
 /// A Google identifier is only syntax-checked here. Provenance is established by
 /// the server's Details response, never by client coordinates or timestamps.
 fn valid_destination(coordinate: Option<Coordinate>, place_id: Option<&str>) -> bool {

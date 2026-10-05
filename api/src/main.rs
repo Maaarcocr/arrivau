@@ -64,4 +64,3 @@ async fn main() -> Result<(), Box<dyn Error>> {
     dispatcher.abort();
     Ok(())
 }
-

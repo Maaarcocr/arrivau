@@ -841,13 +841,12 @@ final class DeliveryFlowUITests: XCTestCase {
         let segment = picker.buttons[title]
         print("Role switch to \(title): app state=\(app.state.rawValue), picker enabled=\(picker.isEnabled), target selected=\(segment.isSelected), driver screen=\(element("driver_screen").exists), shift settings=\(app.buttons["shift_settings"].exists), create delivery=\(app.buttons["create_delivery"].exists)")
         tap(segment)
-        let selected = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND selected == true"), object: segment)
-        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 15), .completed,
-                       "Role picker did not select \(title); picker enabled=\(picker.isEnabled), segment selected=\(segment.isSelected), app state=\(app.state.rawValue)")
         let destination = title == "Centrale" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
-        XCTAssertTrue(destination.waitForExistence(timeout: 15),
-                      "Selected \(title) but destination is missing; driver screen=\(element("driver_screen").exists), picker selected=\(segment.isSelected), app state=\(app.state.rawValue)")
+        let arrived = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            segment.exists && segment.isSelected && destination.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [arrived], timeout: 15), .completed,
+                       "Role switch to \(title) failed; target selected=\(segment.exists && segment.isSelected), destination=\(destination.exists), driver screen=\(element("driver_screen").exists), picker enabled=\(picker.exists && picker.isEnabled), app state=\(app.state.rawValue)")
         assertDualAccountView(title)
     }
 

@@ -6,6 +6,7 @@ mod invites;
 pub mod model;
 pub mod places;
 pub mod planner;
+pub mod privacy;
 pub mod routing;
 
 use axum::{
@@ -47,6 +48,7 @@ impl Clock for SystemClock {
 
 #[derive(Clone)]
 pub struct AppState {
+    privacy_notice: privacy::PrivacyNotice,
     routing: RoutingService,
     places: places::PlacesService,
     db: Arc<Mutex<Connection>>,
@@ -83,6 +85,7 @@ impl AppState {
         }
         let db = db::open(path, "demo", "demo", &[]).map_err(|e| e.message)?;
         Ok(Self {
+            privacy_notice: privacy::PrivacyNotice::default(),
             routing: RoutingService::default(),
             places: places::PlacesService::default(),
             db: Arc::new(Mutex::new(db)),
@@ -123,6 +126,7 @@ impl AppState {
         .map_err(|e| e.message)?;
         auth::initialize(&mut db, &config).map_err(|e| e.message)?;
         Ok(Self {
+            privacy_notice: privacy::PrivacyNotice::default(),
             routing: RoutingService::default(),
             places: places::PlacesService::default(),
             db: Arc::new(Mutex::new(db)),
@@ -136,6 +140,11 @@ impl AppState {
 
     pub fn with_routing(mut self, routing: RoutingService) -> Self {
         self.routing = routing;
+        self
+    }
+
+    pub fn with_privacy_notice(mut self, notice: privacy::PrivacyNotice) -> Self {
+        self.privacy_notice = notice;
         self
     }
 
@@ -662,6 +671,7 @@ pub fn app(state: AppState) -> Router {
         .route("/drivers/{id}/route", get(driver_route))
         .route_layer(middleware::from_fn_with_state(state.clone(), authenticate));
     Router::new()
+        .route("/privacy", get(privacy::show))
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({"status": "ok"})) }),

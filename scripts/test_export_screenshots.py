@@ -33,9 +33,10 @@ class ScreenshotExportTests(unittest.TestCase):
         self.db.execute("INSERT INTO Attachments VALUES (?, ?, 'public.png', 0)", (name, ref))
         self.db.commit()
 
-    def make_compact_result(self):
+    def make_compact_result(self, include_optional=False):
         records = bytearray(b"[T")
-        for index, name in enumerate(exporter.NAMES):
+        names = exporter.EXPORT_NAMES if include_optional else exporter.NAMES
+        for index, name in enumerate(names):
             ref = f"0~compact{index}"
             (self.result / "Data" / ("data." + ref)).write_bytes(exporter.PNG + b"fixture")
             records.extend((f"K4:name[S6:StringK2:_vV{len(name)}:{name}]"
@@ -61,6 +62,25 @@ class ScreenshotExportTests(unittest.TestCase):
         self.add(exporter.NAMES[0])
         with self.assertRaisesRegex(ValueError, "Missing expected"):
             exporter.export(self.result, self.root / "screens", True)
+
+    def test_optional_demo_login_failure_is_exported_without_becoming_required(self):
+        for index, name in enumerate(exporter.NAMES):
+            self.add(name, f"0~fixture{index}")
+        self.add("demo-login-failure", "0~login-failure")
+        manifest = exporter.export(self.result, self.root / "screens", True)
+        self.assertEqual(manifest["missing"], [])
+        self.assertTrue((self.root / "screens" / "demo-login-failure.png").exists())
+        self.db.execute("DELETE FROM Attachments WHERE name='demo-login-failure'")
+        self.db.commit()
+        manifest = exporter.export(self.result, self.root / "screens", True)
+        self.assertEqual(manifest["missing"], [])
+        self.assertFalse((self.root / "screens" / "demo-login-failure.png").exists())
+
+    def test_compact_optional_demo_login_failure_is_discovered(self):
+        self.make_compact_result(include_optional=True)
+        manifest = exporter.export(self.result, self.root / "screens", True)
+        self.assertEqual([item["name"] for item in manifest["screenshots"]], list(exporter.EXPORT_NAMES))
+        self.assertEqual(manifest["missing"], [])
 
     def test_compact_result_without_materialized_sqlite_index(self):
         self.make_compact_result()

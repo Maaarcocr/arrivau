@@ -20,6 +20,35 @@ Never proxy it, bind it to a LAN, or enter customer data. Non-loopback binding
 is rejected even when production ingress flags are supplied. It cannot load a
 production account configuration, and demo databases cannot become pilot databases.
 
+## Public privacy notice
+
+`GET /privacy` is public and sends no session cookies. The approved Italian pilot
+notice is included in [deploy/privacy.html](../deploy/privacy.html). On the
+existing systemd deployment, install it from the checkout:
+
+```sh
+sudo install -Dm644 deploy/privacy.html /etc/arrivau/privacy.html
+```
+
+Add `ARRIVAU_PRIVACY_NOTICE_PATH=/etc/arrivau/privacy.html` to the existing API
+environment file, then run `sudo systemctl restart arrivau`. Container deployments
+can mount the same file read-only and set the same variable through their existing
+deployment process. The file is read once at startup. No extra host is required;
+the existing HTTPS proxy forwards this route as it does the API.
+
+When the setting is absent, `/privacy` returns HTTP 503 and a clear unavailable
+message. A configured missing file, incomplete HTML document or draft containing
+`[[placeholders]]` or `ARRIVAU_PRIVACY_DRAFT` fails startup. These checks prevent
+accidental draft publication; they do not determine legal accuracy or approval.
+The page permits inline CSS but no scripts, embedded frames or external resources.
+Links to Google and Apple policies can still be opened normally.
+
+Use the same verified HTTPS `/privacy` URL in App Store Connect. Verify that it
+returns HTTP 200 without authentication and contains the owner's approved
+identity, contact, data practices, retention and deletion information before
+submitting a build. The app links to its selected API server before login/signup
+and to the authenticated server after login.
+
 ## Operator-managed pilot accounts
 
 Use one account per person, with stable IDs that are never recycled for someone

@@ -838,9 +838,74 @@ final class DeliveryFlowUITests: XCTestCase {
     private func login(_ role: String) {
         tap(app.buttons["login_\(role)"])
         let destination = role == "dispatcher" || role == "dual" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
-        XCTAssertTrue(destination.waitForExistence(timeout: 20), "Check the running Rust API and fresh database")
+        let reachedDestination = destination.waitForExistence(timeout: 20)
+        var diagnostic = "Check the running Rust API and fresh database"
+        if !reachedDestination {
+            let loginButton = app.buttons["login_\(role)"]
+            let loginExists = loginButton.exists
+            let enabled = loginExists && loginButton.isEnabled
+            let hittable = loginExists && loginButton.isHittable
+            let errorAlert = app.alerts["Operazione non riuscita"].exists
+            diagnostic += "; app state=\(app.state.rawValue), login exists=\(loginExists), enabled=\(enabled), hittable=\(hittable)"
+            diagnostic += ", loading=\(app.progressIndicators.firstMatch.exists), error alert=\(errorAlert)"
+            print("ARRIVAU_UI_LOGIN_STATE \(diagnostic)")
+            // This class launches only the isolated demo with public fixture identities.
+            // Export this exact PNG, never a raw result bundle or accessibility hierarchy.
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "demo-login-failure"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            let healthStatus = diagnoseLoopbackAPI("health")
+            let identityStatus = diagnoseLoopbackAPI("v1/me")
+            diagnostic += "; health=\(healthStatus), demo identity=\(identityStatus)"
+            print("ARRIVAU_UI_LOGIN_PROBES health=\(healthStatus), demo identity=\(identityStatus)")
+        }
+        XCTAssertTrue(reachedDestination, diagnostic)
         XCTAssertTrue(app.buttons["switch_role"].exists, "Account settings must preserve the existing sign-out control")
         XCTAssertFalse(app.buttons["account_settings"].exists, "Public demo accounts must never offer self-deletion")
+    }
+
+    /// Only status/error codes from the disposable loopback API; never bodies or headers.
+    private func diagnoseLoopbackAPI(_ path: String) -> String {
+        guard ["127.0.0.1", "localhost", "::1", "[::1]"].contains(apiURL.host ?? "") else { return "not-loopback" }
+        var request = URLRequest(url: apiURL.appendingPathComponent(path))
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        if path == "v1/me" { request.setValue("Bearer demo-dispatcher", forHTTPHeaderField: "Authorization") }
+        let completed = XCTestExpectation(description: "Collect bounded loopback status")
+        let responseBox = ServerResponse()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        let session = URLSession(configuration: configuration, delegate: ProbeNoRedirects(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: request) { _, response, error in
+            if let error { responseBox.store(.failure(error)) }
+            else if let response { responseBox.store(.success((Data(), response))) }
+            completed.fulfill()
+        }
+        task.resume()
+        guard XCTWaiter.wait(for: [completed], timeout: 4) == .completed else {
+            task.cancel()
+            return "probe-timeout"
+        }
+        switch responseBox.load() {
+        case .some(.success(let (_, response))):
+            return "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)"
+        case .some(.failure(let error as URLError)): return "URL error \(error.code.rawValue)"
+        case .some(.failure(_)): return "transport-error"
+        case nil: return "no-response"
+        }
+    }
+
+    private final class ProbeNoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
     }
 
     private func assertDualAccountView(_ title: String) {
@@ -905,11 +970,15 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(settings.wait(for: .runningForeground, timeout: 10))
         // State updates are asynchronous; require a real background transition
         // before resuming. Never treat the foreground state as a passing fallback.
-        let background = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
-            guard let application = object as? XCUIApplication else { return false }
-            return application.state == .runningBackground || application.state == .runningBackgroundSuspended
-        }, object: app)
-        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 5), .completed,
+        // Supplying a background XCUIElement as the expectation object makes
+        // XCTest capture its accessibility hierarchy for diagnostics. Poll the
+        // process state directly instead, without that unrelated snapshot work.
+        let application = app!
+        let background = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let state = application.state
+            return state == .runningBackground || state == .runningBackgroundSuspended
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 10), .completed,
                        "App switch did not reach a background state; Arrivau=\(app.state.rawValue), Settings=\(settings.state.rawValue)")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
@@ -921,7 +990,8 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func backToDeliveries() {
-        tap(app.navigationBars.buttons.element(boundBy: 0))
+        // Extra navigation-bar actions must not change which control goes back.
+        tap(app.navigationBars.buttons["BackButton"])
         waitUntilAbsent(app.staticTexts["delivery_status"])
         XCTAssertTrue(app.buttons["create_delivery"].waitForExistence(timeout: 5))
     }
@@ -1066,4 +1136,3 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed)
     }
 }
-

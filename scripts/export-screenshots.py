@@ -19,6 +19,9 @@ NAMES = (
     "04-driver-shift", "05-driver-assignment", "06-address-search", "07-delivery-timing",
     "dual-account-centrale", "dual-account-corriere",
 )
+# Captured only by the isolated-demo login helper on failure; never required on success.
+OPTIONAL_NAMES = ("demo-login-failure",)
+EXPORT_NAMES = NAMES + OPTIONAL_NAMES
 PNG = b"\x89PNG\r\n\x1a\n"
 ZSTD = b"\x28\xb5\x2f\xfd"
 
@@ -35,7 +38,7 @@ def decompress(payload):
 
 def compact_records(result):
     """Read observed XCResult v3.53 named attachment records before lazy indexing."""
-    names = b"|".join(re.escape(name.encode()) for name in NAMES)
+    names = b"|".join(re.escape(name.encode()) for name in EXPORT_NAMES)
     pattern = re.compile(
         rb"K4:name\[S6:StringK2:_vV[0-9]+:(" + names + rb")\]"
         rb"K10:payloadRef\[(?:S9:Reference|T\[K2:_nV9:Reference\])"
@@ -67,7 +70,7 @@ def export(result, destination, require_all=False):
     result, destination = pathlib.Path(result).resolve(), pathlib.Path(destination).resolve()
     database = result / "database.sqlite3"
     destination.mkdir(parents=True, exist_ok=True)
-    for name in NAMES:
+    for name in EXPORT_NAMES:
         (destination / (name + ".png")).unlink(missing_ok=True)
     found = {}
     if database.is_file():
@@ -78,7 +81,7 @@ def export(result, destination, require_all=False):
     else:
         records = compact_records(result)
     for name, ref, kind in records:
-        if name not in NAMES or kind != "public.png":
+        if name not in EXPORT_NAMES or kind != "public.png":
             continue
         if not ref or not re.fullmatch(r"[A-Za-z0-9_~=+-]+", ref):
             raise ValueError("Unsafe or unknown screenshot payload reference")
@@ -91,7 +94,7 @@ def export(result, destination, require_all=False):
         output = destination / (name + ".png")
         output.write_bytes(payload)
         found[name] = {"name": name, "file": output.name, "bytes": len(payload)}
-    summary = {"screenshots": [found[name] for name in NAMES if name in found],
+    summary = {"screenshots": [found[name] for name in EXPORT_NAMES if name in found],
                "missing": [name for name in NAMES if name not in found]}
     (destination / "manifest.json").write_text(json.dumps(summary, indent=2) + "\n")
     if require_all and summary["missing"]:
@@ -110,4 +113,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

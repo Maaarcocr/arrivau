@@ -67,6 +67,9 @@ struct InviteSignupView: View {
             .navigationTitle("Benvenuto in Arrivau")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    PrivacyPolicyLink().labelStyle(.iconOnly)
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Annulla") { password = ""; store.dismissInvite() }
                         .accessibilityIdentifier("cancel_invite")

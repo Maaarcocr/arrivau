@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Run an iOS app → real HTTP API E2E test against disposable state on macOS.
 set -euo pipefail
+DIAGNOSE_LOGIN_FIRST=0
+if [[ "${1:-}" == "--diagnose-login-first" && $# -eq 1 ]]; then
+  DIAGNOSE_LOGIN_FIRST=1
+elif [[ $# -ne 0 ]]; then
+  echo "Usage: test-ios.sh [--diagnose-login-first]" >&2
+  exit 1
+fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -46,22 +53,25 @@ trap cleanup EXIT
 python3 -m venv "$TEMP_DIR/screenshot-tools"
 EXPORT_PYTHON="$TEMP_DIR/screenshot-tools/bin/python"
 "$EXPORT_PYTHON" -m pip install --disable-pip-version-check --quiet zstandard==0.25.0
-ARRIVAU_DEMO=1 ARRIVAU_ADDR=127.0.0.1:8080 ARRIVAU_DB_PATH="$TEMP_DIR/arrivau.sqlite3" \
-  "$TARGET_DIR/debug/arrivau-api" >"$TEMP_DIR/api.log" 2>&1 &
-API_PID=$!
-READY=0
-for _ in {1..100}; do
-  if ! kill -0 "$API_PID" 2>/dev/null; then
-    echo "API exited during startup" >&2
-    exit 1
-  fi
-  if curl -fsS --max-time 1 http://127.0.0.1:8080/health >/dev/null; then
-    READY=1
-    break
-  fi
-  sleep 0.2
-done
-[[ "$READY" == "1" ]] || { echo "API did not become healthy" >&2; exit 1; }
+start_api() {
+  ARRIVAU_DEMO=1 ARRIVAU_ADDR=127.0.0.1:8080 ARRIVAU_DB_PATH="$1" \
+    "$TARGET_DIR/debug/arrivau-api" >"$TEMP_DIR/api.log" 2>&1 &
+  API_PID=$!
+  READY=0
+  for _ in {1..100}; do
+    if ! kill -0 "$API_PID" 2>/dev/null; then
+      echo "API exited during startup" >&2
+      exit 1
+    fi
+    if curl -fsS --max-time 1 http://127.0.0.1:8080/health >/dev/null; then
+      READY=1
+      break
+    fi
+    sleep 0.2
+  done
+  [[ "$READY" == "1" ]] || { echo "API did not become healthy" >&2; exit 1; }
+}
+start_api "$TEMP_DIR/arrivau.sqlite3"
 if [[ -z "${SIMULATOR_UDID:-}" ]]; then
   SDK_VERSION="$(xcrun --sdk iphonesimulator --show-sdk-version)"
   export SDK_VERSION
@@ -91,19 +101,32 @@ xcrun simctl boot "$SIMULATOR_UDID" 2>/dev/null || true
 xcrun simctl bootstatus "$SIMULATOR_UDID" -b
 (cd ios && xcodegen generate)
 mkdir -p ios/build
+run_native_tests() {
+  xcodebuild test \
+    -project ios/Arrivau.xcodeproj \
+    -scheme Arrivau \
+    -configuration Debug \
+    -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+    -derivedDataPath "$ROOT/ios/DerivedData" \
+    -resultBundlePath "$RESULT" \
+    -parallel-testing-enabled NO \
+    -testLanguage it \
+    -testRegion IT \
+    "$@" \
+    CODE_SIGNING_ALLOWED=NO
+}
+if [[ "$DIAGNOSE_LOGIN_FIRST" == "1" ]]; then
+  RESULT="$ROOT/ios/build/LoginProbe-$(date -u +%Y%m%dT%H%M%SZ).xcresult"
+  run_native_tests -only-testing:ArrivauUITests/DeliveryFlowUITests/testAddressSearchCancellationAndStaleResults
+  # The focused flow can create saved restaurants. Full checks always start
+  # against a separate disposable database and run every native test below.
+  kill "$API_PID"
+  wait "$API_PID" 2>/dev/null || true
+  API_PID=""
+  start_api "$TEMP_DIR/arrivau-full.sqlite3"
+fi
 RESULT="$ROOT/ios/build/TestResults-$(date -u +%Y%m%dT%H%M%SZ).xcresult"
-xcodebuild test \
-  -project ios/Arrivau.xcodeproj \
-  -scheme Arrivau \
-  -configuration Debug \
-  -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
-  -derivedDataPath "$ROOT/ios/DerivedData" \
-  -resultBundlePath "$RESULT" \
-  -parallel-testing-enabled NO \
-  -testLanguage it \
-  -testRegion IT \
-  CODE_SIGNING_ALLOWED=NO
+run_native_tests
 "$EXPORT_PYTHON" scripts/export-screenshots.py "$RESULT" "$ROOT/ios/build/screenshots" --require-all
 printf '\nNative tests passed; Xcode result: %s\n' "$RESULT"
-
 

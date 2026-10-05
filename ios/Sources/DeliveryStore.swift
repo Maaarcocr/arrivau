@@ -47,6 +47,10 @@ final class DeliveryStore: ObservableObject {
     @Published private(set) var syncErrorMessage: String?
     @Published private(set) var locationErrorMessage: String?
     @Published var apiURL: String
+    var privacyPolicyURL: URL? {
+        let origin = client?.baseURL.absoluteString ?? apiURL
+        return (try? APIConfiguration.validatedURL(origin, mode: mode))?.appendingPathComponent("privacy")
+    }
     let location: LocationReporter
     let isUITesting: Bool
     let mode: ConnectionMode

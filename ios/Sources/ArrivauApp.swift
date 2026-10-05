@@ -61,6 +61,9 @@ struct RootView: View {
                             else { DriverView() }
                         }
                         .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                PrivacyPolicyLink().labelStyle(.iconOnly)
+                            }
                             if store.canDeleteAccount {
                                 ToolbarItem(placement: .topBarTrailing) {
                                     Button { Task { await store.beginAccountDeletionReview() } } label: {
@@ -153,6 +156,11 @@ struct LoginView: View {
             }
             .navigationTitle("Benvenuto")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    PrivacyPolicyLink().labelStyle(.iconOnly)
+                }
+            }
         }
         .onDisappear { password = ""; pastedInvite = "" }
     }

@@ -838,25 +838,74 @@ final class DeliveryFlowUITests: XCTestCase {
     private func login(_ role: String) {
         tap(app.buttons["login_\(role)"])
         let destination = role == "dispatcher" || role == "dual" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
-        // Poll the expected screen without attaching an XCUIElement as the
-        // waiter's diagnostic object. The same destination and budget still apply.
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            destination.exists
-        }, object: nil)
-        let outcome = XCTWaiter.wait(for: [ready], timeout: 20)
-        var details = "Check the running Rust API and fresh database"
-        if outcome != .completed {
-            let login = app.buttons["login_\(role)"]
-            let loginExists = login.exists
-            let enabled = loginExists && login.isEnabled
-            let hittable = loginExists && login.isHittable
+        let reachedDestination = destination.waitForExistence(timeout: 20)
+        var diagnostic = "Check the running Rust API and fresh database"
+        if !reachedDestination {
+            let loginButton = app.buttons["login_\(role)"]
+            let loginExists = loginButton.exists
+            let enabled = loginExists && loginButton.isEnabled
+            let hittable = loginExists && loginButton.isHittable
             let errorAlert = app.alerts["Operazione non riuscita"].exists
-            details += "; app state=\(app.state.rawValue), login exists=\(loginExists), enabled=\(enabled), hittable=\(hittable)"
-            details += ", loading=\(app.progressIndicators.firstMatch.exists), error alert=\(errorAlert)"
+            diagnostic += "; app state=\(app.state.rawValue), login exists=\(loginExists), enabled=\(enabled), hittable=\(hittable)"
+            diagnostic += ", loading=\(app.progressIndicators.firstMatch.exists), error alert=\(errorAlert)"
+            print("ARRIVAU_UI_LOGIN_STATE \(diagnostic)")
+            // This class launches only the isolated demo with public fixture identities.
+            // Export this exact PNG, never a raw result bundle or accessibility hierarchy.
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "demo-login-failure"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            let healthStatus = diagnoseLoopbackAPI("health")
+            let identityStatus = diagnoseLoopbackAPI("v1/me")
+            diagnostic += "; health=\(healthStatus), demo identity=\(identityStatus)"
+            print("ARRIVAU_UI_LOGIN_PROBES health=\(healthStatus), demo identity=\(identityStatus)")
         }
-        XCTAssertEqual(outcome, .completed, details)
+        XCTAssertTrue(reachedDestination, diagnostic)
         XCTAssertTrue(app.buttons["switch_role"].exists, "Account settings must preserve the existing sign-out control")
         XCTAssertFalse(app.buttons["account_settings"].exists, "Public demo accounts must never offer self-deletion")
+    }
+
+    /// Only status/error codes from the disposable loopback API; never bodies or headers.
+    private func diagnoseLoopbackAPI(_ path: String) -> String {
+        guard ["127.0.0.1", "localhost", "::1", "[::1]"].contains(apiURL.host ?? "") else { return "not-loopback" }
+        var request = URLRequest(url: apiURL.appendingPathComponent(path))
+        request.timeoutInterval = 3
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpShouldHandleCookies = false
+        if path == "v1/me" { request.setValue("Bearer demo-dispatcher", forHTTPHeaderField: "Authorization") }
+        let completed = XCTestExpectation(description: "Collect bounded loopback status")
+        let responseBox = ServerResponse()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        let session = URLSession(configuration: configuration, delegate: ProbeNoRedirects(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: request) { _, response, error in
+            if let error { responseBox.store(.failure(error)) }
+            else if let response { responseBox.store(.success((Data(), response))) }
+            completed.fulfill()
+        }
+        task.resume()
+        guard XCTWaiter.wait(for: [completed], timeout: 4) == .completed else {
+            task.cancel()
+            return "probe-timeout"
+        }
+        switch responseBox.load() {
+        case .some(.success(let (_, response))):
+            return "HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)"
+        case .some(.failure(let error as URLError)): return "URL error \(error.code.rawValue)"
+        case .some(.failure(_)): return "transport-error"
+        case nil: return "no-response"
+        }
+    }
+
+    private final class ProbeNoRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
     }
 
     private func assertDualAccountView(_ title: String) {

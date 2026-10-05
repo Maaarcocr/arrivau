@@ -59,7 +59,7 @@ jobs:
         run: ./scripts/test-archive-scoping.sh
       - name: Run native unit and UI tests with real server
         id: native-tests
-        run: ./scripts/test-ios.sh
+        run: ./scripts/test-ios.sh --diagnose-login-first
       # Raw .xcresult bundles can contain unrelated simulator service credentials
       # in compressed system diagnostics. Never upload the bundles or diagnostics.
       - name: Record safe iOS check summary
@@ -91,5 +91,4 @@ jobs:
           name: arrivau-ios-screenshots
           path: ios/build/screenshots
           if-no-files-found: warn
-
 

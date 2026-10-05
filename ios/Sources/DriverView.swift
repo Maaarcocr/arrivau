@@ -11,72 +11,76 @@ struct DriverView: View {
     }
 
     var body: some View {
-        List {
-            if active || store.route?.stops.isEmpty == false {
-                Section {
-                    RouteMap(stops: store.route?.stops ?? [], driverLocation: store.currentDriver?.location)
-                        .listRowInsets(EdgeInsets())
-                }
-            }
-            if let route = store.route, let stop = route.stops.first,
-               let delivery = store.deliveries.first(where: { $0.id == stop.deliveryId }) {
-                nextStop(stop, delivery: delivery, route: route)
-            } else if active {
-                Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label(store.route == nil ? "Caricamento del percorso" : "In attesa di consegne", systemImage: "bicycle")
-                            .font(.headline)
-                        Text("La prossima tappa apparirà qui automaticamente.")
-                            .font(.subheadline).foregroundStyle(.secondary)
-                            .accessibilityIdentifier(store.route == nil ? "loading_route" : "empty_route")
-                    }.padding(.vertical, 4)
-                }
-            }
-            if !active { startShift }
-            if active {
-                DriverLocationNotice(location: store.location)
-                if let error = store.locationErrorMessage {
+        TimelineView(.periodic(from: .now, by: 15)) { context in
+            List {
+                if active || store.route?.stops.isEmpty == false {
                     Section {
-                        Label(error, systemImage: "location.slash").font(.footnote).foregroundStyle(.orange)
-                            .accessibilityIdentifier("location_error")
+                        RouteMap(stops: store.route?.stops ?? [], driverLocation: store.currentDriver?.location)
+                            .listRowInsets(EdgeInsets())
                     }
                 }
-            }
-            if let route = store.route, route.stops.count > 1 {
-                Section {
-                    ExpandableDetails("Altre tappe · \(route.stops.count - 1)", systemImage: "list.bullet", identifier: "route_details") {
-                        ForEach(Array(route.stops.enumerated().dropFirst()), id: \.element.id) { index, stop in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("\(index + 1). \(stop.title)").font(.headline)
-                                Text(stop.address).font(.subheadline)
-                                if route.estimatesAvailable {
-                                    Text("Arrivo \(stop.arrivalAt.epochDate.italianTime)")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                            }.padding(.vertical, 4).accessibilityIdentifier("route_stop_\(index)")
-                        }
-                        if route.estimatesAvailable {
-                            Text("Circa \(route.travelSeconds / 60) min di viaggio · fine alle \(route.finishAt.epochDate.italianTime)")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
+                if let route = store.route, let stop = route.stops.first,
+                   let delivery = store.deliveries.first(where: { $0.id == stop.deliveryId }) {
+                    nextStop(stop, delivery: delivery, route: route)
+                } else if active {
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(store.route == nil ? "Caricamento del percorso" : "In attesa di consegne", systemImage: "bicycle")
+                                .font(.headline)
+                            Text("La prossima tappa apparirà qui automaticamente.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                                .accessibilityIdentifier(store.route == nil ? "loading_route" : "empty_route")
+                        }.padding(.vertical, 4)
                     }
                 }
-            }
-            if let route = store.route, !route.stops.isEmpty {
-                routeDetails(route)
-            }
-            if !completed.isEmpty {
-                Section {
-                    ExpandableDetails("Completate · \(completed.count)", systemImage: "checkmark.circle", identifier: "delivery_history") {
-                        ForEach(completed) { delivery in
-                            DeliveryRow(delivery: delivery).accessibilityIdentifier("own_delivery_\(delivery.id)")
+                if !active { startShift }
+                if active {
+                    DriverLocationNotice(location: store.location, now: context.date)
+                    if let error = store.locationErrorMessage {
+                        Section {
+                            Label(error, systemImage: "location.slash").font(.footnote).foregroundStyle(.orange)
+                                .accessibilityIdentifier("location_error")
                         }
                     }
                 }
+                if let route = store.route, route.stops.count > 1 {
+                    Section {
+                        ExpandableDetails("Altre tappe · \(route.stops.count - 1)", systemImage: "list.bullet", identifier: "route_details") {
+                            ForEach(Array(route.stops.enumerated().dropFirst()), id: \.element.id) { index, stop in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("\(index + 1). \(stop.title)").font(.headline)
+                                    Text(stop.address).font(.subheadline)
+                                    if route.estimatesAvailable {
+                                        Text("Arrivo \(stop.arrivalAt.epochDate.italianTime)")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }.padding(.vertical, 4).accessibilityIdentifier("route_stop_\(index)")
+                            }
+                            if route.estimatesAvailable {
+                                Text("Circa \(route.travelSeconds / 60) min di viaggio · fine alle \(route.finishAt.epochDate.italianTime)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                if let route = store.route, !route.stops.isEmpty {
+                    routeDetails(route)
+                }
+                if !completed.isEmpty {
+                    Section {
+                        ExpandableDetails("Completate · \(completed.count)", systemImage: "checkmark.circle", identifier: "delivery_history") {
+                            ForEach(completed) { delivery in
+                                DeliveryRow(delivery: delivery).accessibilityIdentifier("own_delivery_\(delivery.id)")
+                            }
+                        }
+                    }
+                }
+                if store.syncErrorMessage != nil {
+                    Section { SyncFooter() }
+                }
             }
-            Section { SyncFooter() }
+            .listSectionSpacing(.compact)
         }
-        .listSectionSpacing(.compact)
         .navigationTitle("Il tuo percorso")
         .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("driver_screen")
@@ -188,6 +192,7 @@ struct DriverView: View {
 private struct DriverLocationNotice: View {
     @EnvironmentObject private var store: DeliveryStore
     @ObservedObject var location: LocationReporter
+    var now: Date = .now
     @Environment(\.openURL) private var openURL
 
     var body: some View {
@@ -215,14 +220,11 @@ private struct DriverLocationNotice: View {
             }
         }
         if let updated = store.currentDriver?.locationUpdatedAt,
+           Int(now.timeIntervalSince1970) - updated > 300,
            !(store.route?.stops.isEmpty == false && store.route?.warnings.contains("Driver location is older than 5 minutes; estimates may be inaccurate") == true) {
-            TimelineView(.periodic(from: .now, by: 15)) { context in
-                if Int(context.date.timeIntervalSince1970) - updated > 300 {
-                    Section {
-                        Label("GPS oltre 5 minuti: verifica posizione e rete", systemImage: "location.badge.exclamationmark")
-                            .font(.caption).foregroundStyle(.orange).accessibilityIdentifier("location_stale_notice")
-                    }
-                }
+            Section {
+                Label("GPS oltre 5 minuti: verifica posizione e rete", systemImage: "location.badge.exclamationmark")
+                    .font(.caption).foregroundStyle(.orange).accessibilityIdentifier("location_stale_notice")
             }
         }
     }

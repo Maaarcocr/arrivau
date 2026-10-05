@@ -26,7 +26,8 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
     @Published private(set) var message = "Condivisione della posizione disattivata"
     @Published private(set) var permissionDenied = false
     var onCoordinate: ((Coordinate) -> Void)?
-    private let manager = CLLocationManager()
+    // The deterministic fixture must never subscribe to real sensor/authorization events.
+    private let manager: CLLocationManager?
     private let deterministic: Bool
     private var requested = false
     private var running = false
@@ -38,12 +39,13 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
 
     init(deterministic: Bool) {
         self.deterministic = deterministic
+        manager = deterministic ? nil : CLLocationManager()
         super.init()
-        manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
-        manager.distanceFilter = kCLDistanceFilterNone
-        manager.pausesLocationUpdatesAutomatically = false
-        manager.allowsBackgroundLocationUpdates = false
+        manager?.delegate = self
+        manager?.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        manager?.distanceFilter = kCLDistanceFilterNone
+        manager?.pausesLocationUpdatesAutomatically = false
+        manager?.allowsBackgroundLocationUpdates = false
     }
 
     func configure(enabled: Bool, foreground: Bool, allowBackground: Bool) {
@@ -53,24 +55,26 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         requested = true
         // Never start a new tracking session or request permission from the background.
         guard foreground || (running && allowBackground) else {
-            manager.stopUpdatingLocation()
+            manager?.stopUpdatingLocation()
             running = false
             hasCurrentFix = false
             state = .waitingForForeground
             message = "Posizione in pausa finché non apri l’app"
             return
         }
-        manager.allowsBackgroundLocationUpdates = allowBackground
-        manager.showsBackgroundLocationIndicator = allowBackground
         if deterministic {
-            state = .simulated
+            // A repeated configuration is not a fresh fix and cannot clear a sensor error.
             if !running {
                 running = true
+                state = .simulated
                 message = "Posizione di test: Pachino (simulata)"
                 onCoordinate?(.pachino)
             }
             return
         }
+        guard let manager else { return }
+        manager.allowsBackgroundLocationUpdates = allowBackground
+        manager.showsBackgroundLocationIndicator = allowBackground
         switch manager.authorizationStatus {
         case .notDetermined:
             permissionDenied = false
@@ -106,9 +110,9 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
         lastReportedSampleAt = nil
         hasCurrentFix = false
         lastReceivedSampleAt = nil
-        manager.stopUpdatingLocation()
-        manager.allowsBackgroundLocationUpdates = false
-        manager.showsBackgroundLocationIndicator = false
+        manager?.stopUpdatingLocation()
+        manager?.allowsBackgroundLocationUpdates = false
+        manager?.showsBackgroundLocationIndicator = false
         state = .stopped
         message = "Condivisione della posizione disattivata"
     }
@@ -117,7 +121,7 @@ final class LocationReporter: NSObject, ObservableObject, CLLocationManagerDeleg
     // explicitly return to MainActor; never pass the manager across actor boundaries.
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         Task { @MainActor [weak self] in
-            guard let self, self.requested else { return }
+            guard let self, self.requested, !self.deterministic else { return }
             self.configure(enabled: true, foreground: self.foreground, allowBackground: self.backgroundOptIn)
         }
     }

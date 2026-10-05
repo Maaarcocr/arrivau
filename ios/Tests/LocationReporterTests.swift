@@ -44,6 +44,28 @@ final class LocationReporterTests: XCTestCase {
         XCTAssertEqual(reporter.compactMessage, "Posizione ferma")
     }
 
+    func testDeterministicAuthorizationCallbackAndRefreshCannotClearSensorError() async {
+        let reporter = LocationReporter(deterministic: true)
+        reporter.configure(enabled: true, foreground: true, allowBackground: true)
+        let failed = expectation(description: "Injected sensor error is visible")
+        let failureObservation = reporter.$state.dropFirst().filter { $0 == .unavailable }.sink { _ in failed.fulfill() }
+        let manager = CLLocationManager()
+        reporter.locationManager(manager, didFailWithError: NSError(domain: kCLErrorDomain, code: 0))
+        await fulfillment(of: [failed], timeout: 2)
+        failureObservation.cancel()
+
+        let unexpectedRecovery = expectation(description: "Only a fresh fix may recover the sensor error")
+        unexpectedRecovery.isInverted = true
+        let recoveryObservation = reporter.$state.dropFirst().filter { $0 == .simulated }.sink { _ in unexpectedRecovery.fulfill() }
+        reporter.locationManagerDidChangeAuthorization(manager)
+        reporter.configure(enabled: true, foreground: true, allowBackground: true)
+        await fulfillment(of: [unexpectedRecovery], timeout: 0.1)
+        recoveryObservation.cancel()
+        XCTAssertEqual(reporter.state, .unavailable)
+        XCTAssertEqual(reporter.compactMessage, "Posizione non disponibile")
+        reporter.stop()
+    }
+
     func testFreshSensorSampleRecoversErrorAndLateErrorCannotUndoStop() async {
         let reporter = LocationReporter(deterministic: true)
         reporter.configure(enabled: true, foreground: true, allowBackground: true)

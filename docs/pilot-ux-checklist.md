@@ -11,7 +11,7 @@ published or committed.
 | Invitation competes with sign-in | `ux-invite-entry`: separate entry form; invalid link, cancel, reopen and signup interruption tests preserve the login context |
 | Server configuration should not be routine | Pilot login/signup have no server input; HTTPS build setting remains authoritative; Debug override needs `--developer-settings`; local demo remains available |
 | Profile icon unexpectedly signs out | `ux-account`: profile opens Account; explicit Esci, eligible deletion and privacy actions; opening/closing and interruption do not sign out |
-| Signout during a shift must be understandable | Active-shift logout confirmation explains that local sharing stops while the server shift and deliveries remain; cancellation preserves the current assignment |
+| Signout during a shift must be understandable | `ux-active-logout`: active-shift logout confirmation explains that local sharing stops while the server shift and deliveries remain; cancellation preserves the current assignment |
 | Shift and sharing screens repeat technical explanations | `ux-new-shift`, `04-driver-shift`: concise status, immediate sharing control, screen-lock choice, latest position and end-shift action |
 | Screen-locked sharing should work by default during an explicitly started shift | Start disclosure and iOS permission cover it; unit/UI tests require both sharing flags after new start. Restored, resumed or previously foreground-only choices never gain background consent automatically |
 | Driver home buries the map and next action | `03-driver-route`, `dual-account-corriere`: visible overview, compact next stop/timing, one pickup/dropoff action, expandable remaining stops |

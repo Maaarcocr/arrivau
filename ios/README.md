@@ -98,7 +98,7 @@ The fixture uses `Pizzeria Pachino Demo`, the sample Pachino pickup/drop-off, un
 The local Xcode `.xcresult` bundle contains attachments and may also contain unrelated simulator-service credentials. Never upload raw result bundles or simulator diagnostics. GitHub Actions publishes only the allowlisted check-status summary and named app screenshots; the exporter includes successful screenshots rather than only failures. Keep other local failure diagnostics private.
 
 
-The same export also requires `dual-account-centrale` and `dual-account-corriere`, showing the same-account view picker. Team identity lives in Account. The screenshot-feedback pass additionally requires `ux-pilot-login`, `ux-invite-entry`, `ux-account`, `ux-new-shift` and `ux-driver-waiting`.
+The same export also requires `dual-account-centrale` and `dual-account-corriere`, showing the same-account view picker. Team identity lives in Account. The screenshot-feedback pass additionally requires `ux-pilot-login`, `ux-invite-entry`, `ux-account`, `ux-new-shift`, `ux-driver-waiting` and `ux-active-logout`.
 
 ## Minimal everyday flow
 

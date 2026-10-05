@@ -152,7 +152,7 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["switch_role"])
         tap(app.buttons["account_logout"])
         XCTAssertTrue(app.buttons["confirm_logout"].waitForExistence(timeout: 5))
-        tap(app.buttons["cancel_logout"])
+        tapModalButton(app.buttons["cancel_logout"])
         XCTAssertTrue(app.buttons["account_logout"].exists)
         tap(app.buttons["close_account"])
         XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 5))
@@ -1022,7 +1022,7 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertTrue(app.buttons["account_logout"].waitForExistence(timeout: 5))
         tap(app.buttons["account_logout"])
         if app.buttons["confirm_logout"].waitForExistence(timeout: 2) {
-            tap(app.buttons["confirm_logout"])
+            tapModalButton(app.buttons["confirm_logout"])
         }
         XCTAssertTrue(app.buttons["login_dispatcher"].waitForExistence(timeout: 5))
     }
@@ -1036,6 +1036,30 @@ final class DeliveryFlowUITests: XCTestCase {
 
     private func element(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// Modal transitions can expose an element before it is hittable. Never scroll a
+    /// confirmation dialog into view: a swipe can dismiss it before its only tap.
+    private func tapModalButton(_ button: XCUIElement) {
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true AND enabled == true"),
+            object: button
+        )
+        let outcome = XCTWaiter.wait(for: [ready], timeout: 10)
+        if outcome != .completed {
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "ux-logout-presentation"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+        XCTAssertEqual(outcome, .completed, "Logout confirmation must become actionable without scrolling")
+        if button.identifier == "confirm_logout" {
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "ux-active-logout"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+        button.tap()
     }
 
     private func tap(_ element: XCUIElement, timeout: TimeInterval = 10) {

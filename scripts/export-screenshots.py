@@ -18,10 +18,10 @@ NAMES = (
     "00-login", "01-dispatcher-jobs", "02-new-delivery", "03-driver-route",
     "04-driver-shift", "05-driver-assignment", "06-address-search", "07-delivery-timing",
     "dual-account-centrale", "dual-account-corriere",
-    "ux-pilot-login", "ux-invite-entry", "ux-account", "ux-new-shift", "ux-driver-waiting",
+    "ux-pilot-login", "ux-invite-entry", "ux-account", "ux-new-shift", "ux-driver-waiting", "ux-active-logout",
 )
 # Captured only by the isolated-demo login helper on failure; never required on success.
-OPTIONAL_NAMES = ("demo-login-failure",)
+OPTIONAL_NAMES = ("demo-login-failure", "ux-logout-presentation")
 EXPORT_NAMES = NAMES + OPTIONAL_NAMES
 PNG = b"\x89PNG\r\n\x1a\n"
 ZSTD = b"\x28\xb5\x2f\xfd"

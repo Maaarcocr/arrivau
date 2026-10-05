@@ -145,6 +145,26 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists, "Show only the next stop's completion action")
         XCTAssertFalse(element("route_map").exists, "The map should start collapsed")
         captureScreen("03-driver-route", showing: app.staticTexts["next_stop_title"])
+        // The deterministic navigation adapter exercises the app contract without Google billing/GPS.
+        // Navigation arrival and closing must not mutate the real backend's delivery status.
+        for attempt in 0..<2 {
+            tap(app.buttons["open_directions"])
+            XCTAssertTrue(app.staticTexts["navigation_test_mode"].waitForExistence(timeout: 10))
+            waitForLabelContaining(app.staticTexts["navigation_status"], "Segui le indicazioni")
+            tap(app.buttons["navigation_voice"])
+            waitForLabelContaining(app.buttons["navigation_voice"], "Voce spenta")
+            if attempt == 0 {
+                tap(app.buttons["simulate_navigation_arrival"])
+                waitForLabelContaining(app.staticTexts["navigation_status"], "Sei arrivato")
+                try assertServerStatus(delivery.id, "assigned")
+                tap(app.buttons["return_to_stop"])
+            } else {
+                tap(app.buttons["close_navigation"])
+            }
+            waitUntilAbsent(app.staticTexts["navigation_test_mode"])
+            XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 10))
+            try assertServerStatus(delivery.id, "assigned")
+        }
         for _ in 0..<2 {
             tap(app.buttons["route_details"])
             let firstStop = element("route_stop_0")
@@ -932,7 +952,14 @@ final class DeliveryFlowUITests: XCTestCase {
     private func waitUntilAbsent(_ element: XCUIElement) {
         if !element.exists { return }
         let absent = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
-        XCTAssertEqual(XCTWaiter.wait(for: [absent], timeout: 10), .completed)
+        let outcome = XCTWaiter.wait(for: [absent], timeout: 10)
+        var details = "Element did not disappear"
+        if outcome != .completed, element.identifier == "address_search" {
+            let error = app.staticTexts["address_error"]
+            let result = app.buttons["address_result_0"]
+            details = "Address picker stayed open: busy=\(self.element("address_searching").exists), error=\(error.exists ? error.label : "none"), result exists=\(result.exists), result enabled=\(result.exists ? result.isEnabled : false)"
+        }
+        XCTAssertEqual(outcome, .completed, details)
     }
 
     private func assertSwitch(_ element: XCUIElement, value: String) {
@@ -943,16 +970,19 @@ final class DeliveryFlowUITests: XCTestCase {
     private func setSwitch(_ element: XCUIElement, to enabled: Bool) {
         XCTAssertTrue(element.waitForExistence(timeout: 10))
         reveal(element)
+        waitUntilEnabled(element)
         let target = enabled ? "1" : "0"
         if element.value as? String != target {
             // SwiftUI exposes both a label+control row and the native child switch.
             let nativeSwitch = element.switches.firstMatch
-            if nativeSwitch.exists && nativeSwitch.isHittable { nativeSwitch.tap() }
-            else { element.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
+            if nativeSwitch.exists {
+                waitUntilEnabled(nativeSwitch)
+                nativeSwitch.tap()
+            } else { element.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
         }
         let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", target), object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 10), .completed,
-                       "Switch did not reach \(target): \(element.debugDescription)")
+                       "Switch did not reach \(target): parent enabled=\(element.isEnabled), value=\(String(describing: element.value)), native exists=\(element.switches.firstMatch.exists), native enabled=\(element.switches.firstMatch.exists ? element.switches.firstMatch.isEnabled : false), native value=\(String(describing: element.switches.firstMatch.exists ? element.switches.firstMatch.value : nil)), sharing=\(String(describing: app.switches["share_location"].exists ? app.switches["share_location"].value : nil))")
     }
 
     private func reveal(_ element: XCUIElement) {
@@ -1031,3 +1061,4 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed)
     }
 }
+

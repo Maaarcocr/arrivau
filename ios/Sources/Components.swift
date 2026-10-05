@@ -63,29 +63,31 @@ struct RouteMap: View {
     let stops: [RouteStop]
     let driverLocation: Coordinate?
     var body: some View {
-        Map {
-            if let driverLocation {
-                Marker("Corriere", systemImage: "bicycle", coordinate: driverLocation.clCoordinate).tint(.blue)
-            }
-            ForEach(Array(stops.enumerated()), id: \.element.id) { index, stop in
-                Marker("\(index + 1). \(stop.title)", coordinate: stop.coordinate.clCoordinate)
-                    .tint(stop.kind == .pickup ? .orange : .green)
+        Group {
+            if stops.contains(where: { $0.googlePlaceId != nil }) {
+                if stops.allSatisfy({ $0.googlePlaceId != nil }) {
+                    GoogleRouteOverview(stops: stops, driverLocation: driverLocation)
+                } else {
+                    Text("Alcuni indirizzi devono essere selezionati di nuovo. Controlla le tappe nell’elenco.")
+                        .font(.subheadline).foregroundStyle(.secondary).padding()
+                }
+            } else {
+                Map {
+                    if let driverLocation {
+                        Marker("Corriere", systemImage: "bicycle", coordinate: driverLocation.clCoordinate).tint(.blue)
+                    }
+                    ForEach(Array(stops.enumerated()), id: \.element.id) { index, stop in
+                        if let coordinate = stop.coordinate {
+                            Marker("\(index + 1). \(stop.title)", coordinate: coordinate.clCoordinate)
+                                .tint(stop.kind == .pickup ? .orange : .green)
+                        }
+                    }
+                }
             }
         }
         .frame(height: 210)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .accessibilityIdentifier("route_map")
-    }
-}
-struct DirectionsButton: View {
-    let stop: RouteStop
-    var body: some View {
-        Button {
-            let destination = MKMapItem(placemark: MKPlacemark(coordinate: stop.coordinate.clCoordinate))
-            destination.name = stop.address
-            destination.openInMaps(launchOptions: [MKLaunchOptionsDirectionsModeKey: MKLaunchOptionsDirectionsModeDriving])
-        } label: { Label("Indicazioni", systemImage: "arrow.triangle.turn.up.right.diamond") }
-        .accessibilityIdentifier("open_directions")
     }
 }
 
@@ -165,3 +167,4 @@ struct RouteTravelNotice: View {
         }
     }
 }
+

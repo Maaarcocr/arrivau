@@ -88,6 +88,8 @@ jobs:
           ARRIVAU_TEAM_ID: ${{ vars.ARRIVAU_TEAM_ID }}
           ARRIVAU_BUNDLE_ID: ${{ vars.ARRIVAU_BUNDLE_ID }}
           ARRIVAU_API_URL: ${{ vars.ARRIVAU_API_URL }}
+          # Optional: without a key the app builds with in-app navigation unavailable.
+          ARRIVAU_GOOGLE_MAPS_API_KEY: ${{ secrets.ARRIVAU_GOOGLE_MAPS_API_KEY }}
           SELECTED_ACTION: ${{ inputs.action }}
           BUILD_NUMBER: ${{ inputs.build_number }}
           APPLE_DISTRIBUTION_P12_BASE64: ${{ secrets.APPLE_DISTRIBUTION_P12_BASE64 }}
@@ -100,3 +102,4 @@ jobs:
       - name: Always remove temporary signing material and private build products
         if: always()
         run: ./scripts/testflight-ci.sh cleanup
+

@@ -25,6 +25,7 @@ xcuserdata/
 /deploy/auth.json
 /deploy/pilot.env
 /ios/Config/Local.xcconfig
+/ios/Config/Navigation.local/
 *.p12
 *.mobileprovision
 *.p8
@@ -40,3 +41,4 @@ xcuserdata/
 /.osrm-install/
 *.osrm.*
 *.osm.pbf
+

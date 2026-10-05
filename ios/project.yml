@@ -7,6 +7,17 @@ options:
 configs:
   Debug: debug
   Release: release
+packages:
+  GooglePlaces:
+    url: https://github.com/googlemaps/ios-places-sdk
+    exactVersion: 11.2.0
+  GoogleNavigation:
+    url: https://github.com/googlemaps/ios-navigation-sdk
+    exactVersion: 11.2.0
+  # Navigation declares Maps from 11.2.0; pin its transitive version too.
+  GoogleMaps:
+    url: https://github.com/googlemaps/ios-maps-sdk
+    exactVersion: 11.2.0
 settings:
   base:
     SWIFT_VERSION: "5.0"
@@ -17,6 +28,7 @@ settings:
     MARKETING_VERSION: "0.2.0"
     CURRENT_PROJECT_VERSION: "1"
     ARRIVAU_API_URL: ""
+    ARRIVAU_GOOGLE_MAPS_API_KEY: ""
     ENABLE_USER_SCRIPT_SANDBOXING: YES
   configs:
     Debug:
@@ -26,12 +38,20 @@ targets:
     type: application
     platform: iOS
     sources: [Sources, Resources]
+    dependencies:
+      - package: GooglePlaces
+        product: GooglePlaces
+      - package: GoogleNavigation
+        product: GoogleNavigation
+      - package: GoogleMaps
+        product: GoogleMaps
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.arrivau.app
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        OTHER_LDFLAGS: ["$(inherited)", "-ObjC"]
       configs:
         Debug:
           INFOPLIST_FILE: Config/Info-Debug.plist
@@ -78,5 +98,6 @@ schemes:
           parallelizable: false
       environmentVariables:
         ARRIVAU_API_URL: "http://127.0.0.1:8080"
+
 
 

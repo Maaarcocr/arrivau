@@ -105,7 +105,7 @@ The CI also builds the Release configuration for a generic physical iOS device w
 - The foreground app polls about every five seconds. There is no APNs or guaranteed suspended-app notification delivery, and no general offline queue
 - Delivery creation retains its idempotency key and request securely for uncertain-response recovery. Check current state before manually replacing a job. Connectivity errors are visible rather than silently treated as success
 - GPS starts only after explicit sharing consent on an active shift. Separate background opt-in supports locking/Maps, subject to iOS behavior. Ending the shift or signing out stops local reporting. The most recent point remains on the server; no location history feed is built
-- Apple Maps search sends the query to Apple; opening directions shares the selected stop coordinates. The app does not include paid routing/geocoding providers
+- Google Places search and in-app Google navigation require separately restricted iOS/server keys and enabled billing. Place IDs and original user text are durable; Google coordinates remain in a bounded memory-only cache. Existing Apple-selected addresses require fresh selection. See [setup and release checks](docs/google-navigation.md)
 - Physical-device and background/network/battery checks must pass before using real customer work. Start with synthetic deliveries and inform participants about stored location/address data
 
 The HTTP contract is independent of SwiftUI, so a future dispatcher web client can share it after its own security/UI work.
@@ -115,3 +115,4 @@ The HTTP contract is independent of SwiftUI, so a future dispatcher web client c
 Arrivau's original code and documentation are proprietary, with all rights reserved.
 See [LICENSE](LICENSE). Public visibility does not grant an open-source license;
 GitHub's viewing and forking rights and third-party licenses still apply.
+

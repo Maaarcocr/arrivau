@@ -2,6 +2,13 @@ import XCTest
 @testable import Arrivau
 
 final class ItalianPresentationTests: XCTestCase {
+    func testMissingGoogleLocationWarningIsActionableItalian() {
+        let warning = ItalianPresentation.routeWarning("Destination location unavailable for job-1: select or refresh the Google place")
+        XCTAssertTrue(warning.contains("Indirizzo da aggiornare"))
+        XCTAssertFalse(warning.contains("job-1"))
+        XCTAssertFalse(warning.contains("Destination location"))
+    }
+
     func testItalianTitlesPreserveWireValuesAndDemoCredentials() throws {
         XCTAssertEqual(DeliveryStatus.allCases.map(\.title), ["Da assegnare", "Assegnata", "In consegna", "Consegnata"])
         XCTAssertEqual(DeliveryStatus.allCases.map(\.rawValue), ["pending", "assigned", "picked_up", "delivered"])
@@ -187,4 +194,5 @@ final class ItalianPresentationTests: XCTestCase {
     }
 
 }
+
 

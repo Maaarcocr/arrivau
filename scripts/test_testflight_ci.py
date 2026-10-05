@@ -164,6 +164,13 @@ elif name == "xcodebuild":
     elif args == ["-help"]:
         print("-archivePath -exportArchive -exportOptionsPlist app-store-connect signingStyle provisioningProfiles manageAppVersionAndBuildNumber")
     elif args[0] == "archive":
+        navigation_path = next(arg.split("=", 1)[1] for arg in args if arg.startswith("INFOPLIST_FILE="))
+        navigation = plistlib.loads(pathlib.Path(navigation_path).read_bytes())
+        assert "ARRIVAU_GOOGLE_MAPS_API_KEY" not in os.environ
+        (root / "navigation-observed.json").write_text(json.dumps({
+            "key": navigation["ARRIVAU_GOOGLE_MAPS_API_KEY"],
+            "mode": pathlib.Path(navigation_path).stat().st_mode & 0o777,
+        }))
         make_app(pathlib.Path(value("-archivePath")) / "Products/Applications/Arrivau.app")
         print(marker)
     else:
@@ -240,8 +247,9 @@ class OfflineRunner:
         self.repo = self.root / "repo"
         scripts = self.repo / "scripts"
         scripts.mkdir(parents=True)
-        (self.repo / "ios").mkdir()
-        for name in ("testflight-ci.sh", "testflight-signing.py", "validate-pilot-config.py", "verify-ios-bundle.py", "check-testflight-tools.sh"):
+        (self.repo / "ios/Config").mkdir(parents=True)
+        shutil.copy2(ROOT / "ios/Config/Info-Release.plist", self.repo / "ios/Config/Info-Release.plist")
+        for name in ("testflight-ci.sh", "testflight-signing.py", "validate-pilot-config.py", "verify-ios-bundle.py", "check-testflight-tools.sh", "navigation-config.py"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
         self.home = self.root / "home"
         self.temp = self.root / "runner-temp"
@@ -560,6 +568,30 @@ class SigningOrchestrationTests(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assert_clean(runner)
 
+    def test_navigation_key_is_optional_private_and_not_passed_on_command_line(self):
+        for key in ("", "synthetic-google-key-never-valid-12345"):
+            with self.subTest(configured=bool(key)):
+                runner = self.make_runner()
+                runner.env["ARRIVAU_GOOGLE_MAPS_API_KEY"] = key
+                result = runner.run("archive", "17")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observed = json.loads((runner.root / "navigation-observed.json").read_text())
+                self.assertEqual(observed, {"key": key, "mode": 0o600})
+                if key:
+                    self.assertNotIn(key, result.stdout + result.stderr)
+                    self.assertNotIn(key, json.dumps(runner.calls()))
+                self.assert_clean(runner)
+
+    def test_invalid_navigation_key_fails_without_echo_and_cleans_temporary_files(self):
+        runner = self.make_runner()
+        key = "synthetic-google-key-never-valid-12345\nINJECTED"
+        runner.env["ARRIVAU_GOOGLE_MAPS_API_KEY"] = key
+        result = runner.run("archive", "17")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(key, result.stdout + result.stderr)
+        self.assertFalse(any(call[:2] == ["security", "import"] for call in runner.calls()))
+        self.assert_clean(runner)
+
     def test_old_codesign_argument_forms_fail_closed(self):
         cases = [
             ('"--extract-certificates=$WORK/$label-cert"', '--extract-certificates "$WORK/$label-cert"',
@@ -725,3 +757,4 @@ class SigningOrchestrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

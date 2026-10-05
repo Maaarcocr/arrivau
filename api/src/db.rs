@@ -18,7 +18,7 @@ pub fn open(
     db.busy_timeout(Duration::from_secs(5))?;
     db.execute_batch("PRAGMA foreign_keys=ON;")?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 5 {
+    if version > 6 {
         return Err(ApiError::bad_request(
             "Database schema is newer than this server",
         ));
@@ -242,18 +242,20 @@ pub fn open(
             [legacy_team],
         )?;
     }
-    // Invite-only v4 servers ignore retired retry keys and could resurrect erased
-    // deliveries after downgrade. Reject them through their future-schema guard.
-    tx.execute_batch("PRAGMA user_version=5;")?;
+    // Older servers assume every location is durable and non-null. Reject unsafe
+    // downgrade rather than copying short-lived Google coordinates into history.
+    tx.execute_batch("PRAGMA user_version=6;")?;
     tx.commit()?;
     db.execute_batch("PRAGMA journal_mode=WAL;")?;
+    crate::places::initialize(&db)?;
     Ok(db)
 }
 
 pub fn restaurants(db: &Connection, team_id: &str) -> ApiResult<Vec<Restaurant>> {
     let mut stmt = db.prepare("SELECT body FROM restaurants WHERE team_id=?1 ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 pub fn restaurant(db: &Connection, team_id: &str, id: &str) -> ApiResult<Restaurant> {
@@ -264,14 +266,21 @@ pub fn restaurant(db: &Connection, team_id: &str, id: &str) -> ApiResult<Restaur
             |row| row.get(0),
         )
         .optional()?;
-    serde_json::from_str(&body.ok_or_else(|| ApiError::not_found("Restaurant not found"))?)
-        .map_err(Into::into)
+    crate::places::decode(
+        db,
+        team_id,
+        &body.ok_or_else(|| ApiError::not_found("Restaurant not found"))?,
+    )
 }
 
 pub fn save_restaurant(db: &Connection, team_id: &str, restaurant: &Restaurant) -> ApiResult<()> {
     db.execute(
         "INSERT INTO restaurants(id,team_id,body) VALUES (?1,?2,?3)",
-        params![restaurant.id, team_id, serde_json::to_string(restaurant)?],
+        params![
+            restaurant.id,
+            team_id,
+            crate::places::durable_json(restaurant)?
+        ],
     )?;
     Ok(())
 }
@@ -287,7 +296,8 @@ pub fn delivery_teams(db: &Connection) -> ApiResult<Vec<String>> {
 pub fn drivers(db: &Connection, team_id: &str) -> ApiResult<Vec<Driver>> {
     let mut stmt = db.prepare("SELECT body FROM drivers WHERE team_id=?1 ORDER BY id")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 pub fn driver(db: &Connection, team_id: &str, id: &str) -> ApiResult<Driver> {
@@ -316,7 +326,8 @@ pub fn save_driver(db: &Connection, team_id: &str, driver: &Driver) -> ApiResult
 pub fn deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
     let mut stmt = db.prepare("SELECT body FROM deliveries WHERE team_id=?1 ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 /// Planning never needs completed history. Keep every outstanding job, including
@@ -324,7 +335,8 @@ pub fn deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
 pub fn planning_deliveries(db: &Connection, team_id: &str) -> ApiResult<Vec<Delivery>> {
     let mut stmt = db.prepare("SELECT body FROM deliveries WHERE team_id=?1 AND status IN ('pending','assigned','picked_up') ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;
-    rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    rows.map(|row| crate::places::decode(db, team_id, &row?))
+        .collect()
 }
 
 pub fn delivery(db: &Connection, team_id: &str, id: &str) -> ApiResult<Delivery> {
@@ -335,8 +347,11 @@ pub fn delivery(db: &Connection, team_id: &str, id: &str) -> ApiResult<Delivery>
             |r| r.get(0),
         )
         .optional()?;
-    serde_json::from_str(&body.ok_or_else(|| ApiError::not_found("Delivery not found"))?)
-        .map_err(Into::into)
+    crate::places::decode(
+        db,
+        team_id,
+        &body.ok_or_else(|| ApiError::not_found("Delivery not found"))?,
+    )
 }
 
 pub fn save_delivery(db: &Connection, team_id: &str, delivery: &Delivery) -> ApiResult<()> {
@@ -348,7 +363,7 @@ pub fn save_delivery(db: &Connection, team_id: &str, delivery: &Delivery) -> Api
     };
     let count = db.execute("INSERT INTO deliveries(id, driver_id, status, body, team_id) VALUES (?1, ?2, ?3, ?4, ?5)
         ON CONFLICT(id) DO UPDATE SET driver_id=excluded.driver_id, status=excluded.status, body=excluded.body WHERE deliveries.team_id=excluded.team_id",
-        params![delivery.id, delivery.driver_id, status, serde_json::to_string(delivery)?,team_id])?;
+        params![delivery.id, delivery.driver_id, status, crate::places::durable_json(delivery)?,team_id])?;
     if count != 1 {
         return Err(ApiError::not_found("Delivery not found"));
     }

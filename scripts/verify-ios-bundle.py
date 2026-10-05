@@ -31,3 +31,4 @@ if __name__ == '__main__':
         raise SystemExit('Usage: verify-ios-bundle.py PATH/Arrivau.app')
     verify(sys.argv[1])
     print('Release bundle has compiled icon, privacy manifest, iPhone metadata, export compliance declaration, strict transport and no demo bearer strings')
+

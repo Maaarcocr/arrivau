@@ -31,8 +31,12 @@ pub struct Restaurant {
     pub id: String,
     pub name: String,
     pub address: String,
-    pub coordinate: Coordinate,
+    pub coordinate: Option<Coordinate>,
     pub created_at: i64,
+    #[serde(default)]
+    pub google_place_id: Option<String>,
+    #[serde(default)]
+    pub coordinate_fetched_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +44,9 @@ pub struct Restaurant {
 pub struct NewRestaurant {
     pub name: String,
     pub address: String,
-    pub coordinate: Coordinate,
+    pub coordinate: Option<Coordinate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google_place_id: Option<String>,
 }
 
 impl NewRestaurant {
@@ -51,7 +57,7 @@ impl NewRestaurant {
         {
             return Err("Names and addresses must contain 1–240 characters");
         }
-        if !self.coordinate.valid() {
+        if !valid_destination(self.coordinate, self.google_place_id.as_deref()) {
             return Err("Coordinates must be finite latitude/longitude values");
         }
         Ok(())
@@ -83,9 +89,9 @@ pub struct Delivery {
     pub id: String,
     pub shop_name: String,
     pub pickup_address: String,
-    pub pickup: Coordinate,
+    pub pickup: Option<Coordinate>,
     pub dropoff_address: String,
-    pub dropoff: Coordinate,
+    pub dropoff: Option<Coordinate>,
     pub ready_at: i64,
     #[serde(default)]
     pub readiness_state: ReadinessState,
@@ -108,6 +114,14 @@ pub struct Delivery {
     pub restaurant_id: Option<String>,
     #[serde(default)]
     pub dispatch_waiting_reason: Option<String>,
+    #[serde(default)]
+    pub pickup_google_place_id: Option<String>,
+    #[serde(default)]
+    pub dropoff_google_place_id: Option<String>,
+    #[serde(default)]
+    pub pickup_coordinate_fetched_at: Option<i64>,
+    #[serde(default)]
+    pub dropoff_coordinate_fetched_at: Option<i64>,
 }
 
 impl Delivery {
@@ -121,9 +135,9 @@ impl Delivery {
 pub struct NewDelivery {
     pub shop_name: String,
     pub pickup_address: String,
-    pub pickup: Coordinate,
+    pub pickup: Option<Coordinate>,
     pub dropoff_address: String,
-    pub dropoff: Coordinate,
+    pub dropoff: Option<Coordinate>,
     /// Accepted only for backwards-compatible clients. New clients omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_at: Option<i64>,
@@ -132,6 +146,10 @@ pub struct NewDelivery {
     pub max_ride_seconds: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restaurant_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pickup_google_place_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropoff_google_place_id: Option<String>,
 }
 
 impl NewDelivery {
@@ -141,7 +159,9 @@ impl NewDelivery {
                 return Err("Names and addresses must contain 1–240 characters");
             }
         }
-        if !self.pickup.valid() || !self.dropoff.valid() {
+        if !valid_destination(self.pickup, self.pickup_google_place_id.as_deref())
+            || !valid_destination(self.dropoff, self.dropoff_google_place_id.as_deref())
+        {
             return Err("Coordinates must be finite latitude/longitude values");
         }
         // Bounded timestamps make arithmetic safe and reject accidental milliseconds.
@@ -194,6 +214,10 @@ impl NewDelivery {
             onboard_deadline_at: None,
             restaurant_id: self.restaurant_id,
             dispatch_waiting_reason: None,
+            pickup_google_place_id: self.pickup_google_place_id,
+            dropoff_google_place_id: self.dropoff_google_place_id,
+            pickup_coordinate_fetched_at: None,
+            dropoff_coordinate_fetched_at: None,
         }
     }
 }
@@ -216,9 +240,13 @@ pub struct RouteStop {
     pub delivery_id: String,
     pub kind: StopKind,
     pub address: String,
-    pub coordinate: Coordinate,
+    pub coordinate: Option<Coordinate>,
     pub arrival_at: i64,
     pub departure_at: i64,
+    #[serde(default)]
+    pub google_place_id: Option<String>,
+    #[serde(default)]
+    pub coordinate_fetched_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,4 +277,13 @@ pub struct Suggestion {
     pub driver_id: String,
     pub incremental_travel_seconds: i64,
     pub route: Route,
+}
+
+/// A Google identifier is only syntax-checked here. Provenance is established by
+/// the server's Details response, never by client coordinates or timestamps.
+fn valid_destination(coordinate: Option<Coordinate>, place_id: Option<&str>) -> bool {
+    match place_id {
+        Some(id) => crate::places::valid_place_id(id),
+        None => coordinate.is_some_and(Coordinate::valid),
+    }
 }

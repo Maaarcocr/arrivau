@@ -81,6 +81,16 @@ class ScreenshotExportTests(unittest.TestCase):
         full = exporter.export(self.result, self.root / "full", suite="full")
         self.assertIn("03-driver-route", full["missing"])
 
+    def test_smoke_wait_diagnostics_do_not_resolve_absent_elements(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        source = (root / "ios/UITests/PilotSmokeUITests.swift").read_text()
+        helpers = source.split("private func tap(_ element: XCUIElement)", 1)[1].split(
+            "private func waitForLabel", 1
+        )[0]
+        self.assertNotIn("element.identifier", helpers)
+        self.assertIn("element.exists && element.isEnabled && element.isHittable", helpers)
+        self.assertIn("{ !element.exists }", helpers)
+
     def test_incomplete_smoke_export_still_fails(self):
         self.add(exporter.SMOKE_NAMES[0])
         with self.assertRaisesRegex(ValueError, "Missing expected screenshots"):

@@ -240,14 +240,16 @@ final class PilotSmokeUITests: XCTestCase {
     }
 
     private func tap(_ element: XCUIElement) {
-        wait("Visible, enabled control: \(element.identifier)") {
+        wait("Control exists, is enabled and is hittable") {
             element.exists && element.isEnabled && element.isHittable
         }
         element.tap()
     }
 
     private func waitUntilAbsent(_ element: XCUIElement) {
-        wait("Dismiss \(element.identifier)") { !element.exists }
+        // Reading snapshot properties (including identifier) after dismissal
+        // fails before XCTest can evaluate the disappearance condition.
+        wait("Element disappears after dismissal") { !element.exists }
     }
 
     private func waitForLabel(_ element: XCUIElement, containing text: String) {

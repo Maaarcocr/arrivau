@@ -49,6 +49,22 @@ class ScreenshotExportTests(unittest.TestCase):
     def truncated_payload():
         return zstandard.ZstdCompressor().compress(b"[T incomplete diagnostic")[:-1]
 
+    def test_required_names_have_intentional_ui_captures(self):
+        ui_root = pathlib.Path(__file__).resolve().parents[1] / "ios" / "UITests"
+        source = "\n".join(path.read_text() for path in ui_root.glob("*.swift"))
+        for name in exporter.NAMES:
+            with self.subTest(name=name):
+                self.assertIn('"' + name + '"', source)
+
+    def test_ci_runs_full_suite_once_without_duplicate_login_probe(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        ci = (root / ".github/workflows/ci.yml").read_text()
+        self.assertIn("run: ./scripts/test-ios.sh\n", ci)
+        self.assertNotIn("--diagnose-login-first", ci)
+        script = (root / "scripts/test-ios.sh").read_text()
+        self.assertIn("--diagnose-login-first", script)
+        self.assertIn('run_native_tests\n', script)
+
     def test_exports_only_named_screens_and_requires_all(self):
         for index, name in enumerate(exporter.NAMES):
             self.add(name, f"0~fixture{index}")

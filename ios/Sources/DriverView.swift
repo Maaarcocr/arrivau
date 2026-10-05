@@ -12,44 +12,45 @@ struct DriverView: View {
 
     var body: some View {
         List {
+            if active || store.route?.stops.isEmpty == false {
+                Section {
+                    RouteMap(stops: store.route?.stops ?? [], driverLocation: store.currentDriver?.location)
+                        .listRowInsets(EdgeInsets())
+                }
+            }
             if let route = store.route, let stop = route.stops.first,
                let delivery = store.deliveries.first(where: { $0.id == stop.deliveryId }) {
                 nextStop(stop, delivery: delivery, route: route)
             } else if active {
                 Section {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Label(store.route == nil ? "Caricamento del percorso" : "Tutto pronto per le consegne", systemImage: "bicycle")
-                            .font(.title2.bold())
-                        Text(store.route == nil ? "La prossima tappa apparirà qui." : "Non ci sono altre tappe. La prossima consegna apparirà qui automaticamente.")
-                            .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(store.route == nil ? "Caricamento del percorso" : "In attesa di consegne", systemImage: "bicycle")
+                            .font(.headline)
+                        Text("La prossima tappa apparirà qui automaticamente.")
+                            .font(.subheadline).foregroundStyle(.secondary)
                             .accessibilityIdentifier(store.route == nil ? "loading_route" : "empty_route")
-                    }.padding(.vertical, 8)
+                    }.padding(.vertical, 4)
                 }
             }
-
             if !active { startShift }
             if active {
                 DriverLocationNotice(location: store.location)
                 if let error = store.locationErrorMessage {
                     Section {
-                        Label(error, systemImage: "location.slash").font(.subheadline).foregroundStyle(.orange)
+                        Label(error, systemImage: "location.slash").font(.footnote).foregroundStyle(.orange)
                             .accessibilityIdentifier("location_error")
-                        Text("Tieni aperta l’app. Riproveremo appena sarà disponibile una posizione aggiornata.")
-                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
-
-            if let route = store.route, !route.stops.isEmpty {
+            if let route = store.route, route.stops.count > 1 {
                 Section {
-                    ExpandableDetails("Percorso · \(route.stops.count) \(route.stops.count == 1 ? "tappa" : "tappe")", systemImage: "map", identifier: "route_details") {
-                        RouteMap(stops: route.stops, driverLocation: store.currentDriver?.location)
-                        ForEach(Array(route.stops.enumerated()), id: \.element.id) { index, stop in
+                    ExpandableDetails("Altre tappe · \(route.stops.count - 1)", systemImage: "list.bullet", identifier: "route_details") {
+                        ForEach(Array(route.stops.enumerated().dropFirst()), id: \.element.id) { index, stop in
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("\(index + 1). \(stop.title)").font(.headline)
-                                Text(stop.address)
+                                Text(stop.address).font(.subheadline)
                                 if route.estimatesAvailable {
-                                    Text("Arrivo previsto alle \(stop.arrivalAt.epochDate.italianTime)")
+                                    Text("Arrivo \(stop.arrivalAt.epochDate.italianTime)")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             }.padding(.vertical, 4).accessibilityIdentifier("route_stop_\(index)")
@@ -57,14 +58,13 @@ struct DriverView: View {
                         if route.estimatesAvailable {
                             Text("Circa \(route.travelSeconds / 60) min di viaggio · fine alle \(route.finishAt.epochDate.italianTime)")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Text("Tempi indicativi, senza traffico in tempo reale.").font(.caption).foregroundStyle(.secondary)
-                        } else {
-                            Text(route.unavailableEstimateMessage).font(.caption).foregroundStyle(.orange)
                         }
                     }
                 }
             }
-
+            if let route = store.route, !route.stops.isEmpty {
+                routeDetails(route)
+            }
             if !completed.isEmpty {
                 Section {
                     ExpandableDetails("Completate · \(completed.count)", systemImage: "checkmark.circle", identifier: "delivery_history") {
@@ -76,7 +76,9 @@ struct DriverView: View {
             }
             Section { SyncFooter() }
         }
+        .listSectionSpacing(.compact)
         .navigationTitle("Il tuo percorso")
+        .navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("driver_screen")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
@@ -98,10 +100,11 @@ struct DriverView: View {
 
     private var startShift: some View {
         Section {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
                 Text("Pronto a consegnare?").font(.title2.bold())
-                Text("Condividi la posizione con la centrale mentre l’app è aperta, per ricevere consegne nelle vicinanze. Puoi interrompere la condivisione in qualsiasi momento.")
+                Text(DriverPresentation.shiftConsent)
                     .font(.subheadline).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("shift_location_consent")
                 Button {
                     Task { await store.startShiftAndShareLocation() }
                 } label: {
@@ -111,82 +114,73 @@ struct DriverView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(store.isMutating || store.currentDriver == nil)
                 .accessibilityIdentifier("toggle_shift")
-            }.padding(.vertical, 8)
+            }.padding(.vertical, 4)
         }
     }
 
     private func nextStop(_ stop: RouteStop, delivery: Delivery, route: DriverRoute) -> some View {
         Section {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("PROSSIMA TAPPA").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    Text("\(stop.title) · \(delivery.shopName)")
-                        .font(.title2.bold()).accessibilityIdentifier("next_stop_title")
-                    Text(stop.address).font(.title3)
+                    Text(DriverPresentation.nextStopTitle(stop, delivery: delivery))
+                        .font(.headline).accessibilityIdentifier("next_stop_title")
+                    Text(stop.address).font(.subheadline)
                 }
-                if !route.estimatesAvailable {
-                    Text(route.unavailableEstimateMessage)
-                        .font(.subheadline).foregroundStyle(.orange).accessibilityIdentifier("route_estimates_unavailable")
+                VStack(alignment: .leading, spacing: 3) {
+                    if stop.kind == .pickup {
+                        Text(DriverPresentation.readiness(delivery)).accessibilityIdentifier("driver_readiness")
+                    }
+                    if let timing = DriverPresentation.timing(stop, delivery: delivery, route: route) {
+                        Text(timing).accessibilityIdentifier("next_stop_timing")
+                    }
+                    if let summary = DriverPresentation.travelSummary(route) {
+                        Text(summary)
+                            .foregroundStyle((route.travelEstimate ?? .legacy).approximate ? Color.orange : Color.secondary)
+                            .accessibilityIdentifier("route_travel_estimate")
+                    }
+                }.font(.caption).foregroundStyle(.secondary)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let nextStatus = DeliveryAction.nextStatus(delivery: delivery, route: route, now: Int(context.date.timeIntervalSince1970))
+                    Button {
+                        Task { await store.completeNextStop(delivery) }
+                    } label: {
+                        Label(stop.kind == .pickup ? "Conferma ritiro" : "Conferma consegna", systemImage: "checkmark")
+                            .frame(maxWidth: .infinity).padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!active || nextStatus == nil || store.isMutating)
+                    .accessibilityIdentifier(stop.kind == .pickup ? "confirm_pickup" : "confirm_dropoff")
                 }
-                RouteTravelNotice(route: route)
                 Button {
                     navigationDestination = store.navigationDestination
                 } label: {
                     Label("Naviga con Google", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
-                        .frame(maxWidth: .infinity).padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, minHeight: 32)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderless)
                 .disabled(store.navigationDestination == nil)
                 .accessibilityIdentifier("open_directions")
-                Text("Posizione e destinazione saranno usate da Google per indicazioni e ricalcolo. Avvia da fermo.")
-                    .font(.caption).foregroundStyle(.secondary)
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let nextStatus = DeliveryAction.nextStatus(delivery: delivery, route: route, now: Int(context.date.timeIntervalSince1970))
-                    VStack(alignment: .leading, spacing: 8) {
-                        if stop.kind == .pickup {
-                            Text(delivery.readinessTitle)
-                                .font(.subheadline).foregroundStyle(.secondary)
-                                .accessibilityIdentifier("driver_readiness")
-                            if route.estimatesAvailable {
-                                Text("Ritiro previsto alle \(stop.arrivalAt.epochDate.italianTime)")
-                                    .font(.subheadline).foregroundStyle(.secondary)
-                            }
-                            if let target = delivery.pickupTargetAt {
-                                Text("Obiettivo ritiro entro le \(target.epochDate.italianTime)")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        } else if let deadline = delivery.onboardDeadlineAt {
-                            Text("Tempo a bordo fino alle \(deadline.epochDate.italianTime)")
-                                .font(.subheadline).foregroundStyle(.secondary)
-                        }
-                        Button {
-                            Task { await store.completeNextStop(delivery) }
-                        } label: {
-                            Label(stop.kind == .pickup ? "Conferma ritiro" : "Conferma consegna", systemImage: "checkmark")
-                                .frame(maxWidth: .infinity).padding(.vertical, 7)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(nextStatus == nil || store.isMutating)
-                        .accessibilityIdentifier(stop.kind == .pickup ? "confirm_pickup" : "confirm_dropoff")
-                    }
+                Text("Google usa posizione e destinazione per le indicazioni. Avvia da fermo.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                ForEach(DriverPresentation.alerts(route), id: \.self) { alert in
+                    Label(alert, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .accessibilityIdentifier(!route.estimatesAvailable && alert == route.unavailableEstimateMessage
+                            ? "route_estimates_unavailable" : "route_notice")
                 }
-                ForEach(route.localizedNotices, id: \.self) { notice in
-                    Label(notice, systemImage: "clock.badge.exclamationmark")
-                        .font(.footnote).foregroundStyle(.orange)
-                        .accessibilityIdentifier("route_notice")
+            }.padding(.vertical, 4)
+        }
+    }
+
+    private func routeDetails(_ route: DriverRoute) -> some View {
+        Section {
+            ExpandableDetails("Dettagli degli orari", identifier: "route_warnings") {
+                RouteTravelNotice(route: route, identifier: "route_travel_detail")
+                ForEach(Array(Set(route.localizedWarnings + route.localizedNotices)).sorted(), id: \.self) {
+                    Text($0).font(.caption).foregroundStyle(.secondary)
                 }
-                if !route.feasible || !route.warnings.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label("Controlla i tempi del percorso", systemImage: "exclamationmark.triangle.fill")
-                            .font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
-                        Text("Contatta la centrale per gli orari. La prossima tappa rimane indicata qui sopra.")
-                            .font(.footnote).foregroundStyle(.secondary)
-                        ExpandableDetails("Vedi gli avvisi sugli orari", identifier: "route_warnings") {
-                            ForEach(route.localizedWarnings, id: \.self) { Text($0).font(.footnote) }
-                        }.font(.footnote)
-                    }
-                }
-            }.padding(.vertical, 8)
+            }.font(.footnote)
         }
     }
 }
@@ -199,21 +193,36 @@ private struct DriverLocationNotice: View {
     var body: some View {
         if location.permissionDenied && store.locationSharing {
             Section {
-                Label("Consenti la posizione per ricevere consegne vicine", systemImage: "location.slash")
+                Label("Posizione non consentita", systemImage: "location.slash")
                     .font(.subheadline.weight(.semibold))
-                Text("L’accesso alla posizione è disattivato. Apri le Impostazioni di iOS e consenti la posizione mentre usi Arrivau.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Button("Apri Impostazioni") {
+                Button("Consenti la posizione nelle Impostazioni") {
                     if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
                 }.accessibilityIdentifier("open_location_settings")
             }
         } else if !store.locationSharing {
             Section {
-                Text("Condividi la posizione con la centrale per ricevere consegne vicine mentre l’app è aperta.")
-                    .font(.subheadline).foregroundStyle(.secondary)
                 Button { store.setLocationSharing(true) } label: {
                     Label("Riprendi condivisione posizione", systemImage: "location.fill")
                 }.accessibilityIdentifier("resume_location")
+                Text("Con la centrale, mentre l’app è aperta. Per continuare a schermo bloccato, apri Il tuo turno.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } else if !store.canSwitchRole, store.locationErrorMessage == nil,
+                  [.waitingForForeground, .waitingForLocation, .permissionNeeded, .unavailable].contains(location.state) {
+            Section {
+                Label(location.compactMessage, systemImage: "location.slash")
+                    .font(.caption).foregroundStyle(.orange).accessibilityIdentifier("location_sensor_notice")
+            }
+        }
+        if let updated = store.currentDriver?.locationUpdatedAt,
+           !(store.route?.stops.isEmpty == false && store.route?.warnings.contains("Driver location is older than 5 minutes; estimates may be inaccurate") == true) {
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                if Int(context.date.timeIntervalSince1970) - updated > 300 {
+                    Section {
+                        Label("GPS oltre 5 minuti: verifica posizione e rete", systemImage: "location.badge.exclamationmark")
+                            .font(.caption).foregroundStyle(.orange).accessibilityIdentifier("location_stale_notice")
+                    }
+                }
             }
         }
     }
@@ -228,24 +237,23 @@ private struct DriverShiftSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    LabeledContent(store.principal?.displayName ?? "Corriere", value: active ? "In turno" : "Fuori turno")
-                    Toggle("Condividi la posizione durante il turno", isOn: Binding(
+                    LabeledContent("Stato", value: active ? "In turno" : "Fuori turno")
+                    Toggle("Condividi la posizione", isOn: Binding(
                         get: { store.locationSharing }, set: { store.setLocationSharing($0) }
                     )).disabled(!active).accessibilityIdentifier("share_location")
-                    Toggle("Continua con lo schermo bloccato", isOn: Binding(
+                    Toggle("Anche a schermo bloccato", isOn: Binding(
                         get: { store.backgroundLocationSharing }, set: { store.setBackgroundLocationSharing($0) }
                     )).disabled(!active || !store.locationSharing).accessibilityIdentifier("background_location")
-                    Text("Questa opzione separata mantiene la condivisione con la centrale quando lo schermo è bloccato o usi Mappe. iOS mostra un indicatore della posizione.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    LocationStatusView(location: store.location)
                     if let updated = store.currentDriver?.locationUpdatedAt {
                         LocationAgeLabel(timestamp: updated, accessibilityID: "location_sent")
                     }
-                    Text("Passare tra Centrale e Corriere nello stesso account mantiene il consenso già dato. Ferma la condivisione, termina il turno o esci per interrompere gli aggiornamenti. L’ultima posizione rimane alla centrale.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } header: { Text("Condivisione posizione") }
+                } footer: {
+                    Text("La posizione è condivisa con la centrale solo durante il turno. Ferma la condivisione o esci per interromperla. L’ultima posizione resta alla centrale.")
+                }
                 if active {
-                    DriverLocationNotice(location: store.location)
+                    if store.location.permissionDenied && store.locationSharing {
+                        DriverLocationNotice(location: store.location)
+                    }
                     Section {
                         Button("Termina turno", role: .destructive) {
                             Task {
@@ -254,12 +262,13 @@ private struct DriverShiftSheet: View {
                             }
                         }.disabled(store.isMutating).accessibilityIdentifier("toggle_shift")
                     } footer: {
-                        Text("Terminando il turno si interrompe la condivisione della posizione. Completa prima le consegne assegnate.")
+                        Text("Completa o fai riassegnare le consegne in corso prima di terminare il turno.")
                     }
                 }
                 Section {
-                    ExpandableDetails("Informazioni sulla demo", identifier: "driver_demo_details") {
-                        Text("Gli aggiornamenti richiedono una posizione recente e una connessione di rete. La condivisione in background deve essere verificata su un dispositivo reale e non riprende dopo una chiusura forzata. Dopo cinque minuti, l’ultima posizione non è più considerata aggiornata.")
+                    ExpandableDetails("Dettagli della posizione", identifier: "driver_demo_details") {
+                        LocationStatusView(location: store.location)
+                        Text("Gli aggiornamenti richiedono una posizione recente e rete. Con lo schermo bloccato iOS mostra l’indicatore. Dopo una chiusura forzata, riapri l’app e riprendi la condivisione. Cambiare vista nello stesso account mantiene il consenso dato.")
                             .font(.caption).foregroundStyle(.secondary)
                         if store.isUITesting {
                             Label("Posizione simulata a Pachino", systemImage: "testtube.2").font(.caption)
@@ -284,4 +293,3 @@ private struct LocationStatusView: View {
         Text(location.message).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("location_status")
     }
 }
-

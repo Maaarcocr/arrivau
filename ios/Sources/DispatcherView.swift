@@ -16,7 +16,7 @@ struct DispatcherView: View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(openDeliveries.isEmpty ? "Tutto pronto per la prossima consegna" : "\(openDeliveries.count) \(openDeliveries.count == 1 ? "consegna in corso" : "consegne in corso")")
+                    Text(openDeliveries.isEmpty ? "Nessuna consegna in corso" : "\(openDeliveries.count) \(openDeliveries.count == 1 ? "consegna in corso" : "consegne in corso")")
                         .font(.title2.bold())
                     Button { showingCreate = true } label: {
                         Label("Nuova consegna", systemImage: "plus")
@@ -26,7 +26,7 @@ struct DispatcherView: View {
                     .accessibilityIdentifier("create_delivery")
                     .disabled(store.pendingCreation != nil || store.legacyCreationNeedsReview || store.isMutating)
                     if store.legacyCreationNeedsReview {
-                        Text("C’è una richiesta non confermata della configurazione precedente, senza una squadra verificabile. Per evitare duplicati o invii alla squadra sbagliata, le nuove creazioni sono sospese. Verifica con il responsabile sul vecchio server se la consegna esiste, poi rimuovi soltanto questo recupero locale.")
+                        Text("Verifica con il responsabile la consegna precedente prima di crearne un’altra. La squadra della richiesta salvata non è verificabile.")
                             .font(.subheadline).foregroundStyle(.orange)
                             .accessibilityIdentifier("legacy_creation_review")
                         if let legacy = store.legacyPendingCreation {
@@ -44,7 +44,7 @@ struct DispatcherView: View {
                         }
                     }
                     if store.pendingCreation != nil {
-                        Text("C’è una creazione da verificare. Riprova la stessa richiesta prima di crearne un’altra.").font(.subheadline)
+                        Text("Verifica la consegna in sospeso prima di crearne un’altra.").font(.subheadline)
                         Button("Verifica la creazione in sospeso") { Task { _ = await store.retryPendingCreation() } }
                             .disabled(store.isMutating || store.legacyCreationNeedsReview).accessibilityIdentifier("retry_pending_creation")
                     }
@@ -109,7 +109,7 @@ struct DispatcherView: View {
             }.accessibilityIdentifier("confirm_clear_legacy_creation")
             Button("Annulla", role: .cancel) { legacyReview = nil }
         } message: { _ in
-            Text("Conferma solo dopo aver verificato con il responsabile sul vecchio server se la consegna esiste. Verrà rimossa soltanto questa richiesta salvata su questo iPhone; nessuna consegna sul server viene cancellata. Una nuova creazione potrebbe duplicare una consegna già esistente.")
+            Text("Hai verificato con il responsabile se la consegna esiste? Rimuovi solo il recupero su questo iPhone. La consegna sul server resta; crearne un’altra potrebbe duplicarla.")
         }
     }
 }
@@ -194,8 +194,6 @@ struct DeliveryDetailView: View {
                                 Text("Conferma la disponibilità per avviare l’assegnazione automatica.")
                                     .font(.subheadline).foregroundStyle(.orange)
                             }
-                            Text("L’app assegna un corriere in base al percorso e alle consegne già in carico.")
-                                .font(.subheadline).foregroundStyle(.secondary)
                         }
                     }
                     if needsAssignment {
@@ -212,7 +210,7 @@ struct DeliveryDetailView: View {
                                 } else {
                                     Label("Nessun corriere disponibile", systemImage: "bicycle")
                                         .accessibilityIdentifier("no_suggestions")
-                                    Text("Chiedi a un corriere di iniziare il turno e condividere la posizione, poi riprova.")
+                                    Text("Chiedi a un corriere di avviare il turno, poi riprova.")
                                         .font(.subheadline).foregroundStyle(.secondary)
                                     Button("Riprova") { Task { await loadSuggestions() } }
                                         .accessibilityIdentifier("retry_suggestions")
@@ -402,7 +400,7 @@ struct NewDeliveryView: View {
                             .buttonStyle(.borderedProminent)
                             .disabled((!creationUncertain && (pickup?.hasGooglePlace != true || dropoff == nil)) || submitting || store.isMutating)
                             .accessibilityIdentifier("submit_delivery")
-                            Text(creationUncertain ? "La stessa richiesta evita duplicati. Puoi chiudere e verificarla più tardi." : "Potrai indicare dopo quando il cibo è pronto")
+                            Text(creationUncertain ? "Puoi chiudere e riprovare senza creare duplicati." : "Potrai indicare dopo quando il cibo è pronto")
                                 .font(.caption).foregroundStyle(.secondary)
                         }.padding().background(.regularMaterial)
                     }
@@ -481,7 +479,7 @@ private struct ReadinessEstimateView: View {
             Form {
                 Stepper("Pronta tra \(minutes) minuti", value: $minutes, in: 1...120)
                     .accessibilityIdentifier("readiness_minutes")
-                Text("È una stima. Potrai confermare «Pronta ora» quando il cibo sarà pronto.")
+                Text("Potrai confermare «Pronta ora» in seguito.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Button("Salva previsione") {
                     guard !submitting else { return }
@@ -552,7 +550,7 @@ private struct RestaurantPickerView: View {
                         Button("Riprova") { Task { await store.loadRestaurants() } }
                             .accessibilityIdentifier("reload_restaurants")
                     } else if store.restaurants.isEmpty {
-                        Text("Aggiungi il primo ristorante da cui ritirare le consegne.")
+                        Text("Aggiungi un ristorante per iniziare.")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     Button("Aggiungi ristorante", systemImage: "plus") { showingAdd = true }

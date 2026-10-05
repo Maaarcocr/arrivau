@@ -28,17 +28,142 @@ final class DeliveryStoreTests: XCTestCase {
         try await super.tearDown()
     }
 
-    func testStartShiftPreservesCapacityAndExplicitlyOptsIntoForegroundOnly() async {
+    func testNewConsentedShiftPreservesCapacityAndIncludesLockedScreenSharing() async {
         await store.login(as: .driver1)
         XCTAssertFalse(store.locationSharing)
         await store.startShiftAndShareLocation()
         XCTAssertEqual(store.currentDriver?.active, true)
         XCTAssertEqual(store.currentDriver?.capacity, 5)
         XCTAssertTrue(store.locationSharing)
-        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertTrue(store.backgroundLocationSharing)
         XCTAssertEqual(backend.withState { $0.lastShiftCapacity }, 5)
         await store.startShiftAndShareLocation()
         XCTAssertEqual(backend.withState { $0.shiftWrites }, 1, "Repeated start must not start another shift")
+    }
+
+    func testExistingForegroundConsentNeverExpandsThroughRepeatedStartOrRefresh() async {
+        backend.withState { $0.active = true }
+        await store.login(as: .driver1)
+        store.setLocationSharing(true)
+        for _ in 0..<3 {
+            await store.startShiftAndShareLocation()
+            await store.refresh(force: true)
+            store.setForeground(false)
+            XCTAssertTrue(store.locationSharing)
+            XCTAssertFalse(store.backgroundLocationSharing)
+        }
+        XCTAssertEqual(backend.withState { $0.shiftWrites }, 0)
+    }
+
+    func testStopAndResumeRequiresExplicitBackgroundReenable() async {
+        await store.login(as: .driver1)
+        await store.startShiftAndShareLocation()
+        XCTAssertTrue(store.backgroundLocationSharing)
+        store.setLocationSharing(false)
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        store.setLocationSharing(true)
+        XCTAssertTrue(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        store.setBackgroundLocationSharing(true)
+        XCTAssertTrue(store.backgroundLocationSharing)
+        store.setBackgroundLocationSharing(false)
+        await store.refresh(force: true)
+        XCTAssertFalse(store.backgroundLocationSharing)
+    }
+
+    func testStartingWithoutSharingCannotGrantConsentViaRepeatedNewStart() async {
+        await store.login(as: .driver1)
+        await store.setShift(active: true, capacity: 5)
+        await store.startShiftAndShareLocation()
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertEqual(backend.withState { $0.shiftWrites }, 1)
+    }
+
+    func testLostStartResponseCannotSilentlyGrantSharingAfterRefresh() async {
+        await store.login(as: .driver1)
+        backend.withState { $0.loseShiftResponse = true }
+        await store.startShiftAndShareLocation()
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        await store.startShiftAndShareLocation()
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertEqual(backend.withState { $0.shiftWrites }, 1)
+        store.setLocationSharing(true)
+        XCTAssertFalse(store.backgroundLocationSharing)
+    }
+
+    func testPendingStartDoubleTapAndExplicitStopCannotReenableLocation() async {
+        await store.login(as: .driver1)
+        let started = expectation(description: "Shift request started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState { $0.onShiftRequest = { started.fulfill() }; $0.shiftResponseGate = release }
+        let first = Task { await store.startShiftAndShareLocation() }
+        await fulfillment(of: [started], timeout: 5)
+        await store.startShiftAndShareLocation()
+        store.setLocationSharing(false)
+        release.signal()
+        await first.value
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertEqual(backend.withState { $0.shiftWrites }, 1)
+    }
+
+    func testCanceledStartCannotGrantSharingEvenIfServerStartsTheShift() async {
+        await store.login(as: .driver1)
+        let started = expectation(description: "Shift request started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState { $0.onShiftRequest = { started.fulfill() }; $0.shiftResponseGate = release }
+        let first = Task { await store.startShiftAndShareLocation() }
+        await fulfillment(of: [started], timeout: 5)
+        first.cancel()
+        release.signal()
+        await first.value
+        await store.refresh(force: true)
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertEqual(backend.withState { $0.shiftWrites }, 1)
+    }
+
+    func testLogoutDuringStartIgnoresLateResponseAndLeavesServerShiftActive() async {
+        await store.login(as: .driver1)
+        let started = expectation(description: "Shift request started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState { $0.onShiftRequest = { started.fulfill() }; $0.shiftResponseGate = release }
+        let first = Task { await store.startShiftAndShareLocation() }
+        await fulfillment(of: [started], timeout: 5)
+        store.logout()
+        release.signal()
+        await first.value
+        XCTAssertNil(store.currentDriver)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertTrue(backend.withState { $0.active })
+        XCTAssertEqual(backend.withState { $0.shiftWrites }, 1)
+    }
+
+    func testLogoutAfterNewStartPreservesServerShiftAndAssignedWork() async {
+        let assigned = DriverStoreBackend.delivery(status: .assigned)
+        backend.withState { $0.jobs = [assigned] }
+        await store.login(as: .driver1)
+        await store.startShiftAndShareLocation()
+        XCTAssertTrue(store.backgroundLocationSharing)
+        store.logout()
+        XCTAssertTrue(backend.withState { $0.active })
+        XCTAssertEqual(backend.withState { $0.jobs }, [assigned])
+        XCTAssertEqual(backend.withState { $0.shiftWrites }, 1)
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertEqual(store.location.state, .stopped)
     }
 
     func testFailedStartNeverEnablesLocationSharing() async {
@@ -292,6 +417,8 @@ private final class DriverStoreBackend {
     var statusWrites = 0
     var onCreateRequest: (() -> Void)?
     var createResponseGate: DispatchSemaphore?
+    var onShiftRequest: (() -> Void)?
+    var shiftResponseGate: DispatchSemaphore?
 
     func withState<T>(_ operation: (DriverStoreBackend) -> T) -> T {
         lock.lock(); defer { lock.unlock() }
@@ -348,6 +475,8 @@ private final class DriverStoreBackend {
             shiftWrites += 1
             lastShiftCapacity = payload["capacity"] as? Int
             active = payload["active"] as? Bool ?? false
+            onShiftRequest?()
+            _ = shiftResponseGate?.wait(timeout: .now() + 10)
             if loseShiftResponse { throw URLError(.networkConnectionLost) }
             return (200, try APIClient.encoder().encode(driver))
         case "/v1/deliveries":

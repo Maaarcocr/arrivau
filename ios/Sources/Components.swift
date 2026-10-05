@@ -85,7 +85,7 @@ struct RouteMap: View {
                 }
             }
         }
-        .frame(height: 210)
+        .frame(height: 180)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .accessibilityIdentifier("route_map")
     }
@@ -147,6 +147,7 @@ struct ExpandableDetails<Content: View>: View {
 /// Road estimates and their fallback/provenance remain visible in both roles.
 struct RouteTravelNotice: View {
     let route: DriverRoute
+    var identifier = "route_travel_estimate"
     var body: some View {
         if !route.stops.isEmpty {
             let estimate = route.travelEstimate ?? .legacy
@@ -154,7 +155,7 @@ struct RouteTravelNotice: View {
                 if let notice = estimate.notice {
                     Label(notice, systemImage: estimate.approximate ? "exclamationmark.triangle" : "road.lanes")
                         .foregroundStyle(estimate.approximate ? Color.orange : Color.secondary)
-                        .accessibilityIdentifier("route_travel_estimate")
+                        .accessibilityIdentifier(identifier)
                 }
                 if estimate.attribution != nil {
                     Link("© OpenStreetMap contributors · ODbL", destination: URL(string: "https://www.openstreetmap.org/copyright")!)

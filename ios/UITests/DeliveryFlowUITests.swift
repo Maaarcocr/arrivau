@@ -52,8 +52,10 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["toggle_shift"].exists, "End shift belongs in shift settings")
         tap(app.buttons["shift_settings"])
         assertSwitch(app.switches["share_location"], value: "1")
-        assertSwitch(app.switches["background_location"], value: "0")
+        assertSwitch(app.switches["background_location"], value: "1")
+        captureScreen("ux-new-shift", showing: app.switches["background_location"])
         tap(app.buttons["close_shift_settings"])
+        captureScreen("ux-driver-waiting", showing: app.staticTexts["empty_route"])
         switchRole()
 
         login("dispatcher")
@@ -143,8 +145,18 @@ final class DeliveryFlowUITests: XCTestCase {
         try waitForServerLocation(since: resumedAt)
         XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists, "Show only the next stop's completion action")
-        XCTAssertFalse(element("route_map").exists, "The map should start collapsed")
+        reveal(element("route_map"))
+        XCTAssertTrue(element("route_map").isHittable, "The map must be visible without expanding the remaining stops")
+        XCTAssertTrue(app.buttons["confirm_pickup"].isHittable, "The next action must remain within the initial driver viewport")
         captureScreen("03-driver-route", showing: app.staticTexts["next_stop_title"])
+        tap(app.buttons["switch_role"])
+        tap(app.buttons["account_logout"])
+        XCTAssertTrue(app.buttons["confirm_logout"].waitForExistence(timeout: 5))
+        tap(app.buttons["cancel_logout"])
+        XCTAssertTrue(app.buttons["account_logout"].exists)
+        tap(app.buttons["close_account"])
+        XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 5))
+        try assertServerStatus(delivery.id, "assigned")
         // The deterministic navigation adapter exercises the app contract without Google billing/GPS.
         // Navigation arrival and closing must not mutate the real backend's delivery status.
         for attempt in 0..<2 {
@@ -167,12 +179,13 @@ final class DeliveryFlowUITests: XCTestCase {
         }
         for _ in 0..<2 {
             tap(app.buttons["route_details"])
-            let firstStop = element("route_stop_0")
+            let firstStop = element("route_stop_1")
             reveal(firstStop)
             XCTAssertTrue(firstStop.exists)
-            XCTAssertTrue(element("route_map").exists)
             tap(app.buttons["route_details"])
-            waitUntilAbsent(element("route_map"))
+            waitUntilAbsent(firstStop)
+            reveal(element("route_map"))
+            XCTAssertTrue(element("route_map").exists, "Collapsing remaining stops must keep the main map visible")
         }
 
         tap(app.buttons["shift_settings"])
@@ -292,6 +305,9 @@ final class DeliveryFlowUITests: XCTestCase {
         try waitForServerLocation(since: startedAt, token: dualToken)
         tap(app.buttons["shift_settings"])
         assertSwitch(app.switches["share_location"], value: "1")
+        assertSwitch(app.switches["background_location"], value: "1")
+        // Opting back to foreground-only must remain stable until the driver changes it.
+        setSwitch(app.switches["background_location"], to: false)
         assertSwitch(app.switches["background_location"], value: "0")
         setSwitch(app.switches["background_location"], to: true)
         tap(app.buttons["close_shift_settings"])
@@ -464,6 +480,19 @@ final class DeliveryFlowUITests: XCTestCase {
             } else {
                 XCTAssertFalse(app.buttons["create_delivery"].exists)
             }
+            for attempt in 0..<2 {
+                tap(app.buttons["switch_role"])
+                XCTAssertTrue(app.buttons["account_logout"].waitForExistence(timeout: 5))
+                XCTAssertFalse(app.buttons["account_settings"].exists, "Demo accounts are not eligible for deletion")
+                if account == "dispatcher" && attempt == 0 {
+                    captureScreen("ux-account", showing: app.buttons["account_logout"])
+                    interruptAndResume()
+                    XCTAssertTrue(app.buttons["account_logout"].exists)
+                }
+                tap(app.buttons["close_account"])
+                waitUntilAbsent(app.buttons["account_logout"])
+                XCTAssertFalse(app.buttons["login_dispatcher"].exists, "Opening or dismissing Account must never sign out")
+            }
             switchRole()
         }
     }
@@ -571,6 +600,10 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["login_driver1"].exists)
         XCTAssertFalse(app.buttons["login_dual"].exists)
         XCTAssertFalse(element("role_picker").exists)
+        XCTAssertFalse(app.textFields["api_url"].exists, "Release-style login uses the configured endpoint")
+        XCTAssertFalse(app.textFields["invite_input"].exists, "Invite entry belongs in its own screen")
+        XCTAssertTrue(app.buttons["show_invite_entry"].isHittable)
+        captureScreen("ux-pilot-login", showing: app.buttons["show_invite_entry"])
         replace(app.textFields["login_username"], with: "pilot-test")
         let password = app.secureTextFields["login_password"]
         tap(password)
@@ -861,7 +894,7 @@ final class DeliveryFlowUITests: XCTestCase {
             print("ARRIVAU_UI_LOGIN_PROBES health=\(healthStatus), demo identity=\(identityStatus)")
         }
         XCTAssertTrue(reachedDestination, diagnostic)
-        XCTAssertTrue(app.buttons["switch_role"].exists, "Account settings must preserve the existing sign-out control")
+        XCTAssertTrue(app.buttons["switch_role"].exists, "The profile control must open Account")
         XCTAssertFalse(app.buttons["account_settings"].exists, "Public demo accounts must never offer self-deletion")
     }
 
@@ -912,7 +945,7 @@ final class DeliveryFlowUITests: XCTestCase {
         let picker = app.segmentedControls["role_picker"]
         XCTAssertTrue(picker.waitForExistence(timeout: 10))
         XCTAssertTrue(picker.buttons[title].isSelected)
-        waitForLabelContaining(app.staticTexts["team_identity"], "Squadra revisione")
+        XCTAssertFalse(app.staticTexts["team_identity"].exists, "Team details belong in Account, not repeated above every screen")
         XCTAssertFalse(app.buttons["login_dual"].exists, "Changing views must not log out or ask for another account")
         XCTAssertFalse(app.buttons["login_dispatcher"].exists)
         XCTAssertFalse(app.buttons["login_driver1"].exists)
@@ -986,6 +1019,11 @@ final class DeliveryFlowUITests: XCTestCase {
 
     private func switchRole() {
         tap(app.buttons["switch_role"])
+        XCTAssertTrue(app.buttons["account_logout"].waitForExistence(timeout: 5))
+        tap(app.buttons["account_logout"])
+        if app.buttons["confirm_logout"].waitForExistence(timeout: 2) {
+            tap(app.buttons["confirm_logout"])
+        }
         XCTAssertTrue(app.buttons["login_dispatcher"].waitForExistence(timeout: 5))
     }
 

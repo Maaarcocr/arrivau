@@ -27,7 +27,9 @@ struct GoogleRouteOverview: View {
     }
     var body: some View {
         if testing {
-            Text("Mappa simulata · test").font(.caption).foregroundStyle(.secondary)
+            #if DEBUG
+            TestRouteDiagram(stops: stops)
+            #endif
         } else if let apiKey {
             GoogleStopPins(stops: stops, driverLocation: driverLocation, apiKey: apiKey)
         } else {
@@ -75,3 +77,33 @@ private struct GoogleStopPins: UIViewRepresentable {
         }
     }
 }
+
+#if DEBUG
+/// A labelled, schematic stop order for screenshots. No map tiles, geography or SDK requests.
+private struct TestRouteDiagram: View {
+    let stops: [RouteStop]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("Schema tappe · TEST", systemImage: "testtube.2")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                .accessibilityIdentifier("route_map_test_mode")
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(Array(stops.prefix(4).enumerated()), id: \.element.id) { index, stop in
+                    VStack(spacing: 8) {
+                        Text("\(index + 1)").font(.headline)
+                            .frame(width: 34, height: 34)
+                            .foregroundStyle(.white)
+                            .background(stop.kind == .pickup ? Color.orange : Color.green, in: Circle())
+                        Text(stop.title).font(.caption.weight(.semibold))
+                        Text(stop.address).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    }.frame(maxWidth: .infinity)
+                }
+            }
+            if stops.count > 4 { Text("Altre \(stops.count - 4) tappe nell’elenco").font(.caption2).foregroundStyle(.secondary) }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(.secondarySystemGroupedBackground))
+    }
+}
+#endif

@@ -116,6 +116,31 @@ final class PilotSessionTests: XCTestCase {
         XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
     }
 
+    func testLegacyForegroundOnlyConsentSurvivesDualViewsWithoutExpansion() async {
+        useDualAccount()
+        backend.withState { $0.active = true }
+        await store.login(username: "reviewer", password: "test-only-password")
+        XCTAssertTrue(store.switchRole(to: .driver))
+        await store.refresh(force: true)
+        store.setLocationSharing(true)
+        for _ in 0..<3 {
+            XCTAssertTrue(store.switchRole(to: .dispatcher))
+            await store.refresh(force: true)
+            store.setForeground(false)
+            XCTAssertTrue(store.locationSharing)
+            XCTAssertFalse(store.backgroundLocationSharing)
+            XCTAssertTrue(store.switchRole(to: .driver))
+            await store.refresh(force: true)
+            await store.startShiftAndShareLocation()
+            XCTAssertFalse(store.backgroundLocationSharing)
+        }
+        store.logout()
+        XCTAssertTrue(backend.withState { $0.active }, "Logout must not end the server shift")
+        XCTAssertFalse(store.locationSharing)
+        XCTAssertFalse(store.backgroundLocationSharing)
+        XCTAssertFalse(backend.withState { $0.requests.contains { $0.method == "POST" && $0.path == "/v1/shift" } })
+    }
+
     func testExplicitDriverSharingSurvivesViewsAndInterruptionUntilStopped() async throws {
         useDualAccount()
         let own = teamDelivery(id: "own", owner: "reviewer")

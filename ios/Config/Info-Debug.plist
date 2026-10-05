@@ -48,7 +48,7 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Con il tuo consenso, condividi la posizione con la centrale durante il turno. Quando avvii la navigazione, Google usa la posizione per il percorso e le indicazioni. L’opzione separata per lo schermo bloccato consente di continuare una sessione già avviata.</string>
+	<string>Con il tuo consenso, Arrivau condivide la posizione con la centrale durante il turno, anche a schermo bloccato. Puoi fermarla in ogni momento. Quando avvii la navigazione, Google usa la posizione per percorso e indicazioni.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>La posizione consente di proseguire una sessione di navigazione già avviata quando autorizzi la continuazione con lo schermo bloccato.</string>
 	<key>NSMotionUsageDescription</key>

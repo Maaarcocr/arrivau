@@ -139,7 +139,8 @@ PRs, logs or these docs.
 5. Select **Corriere**, confirm the next stop, record pickup after readiness, then
    delivery in route order. View switches do not automatically start GPS or end
    the shift. Previously authorized sharing continues while the shift is active;
-   background sharing still needs its separate explicit consent.
+   a newly started shift includes disclosed screen-locked sharing, while previously
+   foreground-only choices remain unchanged until the driver changes them.
 6. Switch repeatedly while an active delivery exists, refresh, relaunch and restore
    the session. Relaunch requires explicit location-sharing consent again. Finish
    the delivery, end the shift and sign out; local GPS must stop immediately.

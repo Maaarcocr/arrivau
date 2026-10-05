@@ -87,6 +87,10 @@ struct RouteMap: View {
         }
         .frame(height: 180)
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        // Keep the overview as one container without overwriting its child
+        // labels/identifiers or hiding individual map controls from VoiceOver.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Mappa del percorso")
         .accessibilityIdentifier("route_map")
     }
 }

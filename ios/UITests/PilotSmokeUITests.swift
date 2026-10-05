@@ -118,9 +118,12 @@ final class PilotSmokeUITests: XCTestCase {
                       "The next-stop action must be visible without expanding the route")
         let overview = element("route_map")
         XCTAssertTrue(overview.exists)
-        XCTAssertFalse(overview.frame.isEmpty)
+        XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "route_map").count, 1,
+                       "The route map must expose one unambiguous overview container")
+        XCTAssertGreaterThanOrEqual(overview.frame.height, 170,
+                                    "Measure the overview container, not an inherited-ID icon")
         XCTAssertTrue(app.frame.contains(overview.frame), "The whole overview must be visible with the next action")
-        XCTAssertTrue(element("route_map_test_mode").exists,
+        XCTAssertTrue(element("route_map_test_mode").waitForExistence(timeout: 5),
                       "Google-source stops must use the deterministic Google overview branch")
         XCTAssertTrue(app.buttons["open_directions"].isEnabled,
                       "The seeded next stop must remain eligible for the Google navigation source")

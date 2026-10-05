@@ -145,8 +145,10 @@ final class DeliveryFlowUITests: XCTestCase {
         try waitForServerLocation(since: resumedAt)
         XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 15))
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists, "Show only the next stop's completion action")
-        reveal(element("route_map"))
-        XCTAssertTrue(element("route_map").isHittable, "The map must be visible without expanding the remaining stops")
+        let overview = element("route_map")
+        XCTAssertTrue(overview.exists)
+        XCTAssertGreaterThanOrEqual(overview.frame.height, 170)
+        XCTAssertTrue(app.frame.contains(overview.frame), "The map must be visible without expanding the remaining stops")
         XCTAssertTrue(app.buttons["confirm_pickup"].isHittable, "The next action must remain within the initial driver viewport")
         captureScreen("03-driver-route", showing: app.staticTexts["next_stop_title"])
         tap(app.buttons["switch_role"])
@@ -184,8 +186,15 @@ final class DeliveryFlowUITests: XCTestCase {
             XCTAssertTrue(firstStop.exists)
             tap(app.buttons["route_details"])
             waitUntilAbsent(firstStop)
-            reveal(element("route_map"))
-            XCTAssertTrue(element("route_map").exists, "Collapsing remaining stops must keep the main map visible")
+            // The overview is an accessibility container, not a tappable control.
+            // Return to it by geometry rather than scrolling for isHittable.
+            for _ in 0..<8 {
+                if overview.exists && overview.frame.height >= 170 && app.frame.contains(overview.frame) { break }
+                app.swipeDown()
+            }
+            XCTAssertTrue(overview.exists, "Collapsing remaining stops must retain the main map")
+            XCTAssertGreaterThanOrEqual(overview.frame.height, 170)
+            XCTAssertTrue(app.frame.contains(overview.frame), "The overview must be visible again after collapsing stops")
         }
 
         tap(app.buttons["shift_settings"])

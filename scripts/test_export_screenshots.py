@@ -91,6 +91,15 @@ class ScreenshotExportTests(unittest.TestCase):
         self.assertIn("element.exists && element.isEnabled && element.isHittable", helpers)
         self.assertIn("{ !element.exists }", helpers)
 
+    def test_route_overview_is_an_accessible_container_not_an_inherited_child_id(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        source = (root / "ios/Sources/Components.swift").read_text()
+        route_map = source.split("struct RouteMap: View", 1)[1].split("struct LocationAgeLabel", 1)[0]
+        self.assertLess(route_map.index(".accessibilityElement(children: .contain)"),
+                        route_map.index('.accessibilityIdentifier("route_map")'))
+        smoke = (root / "ios/UITests/PilotSmokeUITests.swift").read_text()
+        self.assertIn("XCTAssertGreaterThanOrEqual(overview.frame.height, 170", smoke)
+
     def test_incomplete_smoke_export_still_fails(self):
         self.add(exporter.SMOKE_NAMES[0])
         with self.assertRaisesRegex(ValueError, "Missing expected screenshots"):

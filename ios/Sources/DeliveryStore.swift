@@ -689,7 +689,7 @@ final class DeliveryStore: ObservableObject {
                 if principal?.supports(.driver) == true,
                    let ownDriver = people.first(where: { $0.id == principal?.id }) {
                     currentDriver = ownDriver
-                    if !ownDriver.active { setLocationSharing(false) }
+                    if !ownDriver.active { reconcileInactiveShiftLocation() }
                 }
             } else {
                 async let planned = api.route()
@@ -700,7 +700,7 @@ final class DeliveryStore: ObservableObject {
                     throw APIError(message: "Il server ha restituito un profilo corriere non valido per questo account.")
                 }
                 currentDriver = driver
-                if !driver.active { setLocationSharing(false) }
+                if !driver.active { reconcileInactiveShiftLocation() }
                 applyFetchedDeliveries(fetchedJobs)
                 route = fetchedRoute
                 synchronizeLocation()
@@ -1042,6 +1042,17 @@ final class DeliveryStore: ObservableObject {
             return nil
         }
     }
+    /// An old off-shift read is not an explicit Stop. Do not revoke a pending new-start
+    /// grant when sharing was already off; an actual active grant must still be cleared.
+    private func reconcileInactiveShiftLocation() {
+        if locationSharing || backgroundLocationSharing {
+            setLocationSharing(false)
+        } else {
+            locationErrorMessage = nil
+            synchronizeLocation()
+        }
+    }
+
     func setLocationSharing(_ value: Bool) {
         guard validateSession() else { return }
         locationConsentId = UUID()

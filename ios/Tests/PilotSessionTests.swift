@@ -116,6 +116,52 @@ final class PilotSessionTests: XCTestCase {
         XCTAssertEqual(store.location.message, "Condivisione della posizione disattivata")
     }
 
+    func testOlderInactiveRefreshCannotRevokePendingNewStartConsent() async {
+        await assertInactiveRefreshDuringNewStart(explicitStop: false)
+    }
+
+    func testExplicitStopStillRevokesNewStartConsentAfterOlderInactiveRefresh() async {
+        await assertInactiveRefreshDuringNewStart(explicitStop: true)
+    }
+
+    private func assertInactiveRefreshDuringNewStart(explicitStop: Bool) async {
+        backend.withState {
+            $0.user = Principal(id: "driver-a", name: "Corriere", role: "driver")
+        }
+        await store.login(username: "driver-a", password: "test-only-password")
+        XCTAssertEqual(store.currentDriver?.active, false)
+        let readStarted = expectation(description: "Old inactive shift read captured")
+        let shiftStarted = expectation(description: "New shift committed with response pending")
+        let releaseRead = DispatchSemaphore(value: 0)
+        let releaseShift = DispatchSemaphore(value: 0)
+        defer { releaseRead.signal(); releaseShift.signal() }
+        backend.withState {
+            $0.nextReadPath = "/v1/shift"
+            $0.nextReadGate = releaseRead
+            $0.onNextRead = { readStarted.fulfill() }
+            $0.shiftGate = releaseShift
+            $0.onShift = { shiftStarted.fulfill() }
+        }
+        let oldRefresh = Task { await store.refresh(force: true) }
+        await fulfillment(of: [readStarted], timeout: 5)
+        let newStart = Task { await store.startShiftAndShareLocation() }
+        await fulfillment(of: [shiftStarted], timeout: 5)
+        XCTAssertTrue(store.isMutating)
+        releaseRead.signal()
+        await oldRefresh.value
+        XCTAssertEqual(store.currentDriver?.active, false, "The older inactive response must apply before the POST returns")
+        XCTAssertTrue(backend.withState { $0.active }, "The server already started the shift")
+        if explicitStop { store.setLocationSharing(false) }
+        releaseShift.signal()
+        await newStart.value
+        XCTAssertEqual(store.currentDriver?.active, true)
+        XCTAssertEqual(store.locationSharing, !explicitStop)
+        XCTAssertEqual(store.backgroundLocationSharing, !explicitStop)
+        XCTAssertEqual(backend.withState {
+            $0.requests.filter { $0.method == "POST" && $0.path == "/v1/shift" }.count
+        }, 1)
+    }
+
     func testLegacyForegroundOnlyConsentSurvivesDualViewsWithoutExpansion() async {
         useDualAccount()
         backend.withState { $0.active = true }
@@ -1232,6 +1278,8 @@ private final class PilotSessionBackend {
     var onLocation: (() -> Void)?
     var loginGate: DispatchSemaphore?
     var identityGate: DispatchSemaphore?
+    var shiftGate: DispatchSemaphore?
+    var onShift: (() -> Void)?
     var jobs: [Delivery] = []
     var nextReadPath: String?
     var nextReadStatus = 200
@@ -1312,6 +1360,13 @@ private final class PilotSessionBackend {
                 return (204, Data())
             case ("GET", "/v1/drivers"): return (200, try APIClient.encoder().encode([driver]))
             case ("GET", "/v1/shift"): return (200, try APIClient.encoder().encode(driver))
+            case ("POST", "/v1/shift"):
+                let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any] ?? [:]
+                state.active = payload["active"] as? Bool ?? false
+                gate = state.shiftGate; received = state.onShift
+                let updated = Driver(id: state.user.id, name: state.user.name, active: state.active,
+                                     capacity: payload["capacity"] as? Int ?? 5, location: nil, locationUpdatedAt: nil)
+                return (200, try APIClient.encoder().encode(updated))
             case ("GET", "/v1/route"):
                 let stops = state.jobs.filter { $0.driverId == state.user.id && $0.status == .assigned }.flatMap { job in
                     [RouteStop(deliveryId: job.id, kind: .pickup, address: job.pickupAddress, coordinate: job.pickup, arrivalAt: 1, departureAt: 2),

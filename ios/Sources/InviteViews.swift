@@ -39,9 +39,6 @@ struct InviteSignupView: View {
                     }
                 }
                 Section {
-                    PrivacyPolicyLink()
-                }
-                Section {
                     if store.inviteOutcomeUncertain {
                         Button("Torna ad Accedi") { password = ""; store.dismissInvite() }
                             .accessibilityIdentifier("invite_recover_login")
@@ -70,6 +67,9 @@ struct InviteSignupView: View {
             .navigationTitle("Benvenuto in Arrivau")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    PrivacyPolicyLink().labelStyle(.iconOnly)
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Annulla") { password = ""; store.dismissInvite() }
                         .accessibilityIdentifier("cancel_invite")

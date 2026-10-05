@@ -61,6 +61,9 @@ struct RootView: View {
                             else { DriverView() }
                         }
                         .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                PrivacyPolicyLink().labelStyle(.iconOnly)
+                            }
                             if store.canDeleteAccount {
                                 ToolbarItem(placement: .topBarTrailing) {
                                     Button { Task { await store.beginAccountDeletionReview() } } label: {
@@ -81,8 +84,6 @@ struct RootView: View {
                     }
                     // Discard old navigation/sheets, never the shared session or driver state.
                     .id(role)
-                    PrivacyPolicyLink()
-                        .font(.footnote).padding(.vertical, 8)
                 }
             } else { LoginView() }
         }
@@ -152,12 +153,14 @@ struct LoginView: View {
                 #else
                 pilotLogin
                 #endif
-                Section {
-                    PrivacyPolicyLink()
-                }
             }
             .navigationTitle("Benvenuto")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    PrivacyPolicyLink().labelStyle(.iconOnly)
+                }
+            }
         }
         .onDisappear { password = ""; pastedInvite = "" }
     }

@@ -916,7 +916,8 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func backToDeliveries() {
-        tap(app.navigationBars.buttons.element(boundBy: 0))
+        // Extra navigation-bar actions must not change which control goes back.
+        tap(app.navigationBars.buttons["BackButton"])
         waitUntilAbsent(app.staticTexts["delivery_status"])
         XCTAssertTrue(app.buttons["create_delivery"].waitForExistence(timeout: 5))
     }
@@ -1061,4 +1062,3 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed)
     }
 }
-

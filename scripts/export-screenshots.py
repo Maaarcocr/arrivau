@@ -18,10 +18,16 @@ NAMES = (
     "00-login", "01-dispatcher-jobs", "02-new-delivery", "03-driver-route",
     "04-driver-shift", "05-driver-assignment", "06-address-search", "07-delivery-timing",
     "dual-account-centrale", "dual-account-corriere",
+    "ux-pilot-login", "ux-invite-entry", "ux-account", "ux-new-shift", "ux-driver-waiting", "ux-active-logout",
 )
-# Captured only by the isolated-demo login helper on failure; never required on success.
-OPTIONAL_NAMES = ("demo-login-failure",)
-EXPORT_NAMES = NAMES + OPTIONAL_NAMES
+SMOKE_NAMES = (
+    "ux-pilot-login", "ux-invite-entry", "ux-account", "ux-shift-consent",
+    "ux-new-shift", "ux-driver-waiting", "ux-active-logout",
+    "dual-account-centrale", "dual-account-corriere",
+)
+# Captured only by isolated-fixture failure diagnostics; never required on success.
+OPTIONAL_NAMES = ("demo-login-failure", "ux-logout-presentation", "ux-role-switch-failure", "pilot-smoke-failure")
+EXPORT_NAMES = tuple(dict.fromkeys(NAMES + SMOKE_NAMES + OPTIONAL_NAMES))
 PNG = b"\x89PNG\r\n\x1a\n"
 ZSTD = b"\x28\xb5\x2f\xfd"
 
@@ -66,7 +72,10 @@ def compact_records(result):
     return records
 
 
-def export(result, destination, require_all=False):
+def export(result, destination, require_all=False, suite="full"):
+    if suite not in ("smoke", "full"):
+        raise ValueError("Unknown screenshot suite")
+    required_names = SMOKE_NAMES if suite == "smoke" else NAMES
     result, destination = pathlib.Path(result).resolve(), pathlib.Path(destination).resolve()
     database = result / "database.sqlite3"
     destination.mkdir(parents=True, exist_ok=True)
@@ -95,7 +104,7 @@ def export(result, destination, require_all=False):
         output.write_bytes(payload)
         found[name] = {"name": name, "file": output.name, "bytes": len(payload)}
     summary = {"screenshots": [found[name] for name in EXPORT_NAMES if name in found],
-               "missing": [name for name in NAMES if name not in found]}
+               "missing": [name for name in required_names if name not in found], "suite": suite}
     (destination / "manifest.json").write_text(json.dumps(summary, indent=2) + "\n")
     if require_all and summary["missing"]:
         raise ValueError("Missing expected screenshots: " + ", ".join(summary["missing"]))
@@ -107,8 +116,9 @@ def main():
     parser.add_argument("result")
     parser.add_argument("destination")
     parser.add_argument("--require-all", action="store_true")
+    parser.add_argument("--suite", choices=("smoke", "full"), default="full")
     args = parser.parse_args()
-    print(json.dumps(export(args.result, args.destination, args.require_all), indent=2))
+    print(json.dumps(export(args.result, args.destination, args.require_all, args.suite), indent=2))
 
 
 if __name__ == "__main__":

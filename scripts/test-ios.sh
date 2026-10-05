@@ -2,12 +2,17 @@
 # Run an iOS app → real HTTP API E2E test against disposable state on macOS.
 set -euo pipefail
 DIAGNOSE_LOGIN_FIRST=0
-if [[ "${1:-}" == "--diagnose-login-first" && $# -eq 1 ]]; then
-  DIAGNOSE_LOGIN_FIRST=1
-elif [[ $# -ne 0 ]]; then
-  echo "Usage: test-ios.sh [--diagnose-login-first]" >&2
+UI_SUITE=full
+if [[ $# -gt 1 ]]; then
+  echo "Usage: test-ios.sh [--smoke|--full|--diagnose-login-first]" >&2
   exit 1
 fi
+case "${1:-}" in
+  --smoke) UI_SUITE=smoke ;;
+  --full|"") ;;
+  --diagnose-login-first) DIAGNOSE_LOGIN_FIRST=1 ;;
+  *) echo "Usage: test-ios.sh [--smoke|--full|--diagnose-login-first]" >&2; exit 1 ;;
+esac
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -40,7 +45,7 @@ cleanup() {
   fi
   if [[ $status -ne 0 ]]; then
     if [[ -n "${RESULT:-}" && -d "$RESULT" && -n "$EXPORT_PYTHON" ]]; then
-      "$EXPORT_PYTHON" scripts/export-screenshots.py "$RESULT" "$ROOT/ios/build/screenshots" || true
+      "$EXPORT_PYTHON" scripts/export-screenshots.py "$RESULT" "$ROOT/ios/build/screenshots" --suite "$UI_SUITE" || true
     fi
     echo "API log (temporary test state retained at $TEMP_DIR):" >&2
     cat "$TEMP_DIR/api.log" >&2 || true
@@ -126,7 +131,15 @@ if [[ "$DIAGNOSE_LOGIN_FIRST" == "1" ]]; then
   start_api "$TEMP_DIR/arrivau-full.sqlite3"
 fi
 RESULT="$ROOT/ios/build/TestResults-$(date -u +%Y%m%dT%H%M%SZ).xcresult"
-run_native_tests
-"$EXPORT_PYTHON" scripts/export-screenshots.py "$RESULT" "$ROOT/ios/build/screenshots" --require-all
-printf '\nNative tests passed; Xcode result: %s\n' "$RESULT"
+# Always keep every fast unit test. The smoke and detailed UI fixtures each use
+# a fresh disposable database and are intentionally not mixed in one invocation.
+if [[ "$UI_SUITE" == "smoke" ]]; then
+  run_native_tests -only-testing:ArrivauTests -only-testing:ArrivauUITests/PilotSmokeUITests
+else
+  run_native_tests -only-testing:ArrivauTests \
+    -only-testing:ArrivauUITests/DeliveryFlowUITests \
+    -only-testing:ArrivauUITests/InviteFlowUITests
+fi
+"$EXPORT_PYTHON" scripts/export-screenshots.py "$RESULT" "$ROOT/ios/build/screenshots" --require-all --suite "$UI_SUITE"
+printf '\nNative %s checks passed; Xcode result: %s\n' "$UI_SUITE" "$RESULT"
 

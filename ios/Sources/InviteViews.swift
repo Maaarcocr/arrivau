@@ -12,7 +12,7 @@ struct InviteSignupView: View {
                 Section {
                     Label("Unisciti come corriere", systemImage: "bicycle")
                         .font(.title2.bold())
-                    Text("Scegli le tue credenziali. Il nome, la squadra e il ruolo sono già stabiliti dall’invito.")
+                    Text("Scegli un nome utente e una password per il tuo account.")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
                 Section("Il tuo account") {
@@ -25,14 +25,11 @@ struct InviteSignupView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .disabled(store.isMutating || store.inviteOutcomeUncertain)
-                Section("Server della prova") {
-                    TextField("https://api.esempio.it", text: $store.apiURL)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                        .accessibilityIdentifier("invite_api_url")
-                        .disabled(store.isMutating || store.inviteOutcomeUncertain)
-                    Text("Verifica questo indirizzo HTTPS con il responsabile. L’invito non lo cambia.")
-                        .font(.caption).foregroundStyle(.secondary)
+                #if DEBUG
+                if DeveloperServerOverride.isEnabled {
+                    DeveloperServerOverride(identifier: "invite_api_url")
                 }
+                #endif
                 if let message = store.inviteErrorMessage {
                     Section {
                         Text(message).foregroundStyle(.red).accessibilityIdentifier("invite_error")
@@ -60,7 +57,7 @@ struct InviteSignupView: View {
                         .disabled(submitted || store.isMutating || InviteCredentials.validationError(username: username, password: password) != nil)
                         .accessibilityIdentifier("invite_submit")
                     }
-                    Text("Hai già usato l’invito? Accedi con le credenziali scelte. La posizione resta disattivata fino al tuo consenso.")
+                    Text("Hai già creato l’account? Torna ad Accedi.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -77,6 +74,12 @@ struct InviteSignupView: View {
             }
         }
         .interactiveDismissDisabled(store.isRedeemingInvite)
+        .alert("Operazione non riuscita", isPresented: Binding(
+            get: { store.errorMessage != nil },
+            set: { if !$0 { store.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { store.errorMessage = nil }
+        } message: { Text(store.errorMessage ?? "Riprova.") }
         .onDisappear { password = "" }
     }
 }
@@ -103,7 +106,7 @@ struct CreateDriverInviteView: View {
                             Text("Valido fino al \(invite.expiresAt.epochDate.italianDateTime). Si può usare una sola volta.")
                                 .font(.subheadline)
                             ShareLink(item: link.url, subject: Text("Invito Arrivau"),
-                                      message: Text("Apri questo invito nell’app Arrivau per creare il tuo account corriere. Scade entro 24 ore. Usa il server HTTPS che ti ho indicato separatamente.")) {
+                                      message: Text("Apri questo invito nell’app Arrivau per creare il tuo account corriere. Scade entro 24 ore.")) {
                                 Label("Condividi invito", systemImage: "square.and.arrow.up")
                                     .frame(maxWidth: .infinity)
                             }

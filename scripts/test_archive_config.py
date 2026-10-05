@@ -231,7 +231,7 @@ class ArchiveDiagnosticTests(unittest.TestCase):
         self.assertNotIn("--upload-app", script)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertIn("run: ./scripts/test-archive-scoping.sh", workflow)
-        self.assertIn("run: ./scripts/test-ios.sh", workflow)
+        self.assertIn('./scripts/test-ios.sh "--$UI_SUITE"', workflow)
 
 
 if __name__ == "__main__":

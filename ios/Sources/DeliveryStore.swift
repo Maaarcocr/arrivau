@@ -70,6 +70,8 @@ final class DeliveryStore: ObservableObject {
     private var foreground = false
     private var pollTask: Task<Void, Never>?
     private var locationTask: Task<Void, Never>?
+    // Never persisted. A stop or consent change invalidates a pending start’s location grant.
+    private var locationConsentId = UUID()
     private var expiryTask: Task<Void, Never>?
     private var revocationTasks: [UUID: Task<Void, Never>] = [:]
     // Never persisted: interrupted redemptions use normal login recovery.
@@ -534,6 +536,7 @@ final class DeliveryStore: ObservableObject {
         location.stop()
         locationSharing = false
         backgroundLocationSharing = false
+        locationConsentId = UUID()
         restaurants = []; pendingRestaurant = restaurantRecovery; restaurantReadId = UUID(); loadingRestaurants = false; restaurantLoadError = nil
         availableDeliveries = []; drivers = []; currentDriver = nil; route = nil
         pendingActions = [:]; readinessNeedsRefresh = []; lastSyncedAt = nil; syncErrorMessage = nil; locationErrorMessage = nil
@@ -608,6 +611,7 @@ final class DeliveryStore: ObservableObject {
         location.stop()
         locationSharing = false
         backgroundLocationSharing = false
+        locationConsentId = UUID()
         principal = nil; role = nil; client = nil; currentDriver = nil
         restaurants = []; pendingRestaurant = nil; restaurantReadId = UUID(); loadingRestaurants = false; restaurantLoadError = nil
         availableDeliveries = []; drivers = []; route = nil
@@ -685,7 +689,7 @@ final class DeliveryStore: ObservableObject {
                 if principal?.supports(.driver) == true,
                    let ownDriver = people.first(where: { $0.id == principal?.id }) {
                     currentDriver = ownDriver
-                    if !ownDriver.active { setLocationSharing(false) }
+                    if !ownDriver.active { reconcileInactiveShiftLocation() }
                 }
             } else {
                 async let planned = api.route()
@@ -696,7 +700,7 @@ final class DeliveryStore: ObservableObject {
                     throw APIError(message: "Il server ha restituito un profilo corriere non valido per questo account.")
                 }
                 currentDriver = driver
-                if !driver.active { setLocationSharing(false) }
+                if !driver.active { reconcileInactiveShiftLocation() }
                 applyFetchedDeliveries(fetchedJobs)
                 route = fetchedRoute
                 synchronizeLocation()
@@ -955,13 +959,19 @@ final class DeliveryStore: ObservableObject {
         }
     }
 
-    /// This single, explicitly labeled action opts into foreground location only after the server starts the shift.
+    /// The new-shift screen explicitly discloses locked-screen sharing before this action.
+    /// Existing/restored shifts and the separate resume control never receive this broader grant.
     func startShiftAndShareLocation() async {
         guard !isMutating, role == .driver, principal?.supports(.driver) == true,
               let driver = currentDriver, driver.id == principal?.id, !driver.active else { return }
+        let consent = locationConsentId
         let _: Driver? = await mutate({ try await $0.shift(active: true, capacity: driver.capacity) }) { result in
+            guard result.id == driver.id else { return }
             self.currentDriver = result
-            if result.active { self.setLocationSharing(true) }
+            guard result.active, !Task.isCancelled, consent == self.locationConsentId else { return }
+            self.locationSharing = true
+            self.backgroundLocationSharing = true
+            self.synchronizeLocation()
         }
     }
     func setShift(active: Bool, capacity: Int) async {
@@ -1032,14 +1042,28 @@ final class DeliveryStore: ObservableObject {
             return nil
         }
     }
+    /// An old off-shift read is not an explicit Stop. Do not revoke a pending new-start
+    /// grant when sharing was already off; an actual active grant must still be cleared.
+    private func reconcileInactiveShiftLocation() {
+        if locationSharing || backgroundLocationSharing {
+            setLocationSharing(false)
+        } else {
+            locationErrorMessage = nil
+            synchronizeLocation()
+        }
+    }
+
     func setLocationSharing(_ value: Bool) {
         guard validateSession() else { return }
+        locationConsentId = UUID()
+        // Resuming is deliberately foreground-only unless background is explicitly re-enabled.
         locationSharing = value && !isDeletingAccount && role == .driver && principal?.supports(.driver) == true && currentDriver?.active == true
         if !locationSharing { backgroundLocationSharing = false; locationErrorMessage = nil }
         synchronizeLocation()
     }
     func setBackgroundLocationSharing(_ value: Bool) {
         guard validateSession() else { return }
+        locationConsentId = UUID()
         backgroundLocationSharing = value && role == .driver && locationSharing && currentDriver?.active == true
         synchronizeLocation()
     }

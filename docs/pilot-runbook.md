@@ -80,7 +80,7 @@ Keep a human dispatcher in contact with the driver. Record the device model, iOS
 - Turn networking off during restaurant/order creation, readiness, assignment/status changes. Confirm a visible error, reconnect and refresh. Retry the same pending action; check that a duplicate delivery or duplicate route stop is not created. Do not create a replacement delivery just because the first response was lost
 - Sign out/in and restart the app; confirm restored sessions are checked, expired/revoked sessions return to login, and changing the API origin cannot send an old token to the new server
 - Deny location permission, later grant it, stop/restart sharing and end the shift. No GPS should be sent while off shift or after logout
-- Only after foreground checks pass, enable the separate background-sharing control; lock the phone, switch to Maps, lose/recover connectivity, then check location timestamps at the dispatcher
+- Confirm the new-shift disclosure includes screen-locked sharing; after foreground checks pass, lock the phone, switch to Maps, lose/recover connectivity, then check location timestamps at the dispatcher. Turn off locked-screen sharing and verify foreground-only behavior; signing back in or resuming a pre-existing shift must not silently re-enable it
 - Force-quit/reboot the driver phone: do not assume reporting resumes. Reopen the app, verify the shift and explicitly resume sharing if needed
 - Test repeated taps, pending delivery form after an error, server restart, and a response arriving after signout/account change
 

@@ -14,7 +14,7 @@ struct PrivacyPolicyLink: View {
         } else {
             Label("Informativa privacy", systemImage: "hand.raised")
                 .foregroundStyle(.secondary)
-                .accessibilityHint("Inserisci prima l’indirizzo HTTPS del server della prova")
+                .accessibilityHint("Servizio non configurato. Contatta il responsabile.")
         }
     }
 }

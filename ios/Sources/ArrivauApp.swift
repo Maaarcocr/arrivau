@@ -28,30 +28,23 @@ struct ArrivauApp: App {
 
 struct RootView: View {
     @EnvironmentObject private var store: DeliveryStore
+    @State private var showingAccount = false
+    @State private var showingInviteEntry = false
+
+    private var isPresentingInvite: Bool {
+        !store.isRestoringSession && !store.canRetryRestore
+            && (showingInviteEntry || store.pendingInvite != nil)
+    }
+
     var body: some View {
         Group {
             if let role = store.role {
                 VStack(spacing: 0) {
-                    if store.principal?.teamTitle != nil || store.canSwitchRole {
+                    if store.canSwitchRole {
                         VStack(spacing: 8) {
-                            if let team = store.principal?.teamTitle {
-                                Text("Squadra: \(team)").font(.caption).foregroundStyle(.secondary)
-                                    .accessibilityIdentifier("team_identity")
-                            }
-                            if store.canSwitchRole {
-                                Picker("Vista", selection: Binding(
-                                    get: { role },
-                                    set: { selected in
-                                        if store.switchRole(to: selected) { Task { await store.refresh(force: true) } }
-                                    }
-                                )) {
-                                    ForEach(store.availableRoles, id: \.self) { option in Text(option.title).tag(option) }
-                                }
-                                .pickerStyle(.segmented).accessibilityIdentifier("role_picker")
-                                .disabled(store.isMutating)
-                                if store.locationSharing {
-                                    AccountLocationSharingNotice(location: store.location)
-                                }
+                            AccountRoleSwitcher()
+                            if store.locationSharing {
+                                AccountLocationSharingNotice(location: store.location)
                             }
                         }.padding(.horizontal).padding(.vertical, 8)
                     }
@@ -62,45 +55,88 @@ struct RootView: View {
                         }
                         .toolbar {
                             ToolbarItem(placement: .topBarTrailing) {
-                                PrivacyPolicyLink().labelStyle(.iconOnly)
-                            }
-                            if store.canDeleteAccount {
-                                ToolbarItem(placement: .topBarTrailing) {
-                                    Button { Task { await store.beginAccountDeletionReview() } } label: {
-                                        Label("Account", systemImage: "gearshape")
-                                    }
-                                    .accessibilityIdentifier("account_settings")
-                                    .disabled(store.isMutating)
+                                Button { showingAccount = true } label: {
+                                    Label("Account", systemImage: "person.crop.circle")
                                 }
-                            }
-                            ToolbarItem(placement: .topBarTrailing) {
-                                Button { store.logout() } label: {
-                                    Label(store.isDemo ? "Cambia account" : "Esci", systemImage: "person.crop.circle")
-                                }
-                                    .accessibilityIdentifier("switch_role")
-                                    .disabled(store.isDemo && store.isMutating)
+                                // Keep the established profile-button identifier for UI automation.
+                                .accessibilityIdentifier("switch_role")
+                                .disabled(store.isDemo && store.isMutating)
                             }
                         }
                     }
                     // Discard old navigation/sheets, never the shared session or driver state.
                     .id(role)
                 }
-            } else { LoginView() }
+            } else {
+                LoginView { showingInviteEntry = true }
+            }
         }
-        .sheet(item: Binding(
-            get: { store.isRestoringSession || store.canRetryRestore ? nil : store.pendingInvite },
-            set: { if $0 == nil && !store.isRestoringSession { store.dismissInvite() } }
-        )) { invitation in InviteSignupView().id(invitation.id) }
+        .sheet(isPresented: $showingAccount, onDismiss: {
+            store.cancelAccountDeletionReview()
+        }) { AccountView() }
         .sheet(isPresented: Binding(
-            get: { store.isReviewingAccountDeletion },
-            set: { if !$0 { store.cancelAccountDeletionReview() } }
-        )) { AccountDeletionView() }
+            get: { isPresentingInvite },
+            set: { presented in
+                if !presented {
+                    showingInviteEntry = false
+                    if !store.isRestoringSession { store.dismissInvite() }
+                }
+            }
+        )) {
+            // Entry and signup share one presentation. A valid pasted link replaces
+            // the entry form; a deep link opens signup directly, without stacking sheets.
+            if let invitation = store.pendingInvite {
+                InviteSignupView().id(invitation.id)
+            } else {
+                InviteEntryView { showingInviteEntry = false }
+            }
+        }
+        .onChange(of: store.pendingInvite?.id) { _, invitation in
+            if invitation != nil { showingInviteEntry = false }
+        }
+        .onChange(of: store.principal?.id) { _, _ in
+            showingAccount = false
+            showingInviteEntry = false
+        }
         .alert("Operazione non riuscita", isPresented: Binding(
-            get: { store.errorMessage != nil },
+            get: { !isPresentingInvite && store.errorMessage != nil },
             set: { if !$0 { store.errorMessage = nil } }
         )) {
             Button("OK", role: .cancel) { store.errorMessage = nil }
         } message: { Text(store.errorMessage ?? "Riprova.") }
+    }
+}
+
+/// Ordinary buttons keep each authorized view's full touch target and selection explicit.
+private struct AccountRoleSwitcher: View {
+    @EnvironmentObject private var store: DeliveryStore
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(store.availableRoles, id: \.self) { option in
+                Button {
+                    if store.switchRole(to: option) { Task { await store.refresh(force: true) } }
+                } label: {
+                    Text(option.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(store.role == option ? Color.primary : Color.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(store.role == option ? Color(.secondarySystemGroupedBackground) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 9))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("role_\(option.rawValue)")
+                .accessibilityValue(store.role == option ? "Selezionato" : "Non selezionato")
+                .accessibilityAddTraits(store.role == option ? .isSelected : [])
+                .disabled(store.isMutating)
+            }
+        }
+        .padding(4)
+        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Vista")
+        .accessibilityIdentifier("role_picker")
     }
 }
 
@@ -110,7 +146,7 @@ private struct AccountLocationSharingNotice: View {
     @ObservedObject var location: LocationReporter
     var body: some View {
         HStack {
-            Label(store.locationErrorMessage ?? location.message,
+            Label(store.locationErrorMessage ?? location.compactMessage,
                   systemImage: location.permissionDenied || store.locationErrorMessage != nil ? "location.slash" : "location.fill")
                 .font(.caption).foregroundStyle(.secondary)
                 .accessibilityIdentifier("account_location_sharing")
@@ -127,20 +163,22 @@ struct LoginView: View {
     @EnvironmentObject private var store: DeliveryStore
     @State private var username = ""
     @State private var password = ""
-    @State private var pastedInvite = ""
+    let showInviteEntry: () -> Void
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
                         Label("Arrivau", systemImage: "bicycle.circle.fill")
                             .font(.largeTitle.bold()).foregroundStyle(.orange)
-                        Text("Consegne, un passo alla volta.").font(.title3)
-                        Text(store.isDemo ? "Demo locale · Debug" : "Prova pilota supervisionata")
-                            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    }.padding(.vertical, 16)
+                        if store.isDemo {
+                            Text("Demo locale · Debug")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.padding(.vertical, 8)
                 }
+                .listRowBackground(Color.clear)
                 if let notice = store.accountDeletionNotice {
                     Section("Eliminazione account") {
                         Text(notice).accessibilityIdentifier("account_deletion_notice")
@@ -154,20 +192,18 @@ struct LoginView: View {
                 pilotLogin
                 #endif
             }
-            .navigationTitle("Benvenuto")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    PrivacyPolicyLink().labelStyle(.iconOnly)
-                }
-            }
+            .scrollDismissesKeyboard(.interactively)
         }
-        .onDisappear { password = ""; pastedInvite = "" }
+        .onDisappear { password = "" }
+        .onChange(of: store.pendingInvite?.id) { _, invitation in
+            if invitation != nil { password = "" }
+        }
     }
 
     private var pilotLogin: some View {
         Group {
-            Section("Accedi con il tuo account") {
+            Section {
                 TextField("Nome utente", text: $username)
                     .textContentType(.username).textInputAutocapitalization(.never).autocorrectionDisabled()
                     .accessibilityIdentifier("login_username").disabled(store.isMutating)
@@ -194,30 +230,22 @@ struct LoginView: View {
                     Button("Dimentica l’accesso su questo iPhone", role: .destructive) { store.logout() }
                 }
             }
-            Section("Hai ricevuto un invito?") {
-                TextField("Incolla il link o il codice", text: $pastedInvite)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .privacySensitive().accessibilityIdentifier("invite_input")
-                    .disabled(store.isMutating)
-                Button("Apri invito") {
-                    let input = pastedInvite
-                    pastedInvite = ""
-                    store.receiveInvite(input)
-                }
-                .disabled(store.isMutating || pastedInvite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .accessibilityIdentifier("open_invite")
-            }
-            Section("Server della prova") {
-                TextField("https://api.esempio.it", text: $store.apiURL)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    .accessibilityIdentifier("api_url").disabled(store.isMutating)
-                Text("Usa l’indirizzo HTTPS e le credenziali forniti dal responsabile. Il server assegna la squadra e le funzioni disponibili per il tuo account.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
             Section {
-                Text("La posizione si condivide solo durante il turno, dopo il tuo consenso. Continuare con lo schermo bloccato richiede un consenso separato. Uscire ferma la condivisione su questo iPhone; il turno e le consegne sul server restano attivi.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Button("Hai un invito?") { password = ""; showInviteEntry() }
+                    .frame(maxWidth: .infinity)
+                    .disabled(store.isMutating || store.canRetryRestore)
+                    .accessibilityIdentifier("show_invite_entry")
             }
+            .listRowBackground(Color.clear)
+            #if DEBUG
+            if DeveloperServerOverride.isEnabled {
+                DeveloperServerOverride(identifier: "api_url")
+            }
+            #endif
+            Section {
+                PrivacyPolicyLink().font(.footnote).frame(maxWidth: .infinity)
+            }
+            .listRowBackground(Color.clear)
         }
     }
 
@@ -258,3 +286,22 @@ struct LoginView: View {
     }
     #endif
 }
+
+#if DEBUG
+/// Only explicitly enabled development builds can override the bundled endpoint.
+/// Release users always use the configured HTTPS service or their saved session.
+struct DeveloperServerOverride: View {
+    @EnvironmentObject private var store: DeliveryStore
+    let identifier: String
+    static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains("--developer-settings") }
+
+    var body: some View {
+        Section("Sviluppo · Debug") {
+            TextField("Override server HTTPS", text: $store.apiURL)
+                .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                .accessibilityIdentifier(identifier)
+                .disabled(store.isMutating || store.inviteOutcomeUncertain)
+        }
+    }
+}
+#endif

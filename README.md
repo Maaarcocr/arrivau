@@ -88,8 +88,10 @@ python3 scripts/e2e.py
 On macOS, run the native app against a disposable real API and simulator:
 
 ```sh
-./scripts/test-ios.sh
+./scripts/test-ios.sh --smoke
 ```
+
+Use `--full` for the detailed UI journeys, or choose `full` when manually running the verification workflow. Ordinary pull requests and main pushes use two UI smoke cases while retaining all native unit, API and build checks.
 
 The script generates the Xcode project, builds/starts the API, selects an installed iPhone simulator and runs unit/UI tests. `SIMULATOR_UDID` selects a particular device. Explicit test flags provide deterministic GPS/place-search fixtures; ordinary app use requires genuine permission and selected Maps results. Screenshots are written under `ios/build/screenshots/` and attached to CI runs.
 
@@ -104,7 +106,7 @@ The CI also builds the Release configuration for a generic physical iOS device w
 - Pickup aims for ten minutes after readiness, with a five-minute cumulative extra-onboard-delay policy. Impossible timing is flagged rather than leaving ready work unassigned; physical capacity, precedence and the 32-stop bound remain mandatory. See [readiness and dispatch](docs/readiness-and-dispatch.md)
 - The foreground app polls about every five seconds. There is no APNs or guaranteed suspended-app notification delivery, and no general offline queue
 - Delivery creation retains its idempotency key and request securely for uncertain-response recovery. Check current state before manually replacing a job. Connectivity errors are visible rather than silently treated as success
-- GPS starts only after explicit sharing consent on an active shift. Separate background opt-in supports locking/Maps, subject to iOS behavior. Ending the shift or signing out stops local reporting. The most recent point remains on the server; no location history feed is built
+- GPS starts only after explicit sharing consent on an active shift. New-shift consent includes locking/Maps, subject to iOS behavior; existing foreground-only choices are preserved and can be changed in the shift sheet. Ending the shift or signing out stops local reporting. The most recent point remains on the server; no location history feed is built
 - Google Places search and in-app Google navigation require separately restricted iOS/server keys and enabled billing. Place IDs and original user text are durable; Google coordinates remain in a bounded memory-only cache. Existing Apple-selected addresses require fresh selection. See [setup and release checks](docs/google-navigation.md)
 - Physical-device and background/network/battery checks must pass before using real customer work. Start with synthetic deliveries and inform participants about stored location/address data
 

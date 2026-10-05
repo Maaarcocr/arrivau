@@ -263,7 +263,7 @@ struct PlaceSearchView: View {
                         .onSubmit { searchFocused = false; model.search() }
                         .disabled(model.selecting)
                         .accessibilityIdentifier("address_search")
-                    Text("Conserviamo il testo che scrivi come riferimento. Il risultato scelto indica il punto esatto.")
+                    Text("Scegli il risultato per confermare l’indirizzo.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if model.searching || model.selecting {

@@ -100,6 +100,15 @@ class ScreenshotExportTests(unittest.TestCase):
         smoke = (root / "ios/UITests/PilotSmokeUITests.swift").read_text()
         self.assertIn("XCTAssertGreaterThanOrEqual(overview.frame.height, 170", smoke)
 
+    def test_logout_smoke_disambiguates_nested_native_action_wrappers(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        source = (root / "ios/UITests/PilotSmokeUITests.swift").read_text()
+        helper = source.split("private func tapLogoutAlertButton", 1)[1].split("private func assertSharing", 1)[0]
+        self.assertIn("activeLogoutAlert.buttons.matching(identifier: identifier).firstMatch", helper)
+        self.assertIn("XCTAssertEqual(button.label, title)", helper)
+        self.assertEqual(helper.count("button.tap()"), 1)
+        self.assertIn("!self.app.alerts.firstMatch.exists", helper)
+
     def test_incomplete_smoke_export_still_fails(self):
         self.add(exporter.SMOKE_NAMES[0])
         with self.assertRaisesRegex(ValueError, "Missing expected screenshots"):

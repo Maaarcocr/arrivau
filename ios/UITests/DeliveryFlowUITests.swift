@@ -154,7 +154,7 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["switch_role"])
         tap(app.buttons["account_logout"])
         XCTAssertTrue(app.alerts["Uscire con un turno attivo?"].waitForExistence(timeout: 5))
-        tapModalButton(logoutAlert.buttons["Annulla"])
+        tapModalButton(logoutAlert.buttons.matching(identifier: "cancel_logout").firstMatch, expectedLabel: "Annulla")
         XCTAssertTrue(app.buttons["account_logout"].exists)
         tap(app.buttons["close_account"])
         XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 5))
@@ -1040,8 +1040,8 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["switch_role"])
         XCTAssertTrue(app.buttons["account_logout"].waitForExistence(timeout: 5))
         tap(app.buttons["account_logout"])
-        if logoutAlert.buttons["Esci"].waitForExistence(timeout: 2) {
-            tapModalButton(logoutAlert.buttons["Esci"], captureLogout: true)
+        if logoutAlert.buttons.matching(identifier: "confirm_logout").firstMatch.waitForExistence(timeout: 2) {
+            tapModalButton(logoutAlert.buttons.matching(identifier: "confirm_logout").firstMatch, expectedLabel: "Esci", captureLogout: true)
         }
         XCTAssertTrue(app.buttons["login_dispatcher"].waitForExistence(timeout: 5))
     }
@@ -1066,8 +1066,9 @@ final class DeliveryFlowUITests: XCTestCase {
     /// Native alerts have their own hit-testing surface above Account. Use XCTest’s
     /// direct alert tap, as in the HTTP-error tests; scrolling or pre-gating it with
     /// a nested-sheet hittability snapshot can prevent the actual action altogether.
-    private func tapModalButton(_ button: XCUIElement, captureLogout: Bool = false) {
+    private func tapModalButton(_ button: XCUIElement, expectedLabel: String, captureLogout: Bool = false) {
         XCTAssertTrue(button.waitForExistence(timeout: 10))
+        XCTAssertEqual(button.label, expectedLabel)
         print("Logout alert button: enabled=\(button.isEnabled), hittable=\(button.isHittable), frame=\(button.frame)")
         if captureLogout {
             let screenshot = XCTAttachment(screenshot: app.screenshot())

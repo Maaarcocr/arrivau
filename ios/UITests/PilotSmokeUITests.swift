@@ -226,8 +226,12 @@ final class PilotSmokeUITests: XCTestCase {
 
     private func tapLogoutAlertButton(_ title: String) {
         XCTAssertTrue(activeLogoutAlert.waitForExistence(timeout: 5))
-        let button = activeLogoutAlert.buttons[title]
+        // iOS exposes the SwiftUI alert action as nested button wrappers with
+        // the same identifier. Select that one action, not an ambiguous label query.
+        let identifier = title == "Esci" ? "confirm_logout" : "cancel_logout"
+        let button = activeLogoutAlert.buttons.matching(identifier: identifier).firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5))
+        XCTAssertEqual(button.label, title)
         button.tap()
         wait("One native \(title) tap dismisses the logout alert") { !self.app.alerts.firstMatch.exists }
     }

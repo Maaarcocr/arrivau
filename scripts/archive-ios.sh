@@ -20,17 +20,14 @@ trap 'exit 143' TERM
 python3 scripts/navigation-config.py --configuration Release --output "$CONFIG_WORK/Info-Navigation.plist"
 # Keep key contents out of Xcode's command-line/build-setting diagnostics.
 unset ARRIVAU_GOOGLE_MAPS_API_KEY
-(cd ios && xcodegen generate)
+python3 scripts/archive-config.py --build-number "$ARRIVAU_BUILD_NUMBER" \
+  --info-plist "$CONFIG_WORK/Info-Navigation.plist" --output "$CONFIG_WORK/project.json"
+xcodegen generate --no-env --spec "$CONFIG_WORK/project.json" --project-root "$ROOT/ios" --project "$CONFIG_WORK"
 ARCHIVE="$ROOT/ios/build/Arrivau-${ARRIVAU_BUILD_NUMBER}.xcarchive"
 [[ ! -e "$ARCHIVE" ]] || { echo "Archive already exists: $ARCHIVE. Choose a new build number." >&2; exit 1; }
 xcodebuild archive \
-  -project ios/Arrivau.xcodeproj -scheme Arrivau -configuration Release \
-  -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" \
-  DEVELOPMENT_TEAM="$ARRIVAU_TEAM_ID" \
-  PRODUCT_BUNDLE_IDENTIFIER="$ARRIVAU_BUNDLE_ID" \
-  CURRENT_PROJECT_VERSION="$ARRIVAU_BUILD_NUMBER" \
-  ARRIVAU_API_URL="$ARRIVAU_API_URL" \
-  INFOPLIST_FILE="$CONFIG_WORK/Info-Navigation.plist"
+  -project "$CONFIG_WORK/Arrivau.xcodeproj" -scheme Arrivau -configuration Release \
+  -destination 'generic/platform=iOS' -archivePath "$ARCHIVE"
 python3 scripts/verify-ios-bundle.py "$ARCHIVE/Products/Applications/Arrivau.app"
 printf '\nArchive created at %s\nOpen it in Xcode Organizer, validate, then explicitly choose upload when ready.\n' "$ARCHIVE"
 

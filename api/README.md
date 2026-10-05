@@ -22,12 +22,19 @@ production account configuration, and demo databases cannot become pilot databas
 
 ## Public privacy notice
 
-`GET /privacy` is public and sends no session cookies. Before external review,
-the operator must approve the complete notice and install a UTF-8 HTML file
-outside the repository, then set
-`ARRIVAU_PRIVACY_NOTICE_PATH=/etc/arrivau/privacy.html` and restart the API.
-The file is read once at startup. No extra host is required; the existing HTTPS
-proxy forwards this route as it does the API.
+`GET /privacy` is public and sends no session cookies. The approved Italian pilot
+notice is included in [deploy/privacy.html](../deploy/privacy.html). On the
+existing systemd deployment, install it from the checkout:
+
+```sh
+sudo install -Dm644 deploy/privacy.html /etc/arrivau/privacy.html
+```
+
+Add `ARRIVAU_PRIVACY_NOTICE_PATH=/etc/arrivau/privacy.html` to the existing API
+environment file, then run `sudo systemctl restart arrivau`. Container deployments
+can mount the same file read-only and set the same variable through their existing
+deployment process. The file is read once at startup. No extra host is required;
+the existing HTTPS proxy forwards this route as it does the API.
 
 When the setting is absent, `/privacy` returns HTTP 503 and a clear unavailable
 message. A configured missing file, incomplete HTML document or draft containing

@@ -88,7 +88,7 @@ jobs:
           ARRIVAU_TEAM_ID: ${{ vars.ARRIVAU_TEAM_ID }}
           ARRIVAU_BUNDLE_ID: ${{ vars.ARRIVAU_BUNDLE_ID }}
           ARRIVAU_API_URL: ${{ vars.ARRIVAU_API_URL }}
-          # Optional: without a key the app builds with in-app navigation unavailable.
+          # Optional for archive; upload requires a configured iOS key (presence only).
           ARRIVAU_GOOGLE_MAPS_API_KEY: ${{ secrets.ARRIVAU_GOOGLE_MAPS_API_KEY }}
           SELECTED_ACTION: ${{ inputs.action }}
           BUILD_NUMBER: ${{ inputs.build_number }}
@@ -103,3 +103,11 @@ jobs:
         if: always()
         run: ./scripts/testflight-ci.sh cleanup
 
+      - name: Retain only the validated privacy declaration summary
+        if: always() && env.ARRIVAU_TESTFLIGHT_PRIVACY_AUDIT != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: arrivau-privacy-manifest-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARRIVAU_TESTFLIGHT_PRIVACY_AUDIT }}
+          if-no-files-found: error
+          retention-days: 14

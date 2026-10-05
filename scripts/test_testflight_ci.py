@@ -93,6 +93,8 @@ product = "export" if any("/unpacked/" in arg for arg in args) else "archive"
 if (os.environ.get("FAKE_FAIL_AT") in (stage, operation)
         and os.environ.get("FAKE_FAIL_PRODUCT", product) == product):
     print(marker, file=sys.stderr)
+    if stage == "xcodebuild:archive":
+        print(os.environ.get("FAKE_ARCHIVE_ERROR", ""), file=sys.stderr)
     sys.exit(42)
 
 def value(flag):
@@ -115,6 +117,11 @@ def make_app(app):
     (app / "Arrivau").write_bytes(binary)
     (app / "Assets.car").write_bytes(b"synthetic compiled assets")
     (app / "PrivacyInfo.xcprivacy").write_bytes(plistlib.dumps({"NSPrivacyTracking": False}))
+    for sdk in ("GoogleMaps", "GooglePlaces", "GoogleNavigation"):
+        resource = app / (sdk + "_" + sdk + "Target.bundle") / (sdk + ".bundle")
+        resource.mkdir(parents=True)
+        manifest = root / "repo/scripts/tests/fixtures/google-privacy-11.2.0" / sdk / "PrivacyInfo.xcprivacy"
+        (resource / "PrivacyInfo.xcprivacy").write_bytes(manifest.read_bytes())
     (app / "embedded.mobileprovision").write_bytes(profile_bytes)
 
 if name == "uname":
@@ -156,7 +163,17 @@ elif name == "security":
         assert args[0] in ["set-keychain-settings", "unlock-keychain", "import", "set-key-partition-list"]
         print(marker)
 elif name == "xcodegen":
-    assert args == ["generate"]
+    assert args[0] == "generate" and "--no-env" in args
+    overlay_path = pathlib.Path(value("--spec"))
+    overlay = json.loads(overlay_path.read_text())
+    assert set(overlay) == {"include", "targets"}
+    assert set(overlay["targets"]) == {"Arrivau"}
+    assert set(overlay["targets"]["Arrivau"]["settings"]["configs"]) == {"Release"}
+    assert value("--project-root") == str(root / "repo/ios")
+    project = pathlib.Path(value("--project")) / "Arrivau.xcodeproj"
+    project.mkdir()
+    (project / "synthetic-settings.json").write_text(json.dumps(overlay))
+    (root / "archive-config-observed.json").write_text(json.dumps(overlay))
     print(marker)
 elif name == "xcodebuild":
     if args == ["-version"]:
@@ -164,7 +181,14 @@ elif name == "xcodebuild":
     elif args == ["-help"]:
         print("-archivePath -exportArchive -exportOptionsPlist app-store-connect signingStyle provisioningProfiles manageAppVersionAndBuildNumber")
     elif args[0] == "archive":
-        navigation_path = next(arg.split("=", 1)[1] for arg in args if arg.startswith("INFOPLIST_FILE="))
+        overlay = json.loads((pathlib.Path(value("-project")) / "synthetic-settings.json").read_text())
+        settings = overlay["targets"]["Arrivau"]["settings"]["configs"]["Release"]
+        assert not any(arg.split("=", 1)[0] in settings for arg in args)
+        assert settings["CODE_SIGN_STYLE"] == "Manual"
+        assert settings["CODE_SIGNING_ALLOWED"] == settings["CODE_SIGNING_REQUIRED"] == "YES"
+        assert settings["PROVISIONING_PROFILE_SPECIFIER"] == profile["UUID"]
+        assert settings["CODE_SIGN_IDENTITY"] == fingerprint
+        navigation_path = settings["INFOPLIST_FILE"]
         navigation = plistlib.loads(pathlib.Path(navigation_path).read_bytes())
         assert "ARRIVAU_GOOGLE_MAPS_API_KEY" not in os.environ
         (root / "navigation-observed.json").write_text(json.dumps({
@@ -184,7 +208,11 @@ elif name == "xcodebuild":
         with zipfile.ZipFile(export / "Arrivau.ipa", "w") as ipa:
             for item in source.rglob("*"):
                 if item.is_file():
-                    ipa.write(item, "Payload/" + str(item.relative_to(source)))
+                    name = "Payload/" + str(item.relative_to(source))
+                    if os.environ.get("FAKE_PRIVACY_MISMATCH") and item.name == "PrivacyInfo.xcprivacy" and item.parent.name == "GoogleMaps.bundle":
+                        ipa.writestr(name, plistlib.dumps({"NSPrivacyTracking": False}))
+                    else:
+                        ipa.write(item, name)
         print(marker)
 elif name == "codesign":
     if "--entitlements" in args:
@@ -249,8 +277,10 @@ class OfflineRunner:
         scripts.mkdir(parents=True)
         (self.repo / "ios/Config").mkdir(parents=True)
         shutil.copy2(ROOT / "ios/Config/Info-Release.plist", self.repo / "ios/Config/Info-Release.plist")
-        for name in ("testflight-ci.sh", "testflight-signing.py", "validate-pilot-config.py", "verify-ios-bundle.py", "check-testflight-tools.sh", "navigation-config.py"):
+        for name in ("testflight-ci.sh", "testflight-signing.py", "validate-pilot-config.py", "verify-ios-bundle.py", "check-testflight-tools.sh", "navigation-config.py", "archive-config.py", "archive-diagnostics.py", "audit-privacy-manifests.py"):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        shutil.copytree(ROOT / "scripts/tests/fixtures/google-privacy-11.2.0",
+                        scripts / "tests/fixtures/google-privacy-11.2.0")
         self.home = self.root / "home"
         self.temp = self.root / "runner-temp"
         self.bin = self.root / "bin"
@@ -290,7 +320,8 @@ class OfflineRunner:
         }
 
     def add_upload_secrets(self):
-        self.env.update({"ASC_PRIVATE_KEY_BASE64": base64.b64encode(b"FAKE-API-PRIVATE-KEY-NOT-A-KEY").decode(),
+        self.env.update({"ARRIVAU_GOOGLE_MAPS_API_KEY": "synthetic-google-key-never-valid-12345",
+                         "ASC_PRIVATE_KEY_BASE64": base64.b64encode(b"FAKE-API-PRIVATE-KEY-NOT-A-KEY").decode(),
                          "ASC_KEY_ID": "KLMNOPQRST", "ASC_ISSUER_ID": "12345678-1234-1234-1234-123456789DEF"})
 
     def run(self, *args):
@@ -310,7 +341,7 @@ class OfflineRunner:
 
 class WorkflowSafetyTests(unittest.TestCase):
     def test_shell_syntax(self):
-        for script in (SCRIPT, ROOT / "scripts/check-testflight-tools.sh"):
+        for script in (SCRIPT, ROOT / "scripts/check-testflight-tools.sh", ROOT / "scripts/archive-ios.sh", ROOT / "scripts/test-archive-scoping.sh"):
             with self.subTest(script=script):
                 result = subprocess.run([BASH, "-n", str(script)], capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -325,7 +356,13 @@ class WorkflowSafetyTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", text)
         self.assertIn("runs-on: macos-26", text)
         self.assertIn("/Applications/Xcode_26.6.app/Contents/Developer", text)
-        self.assertNotIn("upload-artifact", text)
+        self.assertEqual(text.count("uses: actions/upload-artifact@"), 1)
+        artifact = text.split("      - name: Retain only the validated privacy declaration summary", 1)[1]
+        self.assertIn("path: ${{ env.ARRIVAU_TESTFLIGHT_PRIVACY_AUDIT }}", artifact)
+        self.assertIn("if: always() && env.ARRIVAU_TESTFLIGHT_PRIVACY_AUDIT != ''", artifact)
+        self.assertIn("if-no-files-found: error", artifact)
+        self.assertNotIn("*", artifact)
+        self.assertNotIn("${{ runner.temp }}", artifact)
         self.assertNotIn("actions/cache", text)
         self.assertNotIn("pull_request_target", text)
         self.assertIn("persist-credentials: false", text)
@@ -487,7 +524,13 @@ class SigningOrchestrationTests(unittest.TestCase):
         self.assertNotIn("<plist", output)
 
     def assert_clean(self, runner):
-        self.assertEqual(list(runner.temp.iterdir()), [])
+        retained = runner.temp / "arrivau-privacy-audit.123.1.json"
+        self.assertEqual(list(runner.temp.iterdir()), [retained] if retained.exists() else [])
+        if retained.exists():
+            self.assertIsInstance(json.loads(retained.read_text()), dict)
+            self.assertNotIn("<plist", retained.read_text())
+            self.assertNotIn(TOOL_OUTPUT, retained.read_text())
+            self.assertNotIn("synthetic-google-key-never-valid-12345", retained.read_text())
         self.assertEqual(sorted(path.name for path in runner.profile_dir.iterdir()), ["unrelated.mobileprovision"])
         self.assertEqual((runner.profile_dir / "unrelated.mobileprovision").read_text(), "preserve unrelated profile")
         self.assertEqual(json.loads((runner.root / "keychains.json").read_text()), runner.original_keychains)
@@ -542,6 +585,17 @@ class SigningOrchestrationTests(unittest.TestCase):
                 self.assert_no_sensitive_commands(runner)
                 self.assert_private_output(runner, result)
 
+    def test_upload_requires_configured_navigation_key_before_using_signing_material(self):
+        runner = self.make_runner()
+        runner.add_upload_secrets()
+        del runner.env["ARRIVAU_GOOGLE_MAPS_API_KEY"]
+        result = runner.run("upload", "17")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Google iOS key presence: missing", result.stdout)
+        self.assertIn("Upload requires the owner-configured Google iOS key", result.stderr)
+        self.assert_no_sensitive_commands(runner)
+        self.assert_private_output(runner, result)
+
     def test_archive_verifies_both_products_never_uploads_and_cleans_up(self):
         runner = self.make_runner()
         result = runner.run("archive", "17")
@@ -549,6 +603,7 @@ class SigningOrchestrationTests(unittest.TestCase):
         calls = runner.calls()
         self.assertFalse(any(call[:2] == ["xcrun", "altool"] for call in calls))
         self.assertEqual(sum(call[:2] == ["codesign", "--verify"] for call in calls), 2)
+        self.assertTrue((runner.temp / "arrivau-privacy-audit.123.1.json").is_file())
         extractions = [call for call in calls if any(arg.startswith("--extract-certificates") for arg in call)]
         self.assertEqual(len(extractions), 2)
         self.assertTrue(all(call[2].startswith("--extract-certificates=") for call in extractions))
@@ -562,8 +617,9 @@ class SigningOrchestrationTests(unittest.TestCase):
         self.assert_private_output(runner, result)
         self.assert_clean(runner)
         # The always() defense may execute after EXIT cleanup; it must be harmless.
-        key, value = (runner.root / "github-env").read_text().strip().split("=", 1)
-        runner.env[key] = value
+        for line in (runner.root / "github-env").read_text().splitlines():
+            key, value = line.split("=", 1)
+            runner.env[key] = value
         again = runner.run("cleanup")
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assert_clean(runner)
@@ -577,6 +633,7 @@ class SigningOrchestrationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 observed = json.loads((runner.root / "navigation-observed.json").read_text())
                 self.assertEqual(observed, {"key": key, "mode": 0o600})
+                self.assertIn("Google iOS key presence: " + ("configured" if key else "missing"), result.stdout)
                 if key:
                     self.assertNotIn(key, result.stdout + result.stderr)
                     self.assertNotIn(key, json.dumps(runner.calls()))
@@ -590,6 +647,40 @@ class SigningOrchestrationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(key, result.stdout + result.stderr)
         self.assertFalse(any(call[:2] == ["security", "import"] for call in runner.calls()))
+        self.assert_clean(runner)
+
+    def test_private_app_overlay_replaces_global_archive_settings(self):
+        runner = self.make_runner()
+        result = runner.run("archive", "17")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        overlay = json.loads((runner.root / "archive-config-observed.json").read_text())
+        self.assertEqual(set(overlay), {"include", "targets"})
+        self.assertEqual(set(overlay["targets"]), {"Arrivau"})
+        settings = overlay["targets"]["Arrivau"]["settings"]["configs"]["Release"]
+        self.assertEqual(settings["CODE_SIGN_IDENTITY"], FINGERPRINT)
+        self.assertEqual(settings["PROVISIONING_PROFILE_SPECIFIER"], UUID)
+        self.assertEqual(settings["PRODUCT_BUNDLE_IDENTIFIER"], BUNDLE)
+        self.assertEqual(settings["CODE_SIGNING_ALLOWED"], "YES")
+        self.assertEqual(settings["CODE_SIGNING_REQUIRED"], "YES")
+        archive = next(call for call in runner.calls() if call[:2] == ["xcodebuild", "archive"])
+        self.assertFalse(any(arg.split("=", 1)[0] in settings for arg in archive))
+        self.assertFalse((runner.repo / "ios/Arrivau.xcodeproj").exists())
+        self.assert_private_output(runner, result)
+        self.assert_clean(runner)
+
+    def test_archive_failure_emits_only_whitelisted_diagnostic_and_never_uploads(self):
+        runner = self.make_runner()
+        runner.add_upload_secrets()
+        runner.env["FAKE_FAIL_AT"] = "xcodebuild:archive"
+        runner.env["FAKE_ARCHIVE_ERROR"] = "error: PRIVATE_TARGET does not support provisioning profiles PRIVATE_SECRET"
+        result = runner.run("upload", "17")
+        self.assertEqual(result.returncode, 42)
+        self.assertIn("ARCHIVE_PROVISIONING_NOT_SUPPORTED", result.stdout)
+        self.assertNotIn("PRIVATE_TARGET", result.stdout + result.stderr)
+        self.assertNotIn("PRIVATE_SECRET", result.stdout + result.stderr)
+        self.assertFalse(any(call[:2] == ["xcodebuild", "-exportArchive"] for call in runner.calls()))
+        self.assertFalse(any("--upload-app" in call for call in runner.calls()))
+        self.assert_private_output(runner, result)
         self.assert_clean(runner)
 
     def test_old_codesign_argument_forms_fail_closed(self):
@@ -671,6 +762,18 @@ class SigningOrchestrationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1)
                 self.assert_private_output(runner, result)
                 self.assert_clean(runner)
+
+    def test_privacy_audit_mismatch_blocks_upload_and_retains_no_report(self):
+        runner = self.make_runner()
+        runner.add_upload_secrets()
+        runner.env["FAKE_PRIVACY_MISMATCH"] = "1"
+        result = runner.run("upload", "17")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("auditing privacy manifests", result.stderr)
+        self.assertFalse(any("--upload-app" in call for call in runner.calls()))
+        self.assertEqual(list(runner.temp.iterdir()), [])
+        self.assert_private_output(runner, result)
+        self.assert_clean(runner)
 
     def test_explicit_upload_uses_only_mocked_uploader_then_cleans_up(self):
         for style, flags in [("legacy", ("--apiKey", "--apiIssuer", "-t")),

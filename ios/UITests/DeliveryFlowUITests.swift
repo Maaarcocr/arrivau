@@ -145,6 +145,26 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists, "Show only the next stop's completion action")
         XCTAssertFalse(element("route_map").exists, "The map should start collapsed")
         captureScreen("03-driver-route", showing: app.staticTexts["next_stop_title"])
+        // The deterministic navigation adapter exercises the app contract without Google billing/GPS.
+        // Navigation arrival and closing must not mutate the real backend's delivery status.
+        for attempt in 0..<2 {
+            tap(app.buttons["open_directions"])
+            XCTAssertTrue(app.staticTexts["navigation_test_mode"].waitForExistence(timeout: 10))
+            waitForLabelContaining(app.staticTexts["navigation_status"], "Segui le indicazioni")
+            tap(app.buttons["navigation_voice"])
+            waitForLabelContaining(app.buttons["navigation_voice"], "Voce spenta")
+            if attempt == 0 {
+                tap(app.buttons["simulate_navigation_arrival"])
+                waitForLabelContaining(app.staticTexts["navigation_status"], "Sei arrivato")
+                try assertServerStatus(delivery.id, "assigned")
+                tap(app.buttons["return_to_stop"])
+            } else {
+                tap(app.buttons["close_navigation"])
+            }
+            waitUntilAbsent(app.staticTexts["navigation_test_mode"])
+            XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 10))
+            try assertServerStatus(delivery.id, "assigned")
+        }
         for _ in 0..<2 {
             tap(app.buttons["route_details"])
             let firstStop = element("route_stop_0")
@@ -1014,3 +1034,4 @@ final class DeliveryFlowUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [expected], timeout: 15), .completed)
     }
 }
+

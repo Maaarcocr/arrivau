@@ -4,6 +4,7 @@ import UIKit
 struct DriverView: View {
     @EnvironmentObject private var store: DeliveryStore
     @State private var showingShift = false
+    @State private var navigationDestination: NavigationDestination?
     private var active: Bool { store.currentDriver?.active == true }
     private var completed: [Delivery] {
         store.deliveries.filter { $0.status == .delivered }.sorted { ($0.deliveredAt ?? 0) > ($1.deliveredAt ?? 0) }
@@ -89,6 +90,9 @@ struct DriverView: View {
             }
         }
         .sheet(isPresented: $showingShift) { DriverShiftSheet() }
+        .fullScreenCover(item: $navigationDestination) { destination in
+            DriverNavigationView(destination: destination, isUITesting: store.isUITesting)
+        }
         .refreshable { await store.refresh(force: true) }
     }
 
@@ -125,8 +129,17 @@ struct DriverView: View {
                         .font(.subheadline).foregroundStyle(.orange).accessibilityIdentifier("route_estimates_unavailable")
                 }
                 RouteTravelNotice(route: route)
-                DirectionsButton(stop: stop)
-                    .buttonStyle(.bordered)
+                Button {
+                    navigationDestination = store.navigationDestination
+                } label: {
+                    Label("Naviga con Google", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                        .frame(maxWidth: .infinity).padding(.vertical, 5)
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.navigationDestination == nil)
+                .accessibilityIdentifier("open_directions")
+                Text("Posizione e destinazione saranno usate da Google per indicazioni e ricalcolo. Avvia da fermo.")
+                    .font(.caption).foregroundStyle(.secondary)
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     let nextStatus = DeliveryAction.nextStatus(delivery: delivery, route: route, now: Int(context.date.timeIntervalSince1970))
                     VStack(alignment: .leading, spacing: 8) {
@@ -271,3 +284,4 @@ private struct LocationStatusView: View {
         Text(location.message).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("location_status")
     }
 }
+

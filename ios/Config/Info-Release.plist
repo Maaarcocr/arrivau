@@ -46,12 +46,25 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Con il tuo consenso, condividi la posizione di questo dispositivo con la centrale delle consegne durante il turno. L’opzione separata per lo schermo bloccato consente di continuare in background una sessione già avviata.</string>
+	<string>Con il tuo consenso, condividi la posizione con la centrale durante il turno. Quando avvii la navigazione, Google usa la posizione per il percorso e le indicazioni. L’opzione separata per lo schermo bloccato consente di continuare una sessione già avviata.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>La posizione consente di proseguire una sessione di navigazione già avviata quando autorizzi la continuazione con lo schermo bloccato.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Arrivau usa i sensori di movimento durante la navigazione per stimare l’altitudine e migliorare la precisione del percorso.</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>comgooglemaps</string>
+		<string>googlechromes</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
+		<string>audio</string>
 	</array>
 	<key>ARRIVAU_API_URL</key>
 	<string>$(ARRIVAU_API_URL)</string>
+	<key>ARRIVAU_GOOGLE_MAPS_API_KEY</key>
+	<string>$(ARRIVAU_GOOGLE_MAPS_API_KEY)</string>
 </dict>
 </plist>
+

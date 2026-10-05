@@ -191,6 +191,8 @@ enum StopKind: String, Codable {
     var title: String { self == .pickup ? "Ritiro" : "Consegna" }
 }
 struct RouteStop: Codable, Identifiable, Equatable {
+    /// Provider identity is absent on legacy/Apple-derived stops. Never infer it from coordinates.
+    var googlePlaceId: String? = nil
     let deliveryId: String
     let kind: StopKind
     let address: String
@@ -333,5 +335,6 @@ enum DeliveryAction {
 extension Int {
     var epochDate: Date { Date(timeIntervalSince1970: TimeInterval(self)) }
 }
+
 
 

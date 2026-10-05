@@ -56,6 +56,10 @@ EXPORT="$WORK/export"
 P12_PASSWORD="$APPLE_DISTRIBUTION_P12_PASSWORD"
 KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
 
+STAGE='preparing private navigation configuration'
+python3 "$ROOT/scripts/navigation-config.py" --configuration Release --output "$WORK/Info-Navigation.plist"
+unset ARRIVAU_GOOGLE_MAPS_API_KEY
+
 STAGE='decoding owner-supplied signing files'
 python3 "$HELPER" decode APPLE_DISTRIBUTION_P12_BASE64 "$WORK/distribution.p12"
 python3 "$HELPER" decode APPLE_APP_STORE_PROFILE_BASE64 "$WORK/profile.mobileprovision"
@@ -99,7 +103,8 @@ quiet xcodebuild archive \
   DEVELOPMENT_TEAM="$ARRIVAU_TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$ARRIVAU_BUNDLE_ID" \
   PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CODE_SIGN_IDENTITY="$IDENTITY" \
   OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN" \
-  CURRENT_PROJECT_VERSION="$BUILD_NUMBER" ARRIVAU_API_URL="$ARRIVAU_API_URL"
+  CURRENT_PROJECT_VERSION="$BUILD_NUMBER" ARRIVAU_API_URL="$ARRIVAU_API_URL" \
+  INFOPLIST_FILE="$WORK/Info-Navigation.plist"
 
 verify_app() {
   local app="$1" label="$2" actual_profile_uuid
@@ -170,3 +175,4 @@ if [[ "$ACTION" == upload ]]; then
 else
   printf 'Signed archive and exported IPA verified. Archive mode performed no upload; temporary products will now be deleted.\n'
 fi
+

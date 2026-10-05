@@ -118,6 +118,75 @@ final class PlaceSearchTests: XCTestCase {
         model.cancel()
     }
 
+    func testIdenticalTextFieldWritebackDoesNotRemoveTappablePrediction() async throws {
+        let service = ControlledPlaceSearch()
+        let model = PlaceSearchModel(service: service, debounceNanoseconds: 0)
+        try await showPrediction(model, service)
+        // Resigning first responder can repeat the binding setter before the tap
+        // starts its asynchronous work. It must not clear the selected row.
+        model.updateQuery(model.query)
+        XCTAssertEqual(model.results, [prediction])
+        XCTAssertFalse(model.searching)
+        XCTAssertNotNil(model.beginSelection(prediction))
+        await Task.yield()
+        XCTAssertEqual(service.searches.count, 1)
+        model.cancel()
+    }
+
+    func testClaimedTapSurvivesKeyboardWritebackAndSubmitBeforeAndDuringDetails() async throws {
+        let service = ControlledPlaceSearch()
+        let model = PlaceSearchModel(service: service, debounceNanoseconds: 0)
+        try await showPrediction(model, service)
+        let request = try XCTUnwrap(model.beginSelection(prediction))
+        XCTAssertTrue(model.selecting, "The tap is claimed synchronously, before keyboard blur")
+        model.updateQuery(model.query)
+        model.search() // A delayed keyboard submit must not create a new generation.
+        XCTAssertTrue(model.selecting)
+        XCTAssertEqual(model.results, [prediction])
+        let task = Task { await model.resolveSelection(request) }
+        try await waitUntil { service.selections.count == 1 }
+        model.updateQuery(model.query)
+        model.search()
+        XCTAssertTrue(model.selecting)
+        XCTAssertNil(model.beginSelection(prediction))
+        let duplicate = await model.resolveSelection(request)
+        XCTAssertNil(duplicate)
+        XCTAssertEqual(service.searches.count, 1)
+        XCTAssertEqual(service.selections.count, 1)
+        service.selections[0].continuation.resume(returning: DeliveryPlace(userInput: service.selections[0].userInput, googlePlaceId: prediction.id))
+        let result = await task.value
+        XCTAssertEqual(result?.googlePlaceId, prediction.id)
+        XCTAssertEqual(result?.address, "My own typed address")
+        XCTAssertFalse(model.selecting)
+    }
+
+    func testGenuineEditBeforeClaimedSelectionStartsPreventsDetailsRequest() async throws {
+        let service = ControlledPlaceSearch()
+        let model = PlaceSearchModel(service: service, debounceNanoseconds: 0)
+        try await showPrediction(model, service)
+        let request = try XCTUnwrap(model.beginSelection(prediction))
+        model.updateQuery("New address")
+        let stale = await model.resolveSelection(request)
+        XCTAssertNil(stale)
+        XCTAssertTrue(service.selections.isEmpty)
+        try await waitUntil { service.searches.count == 2 }
+        service.searches[1].continuation.resume(returning: [])
+        try await waitUntil { !model.searching }
+        model.cancel()
+    }
+
+    func testDismissBeforeClaimedSelectionStartsMakesNoDetailsRequest() async throws {
+        let service = ControlledPlaceSearch()
+        let model = PlaceSearchModel(service: service, debounceNanoseconds: 0)
+        try await showPrediction(model, service)
+        let request = try XCTUnwrap(model.beginSelection(prediction))
+        model.cancel()
+        let result = await model.resolveSelection(request)
+        XCTAssertNil(result)
+        XCTAssertTrue(service.selections.isEmpty)
+        XCTAssertFalse(model.selecting)
+    }
+
     func testShortInputDoesNotStartProviderRequest() async {
         let service = ControlledPlaceSearch()
         let model = PlaceSearchModel(service: service, debounceNanoseconds: 0)

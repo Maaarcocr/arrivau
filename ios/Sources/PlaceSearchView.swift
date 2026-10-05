@@ -132,18 +132,31 @@ final class PlaceSearchModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private var generation = UUID()
     private var active = true
+    private var resolvingSelection: UUID?
+
+    struct SelectionRequest {
+        fileprivate let generation: UUID
+        fileprivate let prediction: PlacePrediction
+        fileprivate let userInput: String
+    }
 
     init(service: any PlaceSearching, debounceNanoseconds: UInt64 = 350_000_000) {
         self.service = service; self.debounceNanoseconds = debounceNanoseconds
     }
 
     func updateQuery(_ value: String) {
+        // TextField can write the same value back while resigning first responder.
+        // That is not a new search and must not invalidate a tapped prediction.
+        guard active, value != query else { return }
         query = value
+        selecting = false
         search()
     }
 
     func search() {
-        guard active else { return }
+        // A keyboard submit/focus transition must not replace an accepted tap.
+        // A genuine edit goes through updateQuery and explicitly supersedes it.
+        guard active, !selecting else { return }
         searchTask?.cancel()
         generation = UUID()
         let requestID = generation
@@ -170,23 +183,34 @@ final class PlaceSearchModel: ObservableObject {
         }
     }
 
-    func select(_ prediction: PlacePrediction) async -> DeliveryPlace? {
+    /// Claim the tap before the view blurs the keyboard or schedules async work.
+    func beginSelection(_ prediction: PlacePrediction) -> SelectionRequest? {
         guard active, !selecting, results.contains(prediction) else { return nil }
         searchTask?.cancel()
         generation = UUID()
-        let requestID = generation
-        let originalInput = query
         selecting = true; searching = false; error = nil
+        return SelectionRequest(generation: generation, prediction: prediction, userInput: query)
+    }
+
+    func select(_ prediction: PlacePrediction) async -> DeliveryPlace? {
+        guard let request = beginSelection(prediction) else { return nil }
+        return await resolveSelection(request)
+    }
+
+    func resolveSelection(_ request: SelectionRequest) async -> DeliveryPlace? {
+        guard active, selecting, generation == request.generation,
+              resolvingSelection != request.generation, !Task.isCancelled else { return nil }
+        resolvingSelection = request.generation
         do {
-            let selected = try await service.resolve(prediction, userInput: originalInput)
-            guard active, generation == requestID, !Task.isCancelled else { return nil }
+            let selected = try await service.resolve(request.prediction, userInput: request.userInput)
+            guard active, generation == request.generation, !Task.isCancelled else { return nil }
             selecting = false
             // Prevent a second tap from committing again before SwiftUI dismisses the sheet.
             active = false; results = []
             service.resetSession()
             return selected
         } catch {
-            guard active, generation == requestID, !Task.isCancelled else { return nil }
+            guard active, generation == request.generation, !Task.isCancelled else { return nil }
             selecting = false; results = []
             service.resetSession()
             self.error = (error as? PlaceSearchError)?.errorDescription ?? PlaceSearchError.searchFailed.errorDescription
@@ -250,9 +274,10 @@ struct PlaceSearchView: View {
                     Section {
                         ForEach(Array(model.results.enumerated()), id: \.element.id) { index, prediction in
                             Button {
+                                guard let request = model.beginSelection(prediction) else { return }
                                 searchFocused = false
                                 Task {
-                                    if let place = await model.select(prediction) { onSelect(place); dismiss() }
+                                    if let place = await model.resolveSelection(request) { onSelect(place); dismiss() }
                                 }
                             } label: {
                                 VStack(alignment: .leading, spacing: 5) {

@@ -55,6 +55,14 @@ struct DriverNavigationView: View {
             .sheet(isPresented: $showingLicenses) { GoogleNavigationLicenses() }
         }
         .accessibilityIdentifier("google_navigation_screen")
+        .overlay {
+            if scenePhase != .active {
+                ZStack {
+                    Color(.systemBackground).ignoresSafeArea()
+                    Text("Arrivau").font(.largeTitle.bold()).foregroundStyle(.orange)
+                }
+            }
+        }
         .interactiveDismissDisabled()
         .task {
             session.validate(current: store.navigationDestination)

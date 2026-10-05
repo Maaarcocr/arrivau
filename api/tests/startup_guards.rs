@@ -107,7 +107,10 @@ fn privacy_notice_configuration_fails_before_database_creation_when_invalid() {
     rejected(
         &[
             ("ARRIVAU_MODE", "demo"),
-            ("ARRIVAU_PRIVACY_NOTICE_PATH", "/nonexistent/arrivau-privacy.html"),
+            (
+                "ARRIVAU_PRIVACY_NOTICE_PATH",
+                "/nonexistent/arrivau-privacy.html",
+            ),
         ],
         "Cannot read ARRIVAU_PRIVACY_NOTICE_PATH",
     );

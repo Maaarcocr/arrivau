@@ -98,7 +98,10 @@ mod tests {
         .unwrap();
         let response = notice.response();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["content-type"], "text/html; charset=utf-8");
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/html; charset=utf-8"
+        );
         assert_eq!(response.headers()["referrer-policy"], "no-referrer");
         assert!(response.headers()["content-security-policy"]
             .to_str()

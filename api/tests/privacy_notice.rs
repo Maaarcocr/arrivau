@@ -12,9 +12,7 @@ async fn privacy_is_public_but_account_data_stays_authenticated() {
         if configured {
             state = state.with_privacy_notice(PrivacyNotice::from_path(&path).unwrap());
         }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move { axum::serve(listener, app(state)).await.unwrap() });
         let client = Client::new();

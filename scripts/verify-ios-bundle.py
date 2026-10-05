@@ -7,6 +7,8 @@ import sys
 def verify(path):
     bundle = Path(path)
     info = plistlib.loads((bundle/'Info.plist').read_bytes())
+    if info.get('ITSAppUsesNonExemptEncryption') is not False:
+        raise ValueError('ITSAppUsesNonExemptEncryption must be the boolean false in the built app')
     if 'NSAppTransportSecurity' in info:
         raise ValueError('Release must not contain insecure transport exceptions')
     if info.get('UIDeviceFamily') != [1]:
@@ -28,4 +30,5 @@ if __name__ == '__main__':
     if len(sys.argv) != 2:
         raise SystemExit('Usage: verify-ios-bundle.py PATH/Arrivau.app')
     verify(sys.argv[1])
-    print('Release bundle has compiled icon, privacy manifest, iPhone metadata, strict transport and no demo bearer strings')
+    print('Release bundle has compiled icon, privacy manifest, iPhone metadata, export compliance declaration, strict transport and no demo bearer strings')
+

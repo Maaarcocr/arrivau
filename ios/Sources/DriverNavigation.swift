@@ -7,16 +7,23 @@ struct NavigationDestination: Identifiable, Equatable {
     let teamID: String?
     let stopID: String
     let googlePlaceID: String?
-    let coordinate: Coordinate
+    let coordinate: Coordinate?
     let title: String
     let address: String
     var id: String { "\(accountID):\(stopID)" }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.accountID == rhs.accountID && lhs.teamID == rhs.teamID && lhs.stopID == rhs.stopID &&
+        lhs.googlePlaceID == rhs.googlePlaceID &&
+        (lhs.googlePlaceID != nil || lhs.coordinate == rhs.coordinate)
+    }
 
     static func next(principal: Principal?, role: UserRole?, driver: Driver?, route: DriverRoute?) -> Self? {
         guard role == .driver, let principal, principal.supports(.driver),
               driver?.id == principal.id, driver?.active == true,
               route?.driverId == principal.id, let stop = route?.stops.first,
-              stop.coordinate.isValid else { return nil }
+              stop.coordinate?.isValid != false,
+              stop.coordinate != nil || stop.googlePlaceId != nil else { return nil }
         return Self(accountID: principal.id, teamID: principal.teamId, stopID: stop.id, googlePlaceID: stop.googlePlaceId,
                     coordinate: stop.coordinate, title: stop.title, address: stop.address)
     }

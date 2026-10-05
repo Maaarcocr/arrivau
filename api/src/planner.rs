@@ -105,8 +105,8 @@ pub fn evaluate_with_travel(
             StopKind::Pickup => (job.pickup, job.pickup_address.clone()),
             StopKind::Dropoff => (job.dropoff, job.dropoff_address.clone()),
         };
-        let travel = match current {
-            Some(from) => match travel.seconds(from, coordinate) {
+        let travel = match (current, coordinate) {
+            (Some(from), Some(coordinate)) => match travel.seconds(from, coordinate) {
                 Some(seconds) => seconds,
                 None => {
                     route.estimates_available = false;
@@ -119,7 +119,12 @@ pub fn evaluate_with_travel(
                     1
                 }
             },
-            None => 0, // No GPS is explicitly unavailable, not a routed zero leg.
+            (_, None) => {
+                route.estimates_available = false;
+                route.warnings.push(format!("Destination location unavailable for {}: select or refresh the Google place", job.id));
+                0
+            }
+            (None, Some(_)) => 0, // No GPS or a previous missing destination.
         };
         route.travel_seconds = route.travel_seconds.saturating_add(travel);
         time = time.saturating_add(travel);
@@ -183,9 +188,17 @@ pub fn evaluate_with_travel(
             coordinate,
             arrival_at: time,
             departure_at: departure,
+            google_place_id: match key.kind {
+                StopKind::Pickup => job.pickup_google_place_id.clone(),
+                StopKind::Dropoff => job.dropoff_google_place_id.clone(),
+            },
+            coordinate_fetched_at: match key.kind {
+                StopKind::Pickup => job.pickup_coordinate_fetched_at,
+                StopKind::Dropoff => job.dropoff_coordinate_fetched_at,
+            },
         });
         time = departure;
-        current = Some(coordinate);
+        current = coordinate;
     }
     // Never report a route feasible if persisted ordering omitted outstanding work.
     for job in assigned.values() {
@@ -536,16 +549,18 @@ mod tests {
             shop_name: "Pizza".into(),
             pickup_address: "A".into(),
             dropoff_address: "B".into(),
-            pickup: driver(2).location.unwrap(),
-            dropoff: Coordinate {
+            pickup: driver(2).location,
+            dropoff: Some(Coordinate {
                 lat: 36.717,
                 lng: 15.092,
-            },
+            }),
             ready_at: Some(1000),
             deadline_at: 5000,
             load_units: 1,
             max_ride_seconds: 1800,
             restaurant_id: None,
+            pickup_google_place_id: None,
+            dropoff_google_place_id: None,
         }
         .into_delivery(1000)
         .with_id(id)
@@ -849,8 +864,8 @@ mod tests {
         use crate::routing::{TravelEstimate, TravelMatrix, TravelMode};
         let mut d = driver(2);
         let candidate = job("unreachable");
-        let a = candidate.pickup;
-        let b = candidate.dropoff;
+        let a = candidate.pickup.unwrap();
+        let b = candidate.dropoff.unwrap();
         let matrix = TravelMatrix::new(
             &[a, b],
             vec![vec![Some(0), None], vec![Some(90), Some(0)]],
@@ -881,7 +896,7 @@ mod tests {
             stop(&candidate.id, StopKind::Dropoff),
         ];
         let matrix = TravelMatrix::new(
-            &[candidate.pickup, candidate.dropoff],
+            &[candidate.pickup.unwrap(), candidate.dropoff.unwrap()],
             vec![vec![Some(0), None], vec![Some(90), Some(0)]],
             TravelEstimate::default(),
         )
@@ -900,5 +915,30 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.starts_with("Percorso stradale non raggiungibile")));
+    }
+}
+
+
+#[cfg(test)]
+mod unavailable_destination_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unavailable_place_blocks_both_assignment_modes_even_without_gps() {
+        let candidate: NewDelivery = serde_json::from_value(json!({
+            "shop_name":"User name", "pickup_address":"User pickup", "dropoff_address":"User dropoff",
+            "pickup_google_place_id":"ChIJone", "dropoff_google_place_id":"ChIJtwo",
+            "ready_at":1000, "deadline_at":5000,"load_units":1,"max_ride_seconds":1800
+        })).unwrap();
+        let candidate = candidate.into_delivery(1000);
+        let mut driver = Driver {
+            id:"driver".into(),name:"Driver".into(),active:true,capacity:2,
+            location:Some(Coordinate {lat:36.7,lng:15.1}),location_updated_at:Some(1000)
+        };
+        assert!(insert(&driver,&[],&[],&candidate,1000).is_none());
+        assert!(insert_for_dispatch_with_travel(&driver,&[],&[],&candidate,1000,&Approximate).is_none());
+        driver.location = None;
+        assert!(insert_for_dispatch_with_travel(&driver,&[],&[],&candidate,1000,&Approximate).is_none());
     }
 }

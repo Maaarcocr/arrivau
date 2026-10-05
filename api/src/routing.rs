@@ -166,9 +166,9 @@ pub fn plan_points(
         .chain(candidate)
     {
         if job.status != DeliveryStatus::PickedUp {
-            push_unique(&mut points, job.pickup);
+            if let Some(point) = job.pickup { push_unique(&mut points, point); }
         }
-        push_unique(&mut points, job.dropoff);
+        if let Some(point) = job.dropoff { push_unique(&mut points, point); }
     }
     points
 }
@@ -259,6 +259,20 @@ impl RoutingService {
         driver: Option<Coordinate>,
         stops: Vec<Coordinate>,
     ) -> Result<TravelMatrix, String> {
+        self.matrix_with_cache(driver, stops, true).await
+    }
+
+    /// Google-derived coordinates may be used for this computation but must not
+    /// enter the long-lived native matrix/snap caches. Legacy callers retain the
+    /// existing exact-cache behavior, including unreachable-road recovery.
+    pub(crate) async fn matrix_with_cache(
+        &self,
+        driver: Option<Coordinate>,
+        stops: Vec<Coordinate>,
+        allow_cache: bool,
+    ) -> Result<TravelMatrix, String> {
+        #[cfg(not(feature = "embedded-osrm"))]
+        let _ = allow_cache;
         let mut points = stops.clone();
         if let Some(point) = driver {
             push_unique(&mut points, point);
@@ -280,7 +294,7 @@ impl RoutingService {
         }
         #[cfg(feature = "embedded-osrm")]
         if let Some(worker) = &self.native {
-            return match worker.matrix(driver, stops).await {
+            return match worker.matrix(driver, stops, allow_cache).await {
                 Ok(matrix) => Ok(matrix),
                 Err(reason) => {
                     // No coordinates, delivery IDs, addresses or native error text.
@@ -288,7 +302,7 @@ impl RoutingService {
                         reason,
                         "Embedded routing unavailable; exact cached road matrix or labelled approximation"
                     );
-                    worker.fallback(&points)
+                    worker.fallback(&points, allow_cache)
                 }
             };
         }
@@ -357,3 +371,4 @@ mod tests {
             .contains("Verifica il percorso"));
     }
 }
+

@@ -854,9 +854,19 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func selectAccountView(_ title: String) {
-        tap(app.segmentedControls["role_picker"].buttons[title])
+        let picker = app.segmentedControls["role_picker"]
+        // The containing SwiftUI Picker is disabled during mutations; wait for it
+        // as well as its native segment before sending the single user tap.
+        waitUntilEnabled(picker)
+        let segment = picker.buttons[title]
+        print("Role switch to \(title): app state=\(app.state.rawValue), picker enabled=\(picker.isEnabled), target selected=\(segment.isSelected), driver screen=\(element("driver_screen").exists), shift settings=\(app.buttons["shift_settings"].exists), create delivery=\(app.buttons["create_delivery"].exists)")
+        tap(segment)
         let destination = title == "Centrale" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
-        XCTAssertTrue(destination.waitForExistence(timeout: 15))
+        let arrived = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            segment.exists && segment.isSelected && destination.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [arrived], timeout: 15), .completed,
+                       "Role switch to \(title) failed; target selected=\(segment.exists && segment.isSelected), destination=\(destination.exists), driver screen=\(element("driver_screen").exists), picker enabled=\(picker.exists && picker.isEnabled), app state=\(app.state.rawValue)")
         assertDualAccountView(title)
     }
 
@@ -888,7 +898,14 @@ final class DeliveryFlowUITests: XCTestCase {
 
     private func interruptAndResume() {
         XCUIDevice.shared.press(.home)
-        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5) || app.state == .runningBackgroundSuspended)
+        // State updates are asynchronous. Observe either valid background state
+        // throughout the wait, rather than sampling suspended only at the end.
+        let background = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
+            guard let application = object as? XCUIApplication else { return false }
+            return application.state == .runningBackground || application.state == .runningBackgroundSuspended
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 5), .completed,
+                       "Home did not reach a background state; actual app state=\(app.state.rawValue)")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
     }
@@ -946,16 +963,19 @@ final class DeliveryFlowUITests: XCTestCase {
     private func setSwitch(_ element: XCUIElement, to enabled: Bool) {
         XCTAssertTrue(element.waitForExistence(timeout: 10))
         reveal(element)
+        waitUntilEnabled(element)
         let target = enabled ? "1" : "0"
         if element.value as? String != target {
             // SwiftUI exposes both a label+control row and the native child switch.
             let nativeSwitch = element.switches.firstMatch
-            if nativeSwitch.exists && nativeSwitch.isHittable { nativeSwitch.tap() }
-            else { element.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
+            if nativeSwitch.exists {
+                waitUntilEnabled(nativeSwitch)
+                nativeSwitch.tap()
+            } else { element.coordinate(withNormalizedOffset: CGVector(dx: 0.93, dy: 0.5)).tap() }
         }
         let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", target), object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [changed], timeout: 10), .completed,
-                       "Switch did not reach \(target): \(element.debugDescription)")
+                       "Switch did not reach \(target): parent enabled=\(element.isEnabled), value=\(String(describing: element.value)), native exists=\(element.switches.firstMatch.exists), native enabled=\(element.switches.firstMatch.exists ? element.switches.firstMatch.isEnabled : false), native value=\(String(describing: element.switches.firstMatch.exists ? element.switches.firstMatch.value : nil)), sharing=\(String(describing: app.switches["share_location"].exists ? app.switches["share_location"].value : nil))")
     }
 
     private func reveal(_ element: XCUIElement) {

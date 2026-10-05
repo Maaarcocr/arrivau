@@ -90,6 +90,9 @@ enum ItalianPresentation {
         "Delivery not found": "Consegna non trovata.",
         "An internal storage error occurred": "Si è verificato un errore nel salvataggio dei dati sul server.",
         "Names and addresses must contain 1–240 characters": "Nomi e indirizzi devono contenere da 1 a 240 caratteri.",
+        "Google Places location unavailable; retry or select the address again": "Indirizzo Google non disponibile. Riprova o selezionalo di nuovo; se il problema continua, contatta la centrale.",
+        "Invalid Google Place ID": "Seleziona di nuovo l’indirizzo su Google Maps.",
+        "Test Place IDs are unavailable in production": "Questo indirizzo è solo di prova. Seleziona un indirizzo reale su Google Maps.",
         "Coordinates must be finite latitude/longitude values": "Le coordinate devono contenere valori validi di latitudine e longitudine.",
         "Timestamps must be Unix seconds between 1970 and 3000": "Le date devono essere comprese tra il 1970 e il 3000.",
         "Deadline must be at or after readiness": "Il termine di consegna non può precedere l’orario di disponibilità.",
@@ -129,6 +132,9 @@ enum ItalianPresentation {
             return "La posizione del corriere risale a più di 5 minuti fa. Le stime potrebbero essere imprecise."
         case "Onboard load exceeds capacity": return "Il carico a bordo supera la capacità."
         default: break
+        }
+        if warning.hasPrefix("Destination location unavailable for ") {
+            return "Indirizzo da aggiornare: chiedi alla centrale di verificare o selezionare di nuovo il luogo. Orari non disponibili."
         }
         let prefixes = [
             ("Percorso stradale non raggiungibile per ", "Percorso stradale non raggiungibile per la consegna "),
@@ -183,3 +189,4 @@ extension Date {
     var italianTimeWithSeconds: String { ItalianPresentation.time(self, includesSeconds: true) }
     var italianDateTime: String { ItalianPresentation.dateTime(self) }
 }
+

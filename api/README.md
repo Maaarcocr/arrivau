@@ -214,3 +214,37 @@ acceptance checklist; a passing Rust test suite does not establish those outcome
 ## Restaurants and automatic readiness dispatch
 
 New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version 5 also protects invite-account state and prevents unsafe older-backend rollback; take a verified backup before upgrading. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.
+
+
+## Google Places server configuration
+
+Set `ARRIVAU_GOOGLE_PLACES_SERVER_KEY` to an operator-managed, server-only key
+restricted to Places API (New) and the deployment's egress IP(s). Do not reuse the
+bundle-restricted iOS key, put it in source, or log outbound request headers. Key
+creation, API enablement and billing activation are separate owner setup steps.
+Without this key, Google destination creation/refresh fails closed; legacy
+coordinate-only API workflows remain available with no Google navigation ID.
+
+New requests provide Google Place IDs and original user-authored text. The server
+requests only Place Details `id,location` (Essentials). Provider names/addresses are
+not requested or retained. IDs are durable; resolved coordinates live only in a
+SQLite TEMP table with `temp_store=MEMORY`, and expire at 29 days (a margin below the 30-day ceiling) or on restart.
+Refresh has four workers, a nine-second total budget and a 30-second failure
+backoff; both transient cache tables are capped at 4,096 entries.
+Google-bearing OSRM calculations bypass long-lived matrix/snap caches.
+They are removed from durable delivery, restaurant and idempotency JSON, including
+completed/history snapshots. No separate disk cache, WAL or backup purge job is
+needed for these locations. Disable body logging/caching outside the API too.
+
+The dispatch timer purges expired cache rows even while clients are idle. Routing
+and dispatch refresh missing entries before planning. An outage retains ordered
+stops but suppresses ETA availability and blocks new routing-based assignments.
+Deploy null-aware native clients with schema 6; downgrade is rejected. See the
+[wire contract](../docs/api-contract.md#google-places-destinations-and-location-retention-schema-6).
+
+Verification: `cargo test --locked --manifest-path api/Cargo.toml` includes an
+actual loopback HTTP Details transport test and API integration tests using a fake
+provider. They cover field masks, redirects/errors, provenance, team scoping,
+expiry, restart/retry behavior, unavailability and legacy compatibility without
+paid APIs or real keys. Synthetic `arrivau-test-pachino-*` selections are restricted
+to explicit demo mode; production always rejects them.

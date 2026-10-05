@@ -1,8 +1,6 @@
 # In-app Google navigation
 
-This change prepares the SDK integration. Live activation remains incomplete
-until compatible destination entry and per-destination provenance are in place;
-there is no global configuration flag that permits existing Apple-derived data.
+Google Places supplies new destination selection; Google Navigation supplies in-app guidance. Real use requires the two configured keys and device checks below. Existing Apple-selected addresses are never relabelled automatically.
 
 Arrivau uses Google's native iOS Navigation SDK for turn-by-turn guidance to the
 driver's **next server-authorized stop**. Guidance is separate from the Rust
@@ -22,6 +20,7 @@ to Google. See the destination-source and release gates below.
   exact version **11.2.0**
 - `https://github.com/googlemaps/ios-maps-sdk`, product `GoogleMaps`, exact version
   **11.2.0**, also constraining Navigation's otherwise open-ended Maps dependency
+- `https://github.com/googlemaps/ios-places-sdk`, product `GooglePlaces`, exact **11.2.0**
 
 XcodeGen generates the ignored Xcode project. Do not vendor SDK binaries or commit
 generated projects. The app retains iOS 17 and CI's Xcode 26.6/iOS 26 SDK. Google's
@@ -45,21 +44,32 @@ Sources: [Xcode setup](https://developers.google.com/maps/documentation/navigati
 This integration and its scripts do not create a Google Cloud project, billing
 account, key, permission grant, paid service or upload. An authorized owner must:
 
-1. Review applicable Google Maps Platform terms and billing for an appropriately
-   configured Google Cloud project. Enable **Navigation SDK** and **Maps SDK for
-   iOS**. Destination requests are billable; review current pricing and configure
-   suitable quota/budget alerts.
-2. Restrict the key to **iOS applications** and the exact installed bundle ID.
-   The default development ID is `dev.arrivau.app`. The existing archive workflow
-   requires the owner's registered `ARRIVAU_BUNDLE_ID`; restrict the key to that
-   actual signed ID instead. Prefer separate development/production keys.
-3. Restrict API access to **Navigation SDK** and **Maps SDK for iOS**. Server IP
-   and HTTP referrer restrictions do not replace iOS app restrictions. Verify
-   restrictions with the intended signed build.
-4. Supply the key through the private local environment or the existing manual
-   TestFlight workflow's optional repository secret
-   `ARRIVAU_GOOGLE_MAPS_API_KEY`. Never paste it into tracked source, a PR, issue,
-   shell argument, screenshot or build log.
+1. In the Google Cloud project, confirm the billing account's payments-profile
+   country and applicable EEA/non-EEA Maps terms. Enable billing and **Navigation
+   SDK**, **Maps SDK for iOS**, and **Places API (New)**. Set budget alerts and
+   appropriate API quotas; alerts alone do not cap charges.
+2. Create an **iOS-only key**, restricted to the exact signed bundle ID
+   (`com.rudilosso.arrivau` for the current pilot; `dev.arrivau.app` only for
+   default development builds). Restrict its APIs to the three above. Store it
+   as repository secret **ARRIVAU_GOOGLE_MAPS_API_KEY** for the existing manual
+   archive workflow, or provide it privately to the local build helper below.
+3. Create a **separate server key**, restricted to **Places API (New)** and the
+   server's verified public outbound IP addresses. Set runtime environment
+   **ARRIVAU_GOOGLE_PLACES_SERVER_KEY** on the API server. Do not assume an inbound
+   host IP is the outbound IP. Never use the iOS key on the server or embed the
+   server key in the app. The server uses HTTPS only with redirects disabled.
+4. Deploy the matching API and build the matching iOS app, then freshly select
+   old Apple-derived restaurant/destination locations using original customer
+   records. Existing saved restaurants remain visible but require reselection;
+   legacy coordinate-only API records never receive Google IDs automatically.
+   Schema version 6 prevents an old server from reopening the migrated database.
+   Back up before upgrade and use the matching version for rollback planning.
+5. Complete the actual signed-iPhone checks below, privacy disclosures and
+   release classification review before distributing. The scripts do not upload
+   or deploy automatically; a PR merge is not a live rollout.
+
+No keys should be pasted into chat, tracked source, issues, command arguments,
+logs or screenshots. API key creation and billing setup are owner-managed steps.
 
 The distributed app necessarily contains its key. Private configuration/logs are
 hygiene measures; API/bundle restrictions, quotas and monitoring protect against
@@ -128,12 +138,39 @@ formatted addresses with another provider does not establish independent
 provenance. Unknown/legacy sources must fail closed for Google navigation;
 an operator-wide flag cannot relabel existing data.
 
-Only destinations with independently established, compatible provenance may be
-used. Verify each destination, including restaurant pickup snapshots, existing
-drop-offs and restored/retried creation data. Provenance must survive server
-storage and route responses. Resolve this before Google guidance is enabled for
-actual work; configuring a key is insufficient. See [Apple's agreement](https://developer.apple.com/support/terms/apple-developer-program-license-agreement/),
-Map Data definition and Attachment 6, particularly sections 2.2–2.5.
+New autocomplete results are displayed transiently with Google attribution.
+The selected Place ID is durable; the label/address saved by Arrivau is the
+original user-entered text, not Google's formatted prediction. The client makes
+an Essentials ID/coordinate Details request to terminate the autocomplete
+session and discards its coordinates. The server independently resolves the ID
+using its own key and an ID/location-only field mask. The first uncached
+selection therefore makes two Details requests; cached server results avoid
+subsequent duplicate resolution.
+
+The server's bounded SQLite TEMP cache uses memory only, expires at 29 days
+(with a guard band below Google's 30-day maximum), and is emptied on restart.
+Google coordinates are stripped from durable jobs, restaurants, idempotency
+snapshots and completed history. OSRM queries containing Google destinations use
+request-local caches instead of persistent matrix/snap caches. Provider failure
+keeps ordered stops, returns missing coordinates, hides timing and blocks unsafe
+assignment; it never replaces a location with a guessed point. Google guidance
+uses only the server's first stop Place ID, so it can still calculate its own
+route when the scheduler's coordinate cache is unavailable.
+
+New Google points use Google overview maps. Old Apple-only records retain their
+existing Apple map; mixed-source routes show the ordered list without combining
+map content. No OSRM route geometry is drawn on the Google navigation map.
+Google place IDs may be retained; other content has additional restrictions.
+Review applicable [EEA guidance](https://developers.google.com/maps/comms/eea/places)
+and [Places policies](https://developers.google.com/maps/documentation/places/ios-sdk/policies).
+
+Current list-price baseline (USD, before applicable taxes, checked 2026-10-05):
+Autocomplete Requests: 10,000/month free, then $2.83/1,000 at the first paid tier;
+Place Details Essentials: 10,000/month free, then $5/1,000; Navigation: 1,000
+requested destinations/month free, then $25/1,000. Native Maps SDK is listed
+with unlimited free usage. Autocomplete session billing, account agreements,
+volume and the two-Details first-selection behavior affect actual totals. See
+[Google pricing](https://developers.google.com/maps/billing-and-pricing/pricing).
 
 Before distributing a Google-enabled pilot or App Store build:
 
@@ -144,7 +181,7 @@ Before distributing a Google-enabled pilot or App Store build:
   attribution, SDK first-use terms/driver-awareness flow and access to SDK
   open-source licenses. Do not obscure navigation UI or required disclaimers.
 - Google supplies SDK privacy manifests. Generate and inspect Xcode's
-  **aggregate privacy report for the actual archive**, including both SDKs.
+  **aggregate privacy report for the actual archive**, including all three SDKs.
   Reconcile the app manifest, public privacy policy and App Store Connect answers
   with actual behavior; pre-SDK declarations are not proof no update is needed.
 - Re-evaluate Apple's export-compliance answers for the new binaries. This

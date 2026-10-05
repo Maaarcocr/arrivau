@@ -108,9 +108,13 @@ struct Delivery: Codable, Identifiable, Equatable {
     let id: String
     let shopName: String
     let pickupAddress: String
-    let pickup: Coordinate
+    let pickup: Coordinate?
     let dropoffAddress: String
-    let dropoff: Coordinate
+    let dropoff: Coordinate?
+    let pickupGooglePlaceId: String?
+    let dropoffGooglePlaceId: String?
+    let pickupCoordinateFetchedAt: Int?
+    let dropoffCoordinateFetchedAt: Int?
     let readyAt: Int
     let deadlineAt: Int
     let loadUnits: Int
@@ -126,12 +130,16 @@ struct Delivery: Codable, Identifiable, Equatable {
     let onboardDeadlineAt: Int?
     let dispatchWaitingReason: String?
 
-    init(id: String, shopName: String, pickupAddress: String, pickup: Coordinate,
-         dropoffAddress: String, dropoff: Coordinate, readyAt: Int, deadlineAt: Int,
+    init(id: String, shopName: String, pickupAddress: String, pickup: Coordinate?,
+         dropoffAddress: String, dropoff: Coordinate?, readyAt: Int, deadlineAt: Int,
          loadUnits: Int, maxRideSeconds: Int, status: DeliveryStatus, driverId: String?,
          createdAt: Int, pickedUpAt: Int?, deliveredAt: Int?,
          readinessState: ReadinessState = .estimated, readinessRevision: UInt64 = 0,
-         readinessUpdatedAt: Int? = nil, onboardDeadlineAt: Int? = nil, dispatchWaitingReason: String? = nil) {
+         readinessUpdatedAt: Int? = nil, onboardDeadlineAt: Int? = nil, dispatchWaitingReason: String? = nil,
+         pickupGooglePlaceId: String? = nil, dropoffGooglePlaceId: String? = nil,
+         pickupCoordinateFetchedAt: Int? = nil, dropoffCoordinateFetchedAt: Int? = nil) {
+        self.pickupGooglePlaceId = pickupGooglePlaceId; self.dropoffGooglePlaceId = dropoffGooglePlaceId
+        self.pickupCoordinateFetchedAt = pickupCoordinateFetchedAt; self.dropoffCoordinateFetchedAt = dropoffCoordinateFetchedAt
         self.id = id; self.shopName = shopName; self.pickupAddress = pickupAddress; self.pickup = pickup
         self.dropoffAddress = dropoffAddress; self.dropoff = dropoff; self.readyAt = readyAt
         self.deadlineAt = deadlineAt; self.loadUnits = loadUnits; self.maxRideSeconds = maxRideSeconds
@@ -144,6 +152,7 @@ struct Delivery: Codable, Identifiable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, shopName, pickupAddress, pickup, dropoffAddress, dropoff, readyAt, deadlineAt
+        case pickupGooglePlaceId, dropoffGooglePlaceId, pickupCoordinateFetchedAt, dropoffCoordinateFetchedAt
         case loadUnits, maxRideSeconds, status, driverId, createdAt, pickedUpAt, deliveredAt
         case readinessState, readinessRevision, readinessUpdatedAt, onboardDeadlineAt, dispatchWaitingReason
     }
@@ -152,9 +161,13 @@ struct Delivery: Codable, Identifiable, Equatable {
         id = try values.decode(String.self, forKey: .id)
         shopName = try values.decode(String.self, forKey: .shopName)
         pickupAddress = try values.decode(String.self, forKey: .pickupAddress)
-        pickup = try values.decode(Coordinate.self, forKey: .pickup)
+        pickup = try values.decodeIfPresent(Coordinate.self, forKey: .pickup)
         dropoffAddress = try values.decode(String.self, forKey: .dropoffAddress)
-        dropoff = try values.decode(Coordinate.self, forKey: .dropoff)
+        dropoff = try values.decodeIfPresent(Coordinate.self, forKey: .dropoff)
+        pickupGooglePlaceId = try values.decodeIfPresent(String.self, forKey: .pickupGooglePlaceId)
+        dropoffGooglePlaceId = try values.decodeIfPresent(String.self, forKey: .dropoffGooglePlaceId)
+        pickupCoordinateFetchedAt = try values.decodeIfPresent(Int.self, forKey: .pickupCoordinateFetchedAt)
+        dropoffCoordinateFetchedAt = try values.decodeIfPresent(Int.self, forKey: .dropoffCoordinateFetchedAt)
         readyAt = try values.decode(Int.self, forKey: .readyAt)
         deadlineAt = try values.decode(Int.self, forKey: .deadlineAt)
         loadUnits = try values.decode(Int.self, forKey: .loadUnits)
@@ -196,7 +209,7 @@ struct RouteStop: Codable, Identifiable, Equatable {
     let deliveryId: String
     let kind: StopKind
     let address: String
-    let coordinate: Coordinate
+    let coordinate: Coordinate?
     let arrivalAt: Int
     let departureAt: Int
     var id: String { "\(deliveryId)-\(kind.rawValue)" }
@@ -223,7 +236,10 @@ struct DriverRoute: Codable, Equatable {
     let estimatesAvailable: Bool
     let travelEstimate: RouteTravelEstimate?
     var unavailableEstimateMessage: String {
-        warnings.contains { $0.hasPrefix("Percorso stradale non raggiungibile per ") }
+        if warnings.contains(where: { $0.hasPrefix("Destination location unavailable for ") }) {
+            return "Indirizzo da aggiornare; orari non disponibili"
+        }
+        return warnings.contains { $0.hasPrefix("Percorso stradale non raggiungibile per ") }
             ? "Percorso non raggiungibile; orari non disponibili"
             : "Posizione non disponibile; orari da verificare"
     }
@@ -264,19 +280,38 @@ struct Restaurant: Codable, Identifiable, Equatable {
     let id: String
     let name: String
     let address: String
-    let coordinate: Coordinate
+    let coordinate: Coordinate?
     let createdAt: Int
+    var googlePlaceId: String? = nil
+    var coordinateFetchedAt: Int? = nil
+    /// Legacy coordinates never establish Google provenance. An expired cache is
+    /// fine here: the server will resolve the stable ID again when creating a job.
+    var hasGooglePlace: Bool { googlePlaceId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
 }
 struct NewRestaurant: Codable, Equatable {
     let name: String
     let address: String
-    let coordinate: Coordinate
+    let coordinate: Coordinate?
+    let googlePlaceId: String?
+
+    init(name: String, address: String, coordinate: Coordinate? = nil, googlePlaceId: String? = nil) {
+        self.name = name; self.address = address; self.googlePlaceId = googlePlaceId
+        // A durable recovery record must not become an unbounded Google cache.
+        self.coordinate = googlePlaceId == nil ? coordinate : nil
+    }
+
     var validationError: String? {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "Scegli un indirizzo e inserisci il nome del ristorante."
         }
-        guard coordinate.isValid else { return "Scegli un indirizzo valido per il ristorante." }
+        // Coordinate-only bodies remain decodable/replayable for old idempotency records.
+        // The new UI can create only a freshly selected Google place.
+        if let googlePlaceId {
+            guard !googlePlaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return "Scegli di nuovo l’indirizzo del ristorante su Google Maps."
+            }
+        } else if coordinate?.isValid != true { return "Scegli un indirizzo valido per il ristorante." }
         return nil
     }
 }
@@ -288,30 +323,41 @@ struct PendingRestaurant: Codable, Equatable {
 struct NewDelivery: Codable, Equatable {
     let shopName: String
     let pickupAddress: String
-    let pickup: Coordinate
+    let pickup: Coordinate?
     let dropoffAddress: String
-    let dropoff: Coordinate
+    let dropoff: Coordinate?
     let readyAt: Int?
     let deadlineAt: Int
     let loadUnits: Int
     let maxRideSeconds: Int
 
     let restaurantId: String?
+    let pickupGooglePlaceId: String?
+    let dropoffGooglePlaceId: String?
 
-    init(shopName: String, pickupAddress: String, pickup: Coordinate, dropoffAddress: String,
-         dropoff: Coordinate, readyAt: Int?, deadlineAt: Int, loadUnits: Int, maxRideSeconds: Int,
-         restaurantId: String? = nil) {
-        self.shopName = shopName; self.pickupAddress = pickupAddress; self.pickup = pickup
-        self.dropoffAddress = dropoffAddress; self.dropoff = dropoff; self.readyAt = readyAt
+    init(shopName: String, pickupAddress: String, pickup: Coordinate? = nil, dropoffAddress: String,
+         dropoff: Coordinate? = nil, readyAt: Int?, deadlineAt: Int, loadUnits: Int, maxRideSeconds: Int,
+         restaurantId: String? = nil, pickupGooglePlaceId: String? = nil, dropoffGooglePlaceId: String? = nil) {
+        self.shopName = shopName; self.pickupAddress = pickupAddress; self.pickup = pickupGooglePlaceId == nil ? pickup : nil
+        self.dropoffAddress = dropoffAddress; self.dropoff = dropoffGooglePlaceId == nil ? dropoff : nil; self.readyAt = readyAt
         self.deadlineAt = deadlineAt; self.loadUnits = loadUnits; self.maxRideSeconds = maxRideSeconds
         self.restaurantId = restaurantId
+        self.pickupGooglePlaceId = pickupGooglePlaceId; self.dropoffGooglePlaceId = dropoffGooglePlaceId
     }
 
     var validationError: String? {
         if [shopName, pickupAddress, dropoffAddress].contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
             return "Inserisci il nome del negozio ed entrambi gli indirizzi."
         }
-        if !pickup.isValid || !dropoff.isValid { return "Inserisci valori validi di latitudine e longitudine." }
+        if let pickupGooglePlaceId, pickupGooglePlaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Scegli di nuovo l’indirizzo di ritiro su Google Maps."
+        }
+        if let dropoffGooglePlaceId, dropoffGooglePlaceId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Scegli di nuovo la destinazione su Google Maps."
+        }
+        if (pickupGooglePlaceId == nil && pickup?.isValid != true) || (dropoffGooglePlaceId == nil && dropoff?.isValid != true) {
+            return "Inserisci valori validi di latitudine e longitudine."
+        }
         if let readyAt, deadlineAt < readyAt { return "Il termine di consegna non può precedere l’orario di disponibilità." }
         if !(1...8).contains(loadUnits) { return "Il carico deve essere compreso tra 1 e 8 unità." }
         if !(60...7200).contains(maxRideSeconds) { return "Il tempo massimo di trasporto deve essere compreso tra 1 e 120 minuti." }

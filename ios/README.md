@@ -8,7 +8,9 @@ For simulator development, launch the Debug app with `--demo`. `--uitesting` imp
 
 The icon and privacy manifest live in `Resources/`. Recheck privacy declarations against the deployed service and App Store Connect disclosures. The operator must verify a signed build on physical devices; neither an unsigned Release build nor simulator UI tests establish background GPS or TestFlight readiness.
 
-In-app turn-by-turn guidance uses the pinned Google Navigation SDK. See [Google navigation setup and release gates](../docs/google-navigation.md) for optional private API-key configuration, destination-source restrictions, privacy/export review and physical-device checks. A no-key build keeps guidance unavailable while the rest of the app remains usable.
+In-app turn-by-turn guidance uses pinned Google Navigation and Google Places SDKs. See [Google setup and device checks](../docs/google-navigation.md) for private key configuration, legacy-address reselection, privacy/export review and physical-device checks. A no-key build shows clear unavailable states for Google search and guidance while existing delivery controls remain usable.
+
+Both app Info.plists retain `ITSAppUsesNonExemptEncryption` as Boolean `false`. This was established for the pre-Google pilot. The bundled Google SDKs change the dependency set: their standard transport crypto does not by itself establish non-exemption or an exemption. Reassess the declaration for the actual SDK-enabled release and distribution territories using [Apple's guidance](https://developer.apple.com/documentation/security/complying-with-encryption-export-regulations). `verify-ios-bundle.py` checks the declared Boolean in the actual Release bundle; it does not certify the legal classification. Already uploaded builds are unchanged.
 
 ## Invite-only corriere signup
 
@@ -108,7 +110,7 @@ The same export also requires `dual-account-centrale` and `dual-account-corriere
 - Uncertain readiness retries retain the original minutes, revision and idempotency key for the current session. Conflicts require authoritative refresh before a new attempt. A stale revision never replaces newer local readiness. Legacy pending orders need an explicit readiness action to activate automatic assignment.
 - Restaurant creation saves its exact body/key in team/account/endpoint-scoped Keychain recovery before sending. Relaunch or switching accounts cannot turn a retry into another creation or send it to another team. Cancelling a restaurant/address/estimate sheet before submission sends no write; successful restaurant selection preserves the saved record for later orders.
 - Raw coordinates, route scoring, capacity, sync timestamps and development configuration are absent from the everyday screens. Demo connection settings and limitations remain available from the role chooser.
-- Maps search sends the entered query to Apple and requires connectivity. Empty/error results stay editable; cancelling search keeps the previous selection. The app does not fall back to invented coordinates.
+- Google Places search sends the entered query to Google and requires configured keys/connectivity. Empty/error results stay editable; cancelling search keeps the previous selection. Saved records retain the user’s original text and a Google Place ID; the server resolves coordinates in an expiring memory cache. Legacy Apple-selected restaurants must be selected again. The app does not fall back to invented coordinates.
 
 ## Italian presentation
 

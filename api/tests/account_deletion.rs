@@ -1174,7 +1174,7 @@ async fn invite_only_v4_upgrade_preserves_membership_and_sessions_before_hard_de
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 5,
+        version, 6,
         "older invite-only binaries must fail their >4 startup guard"
     );
     assert_eq!(
@@ -1243,3 +1243,4 @@ async fn deletion_schema_missing_retry_metadata_fails_closed_without_recreating_
         1
     );
 }
+

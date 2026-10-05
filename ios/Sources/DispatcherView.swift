@@ -371,7 +371,7 @@ struct NewDeliveryView: View {
                 } else {
                     Form {
                         Section {
-                            placeButton(title: "Ristorante", place: pickup.map { DeliveryPlace(name: $0.name, address: $0.address, coordinate: $0.coordinate) }, icon: "storefront", identifier: "choose_pickup") { selectingPickup = true }
+                            placeButton(title: "Ristorante", place: pickup.flatMap(DeliveryPlace.init(restaurant:)), icon: "storefront", identifier: "choose_pickup") { selectingPickup = true }
                             placeButton(title: "Destinazione", place: dropoff, icon: "mappin.and.ellipse", identifier: "choose_dropoff") { selectingDropoff = true }
                         }
                         Section {
@@ -400,7 +400,7 @@ struct NewDeliveryView: View {
                                 }.frame(maxWidth: .infinity).padding(.vertical, 8)
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(pickup == nil || dropoff == nil || submitting || store.isMutating)
+                            .disabled((!creationUncertain && (pickup?.hasGooglePlace != true || dropoff == nil)) || submitting || store.isMutating)
                             .accessibilityIdentifier("submit_delivery")
                             Text(creationUncertain ? "La stessa richiesta evita duplicati. Puoi chiudere e verificarla più tardi." : "Potrai indicare dopo quando il cibo è pronto")
                                 .font(.caption).foregroundStyle(.secondary)
@@ -448,16 +448,17 @@ struct NewDeliveryView: View {
     }
 
     private func create() async {
-        guard !submitting, let pickup, let dropoff else { return }
+        guard !submitting, let pickup, pickup.hasGooglePlace, let dropoff else { return }
         submitting = true
         defer { submitting = false }
         let now = Date()
         let draft = NewDelivery(
-            shopName: pickup.name, pickupAddress: pickup.address, pickup: pickup.coordinate,
-            dropoffAddress: dropoff.address, dropoff: dropoff.coordinate,
+            shopName: pickup.name, pickupAddress: pickup.address,
+            dropoffAddress: dropoff.address,
             readyAt: nil,
             deadlineAt: Int((customTiming ? deadlineAt : now.addingTimeInterval(3600)).timeIntervalSince1970),
-            loadUnits: 1, maxRideSeconds: 1800, restaurantId: pickup.id
+            loadUnits: 1, maxRideSeconds: 1800, restaurantId: pickup.id,
+            pickupGooglePlaceId: pickup.googlePlaceId, dropoffGooglePlaceId: dropoff.googlePlaceId
         )
         validationError = draft.validationError
         guard validationError == nil else { return }
@@ -522,7 +523,8 @@ private struct RestaurantPickerView: View {
                         Button("Riprova lo stesso salvataggio") {
                             Task {
                                 if let restaurant = await store.createRestaurant(pending.restaurant) {
-                                    select(restaurant); dismiss()
+                                    if restaurant.hasGooglePlace { select(restaurant); dismiss() }
+                                    else { showingAdd = true }
                                 }
                             }
                         }.disabled(store.isMutating).accessibilityIdentifier("retry_restaurant")
@@ -531,11 +533,16 @@ private struct RestaurantPickerView: View {
                 Section {
                     ForEach(store.restaurants) { restaurant in
                         Button {
-                            select(restaurant); dismiss()
+                            if restaurant.hasGooglePlace { select(restaurant); dismiss() }
+                            else { showingAdd = true }
                         } label: {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(restaurant.name).font(.headline)
                                 Text(restaurant.address).font(.subheadline).foregroundStyle(.secondary)
+                                if !restaurant.hasGooglePlace {
+                                    Text("Indirizzo precedente: cerca e salva di nuovo su Google Maps")
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
                             }.foregroundStyle(.primary)
                         }.accessibilityIdentifier("restaurant_\(restaurant.id)")
                     }
@@ -597,7 +604,8 @@ private struct NewRestaurantView: View {
                     guard !submitting, let place else { return }
                     submitting = true
                     let draft = store.pendingRestaurant?.restaurant ?? NewRestaurant(
-                        name: name.trimmingCharacters(in: .whitespacesAndNewlines), address: place.address, coordinate: place.coordinate)
+                        name: name.trimmingCharacters(in: .whitespacesAndNewlines), address: place.address,
+                        googlePlaceId: place.googlePlaceId)
                     Task {
                         if let restaurant = await store.createRestaurant(draft) { select(restaurant) }
                         submitting = false
@@ -623,3 +631,4 @@ private struct NewRestaurantView: View {
         }.interactiveDismissDisabled(submitting || store.isMutating)
     }
 }
+

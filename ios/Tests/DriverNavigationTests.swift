@@ -34,6 +34,14 @@ final class DriverNavigationTests: XCTestCase {
         XCTAssertNil(NavigationDestination.next(principal: principal, role: .driver, driver: driver,
                                                route: route([stop(coordinate: Coordinate(lat: .nan, lng: 15))])))
     }
+    func testGoogleIDStillNavigatesWithoutCachedCoordinatesAndRefreshDoesNotRestartIt() {
+        let uncached = RouteStop(googlePlaceId: "test-place-id", deliveryId: "delivery-1", kind: .pickup,
+                                 address: "Indirizzo del cliente", coordinate: nil, arrivalAt: 0, departureAt: 0)
+        let target = NavigationDestination.next(principal: principal, role: .driver, driver: driver, route: route([uncached]))
+        XCTAssertEqual(target, destination)
+        XCTAssertNil(target?.coordinate)
+        XCTAssertEqual(target?.googlePlaceID, destination.googlePlaceID)
+    }
     func testLegacyStopsNeverInventGooglePlaceIDs() throws {
         let legacy = Data(#"{"delivery_id":"d","kind":"pickup","address":"Via","coordinate":{"lat":36.7,"lng":15.1},"arrival_at":1,"departure_at":2}"#.utf8)
         XCTAssertNil(try APIClient.decoder().decode(RouteStop.self, from: legacy).googlePlaceId)

@@ -8,6 +8,9 @@ configs:
   Debug: debug
   Release: release
 packages:
+  GooglePlaces:
+    url: https://github.com/googlemaps/ios-places-sdk
+    exactVersion: 11.2.0
   GoogleNavigation:
     url: https://github.com/googlemaps/ios-navigation-sdk
     exactVersion: 11.2.0
@@ -36,6 +39,8 @@ targets:
     platform: iOS
     sources: [Sources, Resources]
     dependencies:
+      - package: GooglePlaces
+        product: GooglePlaces
       - package: GoogleNavigation
         product: GoogleNavigation
       - package: GoogleMaps

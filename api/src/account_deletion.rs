@@ -350,20 +350,22 @@ mod tests {
         let mut job = NewDelivery {
             shop_name: "Fixture".into(),
             pickup_address: "A".into(),
-            pickup: Coordinate {
+            pickup: Some(Coordinate {
                 lat: 36.716,
                 lng: 15.09,
-            },
+            }),
             dropoff_address: "B".into(),
-            dropoff: Coordinate {
+            dropoff: Some(Coordinate {
                 lat: 36.717,
                 lng: 15.091,
-            },
+            }),
             ready_at: Some(1000),
             deadline_at: 5000,
             load_units: 1,
             max_ride_seconds: 1800,
             restaurant_id: None,
+            pickup_google_place_id: None,
+            dropoff_google_place_id: None,
         }
         .into_delivery(1000);
         job.id = "fixture-job".into();
@@ -770,3 +772,4 @@ mod tests {
         );
     }
 }
+

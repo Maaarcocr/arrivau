@@ -7,27 +7,20 @@ permissions:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Load pinned toolchain
         run: rustup show
-      - name: Resolve HTTPS dependency while preserving the existing lock
+      - name: Format authored Rust and preserve exact repair patch
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("api/Cargo.toml")
-          content = path.read_text()
-          old = 'reqwest = { version = "0.12", default-features = false, features = ["json"] }'
-          if old in content:
-              content = content.replace(old + "\n", "")
-              content = content.replace("[dependencies]\n", '[dependencies]\nreqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }\n')
-              path.write_text(content)
-          PY
-          cargo fetch --manifest-path api/Cargo.toml
-      - name: Export only the lockfile
+          cargo fmt --manifest-path api/Cargo.toml
+          git diff -- api > formatted-api.patch
+      - name: Export only source formatting patch
         uses: actions/upload-artifact@v4
         with:
-          name: google-places-cargo-lock
-          path: api/Cargo.lock
+          name: google-places-format
+          path: formatted-api.patch
           if-no-files-found: error
+      - name: Compile and test the complete API
+        run: cargo test --locked --manifest-path api/Cargo.toml

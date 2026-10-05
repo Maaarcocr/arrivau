@@ -453,7 +453,7 @@ async fn pickup_guard_uses_acknowledged_stop_instead_of_the_old_gps_approach() {
         .unwrap();
     assert_ne!(
         driver.location,
-        Some(job.pickup),
+        job.pickup,
         "pickup anchor is not a synthetic GPS upload"
     );
 }
@@ -1316,3 +1316,4 @@ async fn idempotent_mutations_survive_restart_and_cannot_change_request_or_owner
     )
     .await;
 }
+

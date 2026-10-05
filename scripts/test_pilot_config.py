@@ -41,6 +41,33 @@ class PilotConfigurationTests(unittest.TestCase):
         self.assertEqual(info['CFBundleVersion'], '$(CURRENT_PROJECT_VERSION)')
         self.assertEqual(info['CFBundleShortVersionString'], '$(MARKETING_VERSION)')
 
+    def test_app_plists_declare_no_non_exempt_encryption(self):
+        for configuration in ('Debug', 'Release'):
+            with self.subTest(configuration=configuration):
+                info = plistlib.loads((ROOT/f'ios/Config/Info-{configuration}.plist').read_bytes())
+                self.assertIs(info.get('ITSAppUsesNonExemptEncryption'), False)
+
+    def test_bundle_requires_boolean_false_export_compliance_declaration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bundle = Path(temp)
+            info = {'CFBundleExecutable': 'Arrivau', 'UIDeviceFamily': [1],
+                    'CFBundleIcons': {'CFBundlePrimaryIcon': {'CFBundleIconName': 'AppIcon'}},
+                    'CFBundleVersion': '1', 'CFBundleShortVersionString': '0.2.0'}
+            (bundle/'Arrivau').write_bytes(b'release binary fixture')
+            (bundle/'Assets.car').write_bytes(b'compiled asset fixture')
+            (bundle/'PrivacyInfo.xcprivacy').write_bytes(plistlib.dumps({'NSPrivacyTracking': False}))
+            key = 'ITSAppUsesNonExemptEncryption'
+            for fmt in (plistlib.FMT_XML, plistlib.FMT_BINARY):
+                for value in (None, True, 'false', 'NO', 0, 1, False):
+                    with self.subTest(format=fmt, value=value):
+                        candidate = {**info, **({key: value} if value is not None else {})}
+                        (bundle/'Info.plist').write_bytes(plistlib.dumps(candidate, fmt=fmt))
+                        if value is False:
+                            self.assertTrue(bundle_module.verify(bundle))
+                        else:
+                            with self.assertRaisesRegex(ValueError, key):
+                                bundle_module.verify(bundle)
+
     def test_icon_is_complete_opaque_1024_png(self):
         folder = ROOT/'ios/Resources/Assets.xcassets/AppIcon.appiconset'
         manifest = json.loads((folder/'Contents.json').read_text())
@@ -54,7 +81,8 @@ class PilotConfigurationTests(unittest.TestCase):
             bundle = Path(temp)
             info = {'CFBundleExecutable': 'Arrivau', 'UIDeviceFamily': [1],
                     'CFBundleIcons': {'CFBundlePrimaryIcon': {'CFBundleIconName': 'AppIcon'}},
-                    'CFBundleVersion': '1', 'CFBundleShortVersionString': '0.2.0'}
+                    'CFBundleVersion': '1', 'CFBundleShortVersionString': '0.2.0',
+                    'ITSAppUsesNonExemptEncryption': False}
             (bundle/'Info.plist').write_bytes(plistlib.dumps(info))
             (bundle/'Arrivau').write_bytes(b'release binary fixture')
             (bundle/'PrivacyInfo.xcprivacy').write_bytes(plistlib.dumps({'NSPrivacyTracking': False}))
@@ -75,3 +103,4 @@ class PilotConfigurationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

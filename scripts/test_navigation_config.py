@@ -87,11 +87,12 @@ class NavigationConfigurationTests(unittest.TestCase):
                 self.assertNotIn(FAKE_KEY, result.stdout + result.stderr)
                 self.assertNotIn("<plist", result.stdout + result.stderr)
 
-    def test_project_pins_both_sdk_versions_and_blank_default(self):
+    def test_project_pins_all_sdk_versions_and_blank_default(self):
         project = (ROOT / "ios/project.yml").read_text()
-        self.assertEqual(project.count("exactVersion: 11.2.0"), 2)
+        self.assertEqual(project.count("exactVersion: 11.2.0"), 3)
         self.assertIn("https://github.com/googlemaps/ios-navigation-sdk", project)
         self.assertIn("https://github.com/googlemaps/ios-maps-sdk", project)
+        self.assertIn("https://github.com/googlemaps/ios-places-sdk", project)
         self.assertIn('ARRIVAU_GOOGLE_MAPS_API_KEY: ""', project)
         self.assertIn("/ios/Config/Navigation.local/", (ROOT / ".gitignore").read_text())
 

@@ -88,3 +88,102 @@ The server adds optional `can_delete_account:true` to actual invite-created prin
 - `DELETE /v1/account` (authenticated invited driver) body `{"password":"<current password>","confirmation":"<reviewed snapshot>"}` → 204 after an atomic hard delete. No user ID, team ID or extra fields accepted. Password confirmation failure 403, invalid/revoked session 401, changed preview 409, throttling 429. A stale preview requires rereading and explicit reconfirmation
 
 Password verification shares the bounded Argon2 pool. Final identity/session/team/snapshot checks run under the deletion transaction, so changing assignments/status/readiness cannot silently expand the reviewed action. The full record scope and intentionally preserved shared data are documented in `invites.md`. Deleted-account tokens immediately stop authenticating; repeating deletion with them cannot perform a new action. A lost response is uncertain: never automatically replay a destructive request or claim success without confirmation.
+
+
+## Google Places destinations and location retention (schema 6)
+
+Updated native clients select destinations with Google Places. The stable ID is
+server-verified through Place Details (New), requesting only `id,location`
+(Details Essentials). The OSRM/approximate scheduling engine is unchanged; Google
+navigation receives the current first stop's Place ID, never coordinates copied
+from a legacy Apple selection. The ordered API route remains authoritative.
+
+New fields on `POST /v1/deliveries`:
+
+```json
+{
+  "shop_name": "Name entered by the dispatcher",
+  "pickup_address": "Original pickup text entered by the dispatcher",
+  "pickup_google_place_id": "<selected Google Place ID>",
+  "dropoff_address": "Original dropoff text entered by the dispatcher",
+  "dropoff_google_place_id": "<selected Google Place ID>",
+  "deadline_at": 1790877600,
+  "load_units": 1,
+  "max_ride_seconds": 1800
+}
+```
+
+- Google IDs are optional for legacy API compatibility. For each endpoint without
+  an ID, a valid coordinate is still required. Such a destination remains legacy,
+  with no Google navigation capability; it is never silently reclassified
+- For endpoints with an ID, omit `pickup`/`dropoff`: the server ignores any
+  supplied coordinates and resolves its own. Client-declared provider/freshness
+  fields are rejected. Unknown, invalid, unavailable or unresolvable IDs never
+  create a Google destination using client or stale coordinates
+- Existing text fields must contain independently user-authored name/address
+  text, not Google autocomplete predictions, formatted addresses or display names.
+  The server never requests or stores Google labels. The native picker retains
+  the original typed query separately from its transient prediction display
+- `POST /v1/restaurants` likewise accepts `google_place_id`, independent user
+  `name`/`address`, and an optional `coordinate`. A saved restaurant's server-owned
+  ID and text become the delivery pickup snapshot. A legacy saved restaurant must
+  be explicitly reselected in the updated native UI; no bulk licensing flag exists
+- Invalid request syntax/IDs return 400. Missing server configuration or unavailable
+  Details returns 503 for a new Google creation, without storing the delivery or
+  restaurant. Existing idempotent commits replay without requiring the provider
+
+Delivery responses add `pickup_google_place_id`, `dropoff_google_place_id`,
+`pickup_coordinate_fetched_at` and `dropoff_coordinate_fetched_at`. Restaurant
+responses add `google_place_id` and `coordinate_fetched_at`. RouteStop adds
+`google_place_id` and `coordinate_fetched_at`. All default to null on legacy data.
+A non-null ID identifies a server-resolved Google selection; the corresponding
+fetched timestamp describes only the current temporary location, not the stable
+ID's lifetime. Coordinate fields (`pickup`, `dropoff`, `coordinate`) are nullable
+when no fresh Google location is available. Clients must support nulls before
+Google records are created in that fleet.
+
+There is one team-scoped, memory-only temporary location cache keyed by Place ID.
+It holds the provider tag `google`, coordinate and server fetch time for strictly
+less than 29 days, leaving a one-day cleanup margin before the 30-day ceiling. Both the location cache and short failure cache are capped at 4,096 entries. Expired/future-dated entries are deleted on every API storage
+access and by the existing server dispatch timer even without client activity.
+Process restart discards the entire cache. Google-bearing OSRM queries use only
+request-local matrix/snap caches, so the native worker cannot retain coordinate
+copies after this cache expires. Legacy native caching is unchanged. Coordinates and fetch timestamps are
+stripped from every durable delivery, restaurant and idempotency response,
+including completed history and nested snapshots, so database backups and WAL
+never acquire Google location copies. IDs and original user-owned text persist.
+Do not introduce request/response-body logging or external caches that defeat
+these limits. Existing user/legacy coordinates follow their existing retention.
+
+Before routing, assignment, suggestions, readiness re-planning or dispatch, the
+server refreshes missing/expired Google locations for the relevant outstanding
+work. Provider failure retains every committed stop in order, makes missing
+coordinates null, sets `estimates_available=false` and `feasible=false`, and
+prevents new assignments through that route, including least-bad timing dispatch.
+All numeric ETA fields then are compatibility placeholders and must be hidden.
+Physical completion still follows the existing first-stop/state-transition rules.
+Listing history or restaurants alone does not cause paid lookups. Original
+idempotent outcomes replay with currently available temporary coordinates or null;
+replaying cannot resurrect an expired coordinate snapshot.
+
+Schema 6 rejects downgrade to a server that would assume coordinates are permanent
+and always present. Back up before upgrading and roll out null-aware clients first.
+Legacy coordinate-only requests retain their canonical retry fingerprint. The two
+`arrivau-test-pachino-*` synthetic IDs are recognized only in explicitly isolated
+demo mode and rejected in production, even when a resolver is configured.
+
+Server deployment: set `ARRIVAU_GOOGLE_PLACES_SERVER_KEY` separately from the iOS
+bundle key, authorize Places API (New) only, and restrict it to the server's egress
+IP(s). A missing key leaves Google creation/refresh unavailable, while existing
+legacy jobs continue. Requests use fixed Google HTTPS URLs, an `id,location` field
+mask, no redirects, four concurrent workers, a 3-second connect/8-second total
+request timeout and an 8 KiB response limit. Refresh runs at most four lookups concurrently, with a nine-second total refresh
+budget; missing locations stay null if it runs out. Failed lookups use a 30-second
+memory-only backoff to avoid repeatedly billing/flooding a failing service.
+Provider error bodies and keys are never returned or logged. Tests use injected resolvers and loopback HTTP fixtures;
+no paid Google call, key creation or billing change is part of verification.
+
+References: [Place Details field masks and billing](https://developers.google.com/maps/documentation/places/web-service/place-details),
+[Places policies and attribution](https://developers.google.com/maps/documentation/places/web-service/policies).
+Review applicable Google/EEA terms for the deployment's billing region before
+activation; coordinate retention is a technical safeguard, not a blanket license.

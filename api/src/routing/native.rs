@@ -212,9 +212,19 @@ struct EngineCache {
     snapped: VecDeque<PointKey>,
 }
 
+impl EngineCache {
+    fn for_query<T>(&mut self, allow_cache: bool, operation: impl FnOnce(&mut Self) -> T) -> T {
+        if allow_cache { operation(self) } else {
+            // No Google coordinate bits survive this query in matrix or snap LRUs.
+            operation(&mut Self::default())
+        }
+    }
+}
+
 struct Query {
     driver: Option<Coordinate>,
     stops: Vec<Coordinate>,
+    allow_cache: bool,
     reply: oneshot::Sender<Result<TravelMatrix, &'static str>>,
 }
 #[derive(Clone)]
@@ -259,7 +269,9 @@ impl Worker {
                     if query.reply.is_closed() {
                         continue;
                     }
-                    let result = matrix(&engine, &manifest, &mut cache, query.driver, query.stops);
+                    let result = cache.for_query(query.allow_cache, |cache| {
+                        matrix(&engine, &manifest, cache, query.driver, query.stops)
+                    });
                     let _ = query.reply.send(result);
                 }
             })
@@ -273,9 +285,9 @@ impl Worker {
             matrices,
         })
     }
-    pub fn fallback(&self, points: &[Coordinate]) -> Result<TravelMatrix, String> {
+    pub fn fallback(&self, points: &[Coordinate], allow_cache: bool) -> Result<TravelMatrix, String> {
         let key: Vec<PointKey> = points.iter().map(|point| (*point).into()).collect();
-        if let Some(durations) = cached_matrix(&self.matrices, &key).map_err(str::to_owned)? {
+        if let Some(durations) = if allow_cache { cached_matrix(&self.matrices, &key).map_err(str::to_owned)? } else { None } {
             // This is the exact ordered full query, including GPS, for this
             // immutable dataset. Preserve its native nulls even under overload.
             return TravelMatrix::new(points, durations, self.estimate.clone());
@@ -289,12 +301,14 @@ impl Worker {
         &self,
         driver: Option<Coordinate>,
         stops: Vec<Coordinate>,
+        allow_cache: bool,
     ) -> Result<TravelMatrix, &'static str> {
         let (reply, receiver) = oneshot::channel();
         self.sender
             .try_send(Query {
                 driver,
                 stops,
+                allow_cache,
                 reply,
             })
             .map_err(|_| "busy_or_unavailable")?;
@@ -493,6 +507,22 @@ fn table(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sensitive_queries_never_retain_matrix_or_snap_keys() {
+        let mut persistent = EngineCache::default();
+        let key = PointKey::from(Coordinate {lat:36.7,lng:15.1});
+        let populate = |cache: &mut EngineCache| {
+            cache.snapped.push_front(key);
+            cache.matrices.lock().unwrap().push_front((vec![key],vec![vec![Some(0)]]));
+        };
+        persistent.for_query(false, populate);
+        assert!(persistent.snapped.is_empty());
+        assert!(persistent.matrices.lock().unwrap().is_empty());
+        persistent.for_query(true, populate);
+        assert_eq!(persistent.snapped.len(),1);
+        assert_eq!(persistent.matrices.lock().unwrap().len(),1);
+    }
+
     #[tokio::test]
     async fn full_or_closed_worker_queue_fails_without_waiting() {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
@@ -509,18 +539,19 @@ mod tests {
                 .try_send(Query {
                     driver: None,
                     stops: Vec::new(),
+                    allow_cache: true,
                     reply,
                 })
                 .unwrap();
             replies.push(response);
         }
         assert_eq!(
-            worker.matrix(None, Vec::new()).await.unwrap_err(),
+            worker.matrix(None, Vec::new(), true).await.unwrap_err(),
             "busy_or_unavailable"
         );
         drop(receiver);
         assert_eq!(
-            worker.matrix(None, Vec::new()).await.unwrap_err(),
+            worker.matrix(None, Vec::new(), true).await.unwrap_err(),
             "busy_or_unavailable"
         );
     }
@@ -540,7 +571,7 @@ mod tests {
             .fallback(&[Coordinate {
                 lat: 36.716,
                 lng: 15.09,
-            }])
+            }], true)
             .unwrap();
         assert!(fallback.estimate().approximate);
         assert_eq!(fallback.estimate().attribution.as_deref(), Some("OSM"));
@@ -591,6 +622,8 @@ mod tests {
         assert_eq!(cached.estimate().mode, TravelMode::EmbeddedOsrm);
         assert_eq!(cached.seconds(a, b), None);
         assert_eq!(cached.seconds(driver, a), Some(4));
+        let uncached = service.matrix_with_cache(Some(driver),vec![a,b],false).await.unwrap();
+        assert_eq!(uncached.estimate().mode,TravelMode::ApproximateFallback);
         let moved = Coordinate {
             lat: 36.71701,
             ..driver
@@ -645,3 +678,4 @@ mod tests {
         assert!(manifest.validate().is_err());
     }
 }
+

@@ -26,7 +26,6 @@ final class GoogleNavigationController: UIViewController, DriverNavigationEngine
     private var connected = true
     private var savedIdleTimer: Bool?
     private let configuration: GoogleNavigationConfiguration
-    private static var configured = false
 
     init(configuration: GoogleNavigationConfiguration = .init(info: Bundle.main.infoDictionary ?? [:])) {
         self.configuration = configuration
@@ -67,11 +66,7 @@ final class GoogleNavigationController: UIViewController, DriverNavigationEngine
         @unknown default: fail(.locationDenied); return
         }
         guard !termsPending else { return }
-        if !Self.configured {
-            GMSNavigationServices.setAbnormalTerminationReportingEnabled(false)
-            guard GMSServices.provideAPIKey(key) else { fail(.missingKey); return }
-            Self.configured = true
-        }
+        guard GoogleMapsBootstrap.configure(apiKey: key) else { fail(.missingKey); return }
         termsPending = true
         let request = token
         let options = GMSNavigationTermsAndConditionsOptions(companyName: "Arrivau")
@@ -92,7 +87,9 @@ final class GoogleNavigationController: UIViewController, DriverNavigationEngine
         self.session = session
         session.travelMode = .driving
         let options = GMSMapViewOptions()
-        options.camera = GMSCameraPosition(latitude: destination.coordinate.lat, longitude: destination.coordinate.lng, zoom: 15)
+        if let coordinate = destination.coordinate {
+            options.camera = GMSCameraPosition(latitude: coordinate.lat, longitude: coordinate.lng, zoom: 15)
+        }
         let map = GMSMapView(options: options)
         self.map = map
         guard map.enableNavigation(with: session), let navigator = session.navigator else { fail(.unavailable); return }

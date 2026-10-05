@@ -4,6 +4,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      ui_suite:
+        description: UI coverage to run
+        type: choice
+        options: [smoke, full]
+        default: smoke
 permissions:
   contents: read
 concurrency:
@@ -43,6 +49,7 @@ jobs:
     timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      UI_SUITE: ${{ github.event_name == 'workflow_dispatch' && inputs.ui_suite || 'smoke' }}
     steps:
       - uses: actions/checkout@v4
       - name: Tool versions and project generator
@@ -57,9 +64,14 @@ jobs:
       - name: Verify app-only signing settings and archive Release (unsigned)
         id: release-build
         run: ./scripts/test-archive-scoping.sh
-      - name: Run native unit and UI tests with real server
+      - name: Run native unit tests and selected UI suite with real server
         id: native-tests
-        run: ./scripts/test-ios.sh
+        shell: bash
+        run: |
+          case "$UI_SUITE" in
+            smoke|full) ./scripts/test-ios.sh "--$UI_SUITE" ;;
+            *) echo "Unsupported UI suite" >&2; exit 1 ;;
+          esac
       # Raw .xcresult bundles can contain unrelated simulator service credentials
       # in compressed system diagnostics. Never upload the bundles or diagnostics.
       - name: Record safe iOS check summary
@@ -69,7 +81,7 @@ jobs:
           TEST_RESULT: ${{ steps.native-tests.outcome }}
         shell: bash
         run: |
-          # Only these fixed status words reach the summary, never tool output.
+          # Only these fixed status/suite words reach the summary, never tool output.
           case "$RELEASE_RESULT" in
             success|failure|cancelled|skipped) ;;
             *) RELEASE_RESULT=unknown ;;
@@ -78,8 +90,13 @@ jobs:
             success|failure|cancelled|skipped) ;;
             *) TEST_RESULT=unknown ;;
           esac
+          case "$UI_SUITE" in
+            smoke|full) ;;
+            *) UI_SUITE=unknown ;;
+          esac
           {
             printf '## iOS verification\n\n'
+            printf -- '- UI suite: %s\n' "$UI_SUITE"
             printf -- '- Unsigned Release archive and app-only settings: %s\n' "$RELEASE_RESULT"
             printf -- '- Native unit and UI tests: %s\n' "$TEST_RESULT"
             printf '\nRaw Xcode result bundles and simulator diagnostics are intentionally not uploaded.\n'

@@ -88,8 +88,10 @@ python3 scripts/e2e.py
 On macOS, run the native app against a disposable real API and simulator:
 
 ```sh
-./scripts/test-ios.sh
+./scripts/test-ios.sh --smoke
 ```
+
+Use `--full` for the detailed UI journeys, or choose `full` when manually running the verification workflow. Ordinary pull requests and main pushes use two UI smoke cases while retaining all native unit, API and build checks.
 
 The script generates the Xcode project, builds/starts the API, selects an installed iPhone simulator and runs unit/UI tests. `SIMULATOR_UDID` selects a particular device. Explicit test flags provide deterministic GPS/place-search fixtures; ordinary app use requires genuine permission and selected Maps results. Screenshots are written under `ios/build/screenshots/` and attached to CI runs.
 

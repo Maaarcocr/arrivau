@@ -52,18 +52,43 @@ class ScreenshotExportTests(unittest.TestCase):
     def test_required_names_have_intentional_ui_captures(self):
         ui_root = pathlib.Path(__file__).resolve().parents[1] / "ios" / "UITests"
         source = "\n".join(path.read_text() for path in ui_root.glob("*.swift"))
-        for name in exporter.NAMES:
+        for name in dict.fromkeys(exporter.NAMES + exporter.SMOKE_NAMES):
             with self.subTest(name=name):
                 self.assertIn('"' + name + '"', source)
 
-    def test_ci_runs_full_suite_once_without_duplicate_login_probe(self):
+    def test_ci_defaults_to_smoke_and_keeps_full_suite_manual(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         ci = (root / ".github/workflows/ci.yml").read_text()
-        self.assertIn("run: ./scripts/test-ios.sh\n", ci)
+        self.assertIn("options: [smoke, full]", ci)
+        self.assertIn("default: smoke", ci)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.ui_suite || 'smoke'", ci)
+        self.assertIn('smoke|full) ./scripts/test-ios.sh "--$UI_SUITE"', ci)
         self.assertNotIn("--diagnose-login-first", ci)
         script = (root / "scripts/test-ios.sh").read_text()
         self.assertIn("--diagnose-login-first", script)
-        self.assertIn('run_native_tests\n', script)
+        self.assertIn("run_native_tests -only-testing:ArrivauTests -only-testing:ArrivauUITests/PilotSmokeUITests", script)
+        self.assertIn("-only-testing:ArrivauUITests/DeliveryFlowUITests", script)
+        self.assertIn("-only-testing:ArrivauUITests/InviteFlowUITests", script)
+        self.assertIn('--require-all --suite "$UI_SUITE"', script)
+
+    def test_smoke_export_requires_only_its_representative_screens(self):
+        for index, name in enumerate(exporter.SMOKE_NAMES):
+            self.add(name, f"0~smoke{index}")
+        manifest = exporter.export(self.result, self.root / "smoke", True, suite="smoke")
+        self.assertEqual(manifest["suite"], "smoke")
+        self.assertEqual(manifest["missing"], [])
+        self.assertEqual(len(manifest["screenshots"]), len(exporter.SMOKE_NAMES))
+        full = exporter.export(self.result, self.root / "full", suite="full")
+        self.assertIn("03-driver-route", full["missing"])
+
+    def test_incomplete_smoke_export_still_fails(self):
+        self.add(exporter.SMOKE_NAMES[0])
+        with self.assertRaisesRegex(ValueError, "Missing expected screenshots"):
+            exporter.export(self.result, self.root / "screens", True, suite="smoke")
+
+    def test_unknown_suite_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown screenshot suite"):
+            exporter.export(self.result, self.root / "screens", True, suite="other")
 
     def test_exports_only_named_screens_and_requires_all(self):
         for index, name in enumerate(exporter.NAMES):

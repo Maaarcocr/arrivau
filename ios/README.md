@@ -46,7 +46,7 @@ No remote API host is permitted by this demo. A physical device cannot reach the
 
 ## Tests
 
-From the repository root, prefer `./scripts/test-ios.sh` to start a fresh backend and run both native test targets. Or generate the project and run:
+From the repository root, use `./scripts/test-ios.sh --smoke` for all native unit tests plus two concise real-API UI smoke cases. Use `./scripts/test-ios.sh --full` (also the no-argument default) for all units and the detailed delivery/invite UI classes. Each mode starts a fresh disposable backend; their fixtures are intentionally not mixed. The verification workflow defaults to smoke on PR/main and offers a manual `ui_suite=full` choice. Or generate the project and run:
 
 ```sh
 xcodebuild test -project ios/Arrivau.xcodeproj \
@@ -58,7 +58,8 @@ xcodebuild test -project ios/Arrivau.xcodeproj \
 Use an installed simulator name. The UI suite requires a running API on `localhost:8080` and a fresh demo database, with Corriere 1 off shift and no work. The test scheme fixes `ARRIVAU_API_URL` to `http://127.0.0.1:8080`; change its test environment variable in `project.yml` and regenerate to use another loopback port. Do not run the UI suite against a database you care about: it saves restaurants, creates deliveries, updates readiness, starts/ends a shift, shares simulated coordinates, automatically assigns, picks up and completes work. There is no test-only reset endpoint.
 
 - `ArrivauTests`: snake_case/Unix-second contract decoding and encoding, coordinates/form validation, next-stop/state/ready-time guards, HTTPS and isolated-loopback URL policies, bearer/HTTP/error handling using URLProtocol, pilot session restore/expiry/revocation and pending-action recovery
-- `ArrivauUITests`: real API restaurant selection/creation, unknown readiness at order creation, cancelled and saved estimates, automatic assignment after Ready now, dispatcher-to-driver completion, pending-job reopening, and invalid remote-host rejection
+- `PilotSmokeUITests`: two automatic cases covering minimal login/invite entry and real role/shift/active-logout/next-stop actions; delivery setup uses the loopback demo API and its local Google Place fixtures
+- Detailed manual `ArrivauUITests`: real API restaurant selection/creation, unknown readiness at order creation, cancelled and saved estimates, automatic assignment after Ready now, dispatcher-to-driver completion, pending-job reopening, and invalid remote-host rejection
 - `ReadinessStoreTests`: exact revision/body/key retries after lost or cancelled readiness responses, double taps, role/session switches, stale response guards, conflict refresh requirements, automatic assignment response application, and durable team-scoped restaurant recovery with storage failures
 - `--uitesting` replaces location sensor input and address-search results in Debug; all API requests and writes remain real
 
@@ -98,7 +99,7 @@ The fixture uses `Pizzeria Pachino Demo`, the sample Pachino pickup/drop-off, un
 The local Xcode `.xcresult` bundle contains attachments and may also contain unrelated simulator-service credentials. Never upload raw result bundles or simulator diagnostics. GitHub Actions publishes only the allowlisted check-status summary and named app screenshots; the exporter includes successful screenshots rather than only failures. Keep other local failure diagnostics private.
 
 
-The same export also requires `dual-account-centrale` and `dual-account-corriere`, showing the same-account view controls. Team identity lives in Account. The screenshot-feedback pass additionally requires `ux-pilot-login`, `ux-invite-entry`, `ux-account`, `ux-new-shift`, `ux-driver-waiting` and `ux-active-logout`.
+The full export also requires `dual-account-centrale` and `dual-account-corriere`, showing the same-account view controls, plus the login/account/shift captures. Team identity lives in Account. Automatic smoke requires nine representative images: `ux-pilot-login`, `ux-invite-entry`, `ux-account`, `ux-shift-consent`, `ux-new-shift`, `ux-driver-waiting`, `ux-active-logout`, `dual-account-centrale` and `dual-account-corriere`. The exporter validates the selected suite and does not demand full-journey images from smoke.
 
 ## Minimal everyday flow
 
@@ -121,7 +122,7 @@ The UI suite keeps cancellation, repeated-submit and pending-job reopening cover
 
 ## One account, two views and one team
 
-The authenticated principal supplies `roles`, `team_id` and `team_name`. Missing `roles` falls back only to the legacy single `role`; an explicit empty/malformed capability list cannot grant that legacy privilege. Only accounts authorized for both functions see the Centrale / Corriere role buttons. The team label stays visible and cannot change membership. Dispatcher reads remain team-wide; the driver view filters work to the authenticated account's own driver ID and uses its own shift/route endpoints.
+The authenticated principal supplies `roles`, `team_id` and `team_name`. Missing `roles` falls back only to the legacy single `role`; an explicit empty/malformed capability list cannot grant that legacy privilege. Only accounts authorized for both functions see the Centrale / Corriere role buttons. The team label stays available in Account and cannot change membership. Dispatcher reads remain team-wide; the driver view filters work to the authenticated account's own driver ID and uses its own shift/route endpoints.
 
 The Debug demo has a separate **Centrale e corriere** account (`demo-dual`, driver `dual-1`, `demo-review` / `Squadra revisione`). It is isolated from the original demo team. Public demo tokens, chooser and sensor fixtures remain compiled out of Release. This fixture is not an App Review production credential; see [the review-team runbook](../docs/teams-and-review.md) for supervised server provisioning.
 
@@ -132,4 +133,4 @@ Additional tests cover same-session dual views, own-driver filtering, disabled h
 
 ## Screenshot-feedback UX checks
 
-See [the complete UX acceptance checklist](../docs/pilot-ux-checklist.md). Routine screens have concise Italian copy, an Account sheet for explicit signout and eligible account deletion, and a map-first driver route. The ordinary CI runs the full unit/UI suite once; `--diagnose-login-first` remains an optional manual diagnostic. Screenshot fixtures do not verify live Google tiles, live guidance or physical background GPS.
+See [the complete UX acceptance checklist](../docs/pilot-ux-checklist.md). Routine screens have concise Italian copy, an Account sheet for explicit signout and eligible account deletion, and a map-first driver route. Ordinary CI runs every native unit test and two UI smoke cases; long UI journeys remain available with `--full` or the workflow manual full-suite choice. `--diagnose-login-first` remains an optional manual diagnostic. Screenshot fixtures do not verify live Google tiles, live guidance or physical background GPS.

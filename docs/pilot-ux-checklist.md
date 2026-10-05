@@ -1,8 +1,9 @@
 # Pilot screenshot feedback: acceptance checklist
 
-One PR covers the complete screenshot-feedback pass. The required native suite
-exports the following synthetic-data screenshots; inspect the actual PNGs from
-the candidate commit before merging. Reference phone screenshots are not
+One PR covers the complete screenshot-feedback pass. Automatic CI runs all native
+unit tests and two concise UI smoke cases, exporting nine representative screens.
+The detailed UI journeys and their additional screenshots remain available
+manually. Inspect the actual candidate PNGs before merging. Reference phone screenshots are not
 published or committed.
 
 | Feedback | Implementation / verification |
@@ -24,14 +25,27 @@ published or committed.
 
 - Full Rust format, lint, unit, real HTTP, script and deployment-image checks
 - Unsigned Release archive and app-only signing checks
-- Full native unit/UI suite, including repeated role switches, active assignments,
-  stop/resume, account dismissal, canceled logout, invite entry/signup cancellation,
-  invalid links, HTTPS validation, repeated route expansion and interruptions
-- All required named screenshot exports, then actual image inspection
+- Every native unit test
+- Two UI smoke cases: minimal pilot login/invite entry; real dual-account role,
+  shift, active logout cancel/confirm, next-stop pickup/delivery and shift end
+- Nine smoke screenshots, including the start disclosure and logout alert
 
-Ordinary CI runs the full native suite once. The previously temporary duplicate
-focused login probe is no longer run first; its manual script option and failure
-diagnostics remain available. No required checks are skipped.
+The smoke fixture seeds one delivery through the existing loopback-only demo API,
+using its locally resolved Google Place IDs. Role, shift, logout, pickup and
+completion remain actual UI actions with real server-state assertions. The known
+logout interaction is not removed or bypassed by this split.
+
+For the longer restaurant/address, repeated navigation, interruption and invite
+journeys, run `./scripts/test-ios.sh --full` on a Mac with a fresh demo database,
+or select **full** in the verification workflow's manual **UI coverage to run**
+input. `--smoke` is the automatic CI selection. The no-argument local command
+still runs full coverage; the optional `--diagnose-login-first` remains manual.
+No new recurring automation or TestFlight upload is added.
+
+On the last detailed run, 244 unit tests took 7.5 seconds and nine UI cases took
+15 minutes 18 seconds (including two early-stopped logout cases). These are
+observed test-execution times, excluding runner queueing and builds; smoke runtime
+must be measured by its own CI run.
 
 ## Physical-device release checks
 

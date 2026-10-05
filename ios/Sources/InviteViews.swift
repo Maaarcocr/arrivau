@@ -39,6 +39,9 @@ struct InviteSignupView: View {
                     }
                 }
                 Section {
+                    PrivacyPolicyLink()
+                }
+                Section {
                     if store.inviteOutcomeUncertain {
                         Button("Torna ad Accedi") { password = ""; store.dismissInvite() }
                             .accessibilityIdentifier("invite_recover_login")

@@ -79,6 +79,19 @@ final class PilotSessionTests: XCTestCase {
                  createdAt: 1, pickedUpAt: nil, deliveredAt: nil)
     }
 
+    func testPrivacyPolicyUsesSelectedThenAuthenticatedOriginWithoutCredentials() async {
+        XCTAssertEqual(store.privacyPolicyURL?.absoluteString, endpoint + "/privacy")
+        store.apiURL = "https://user:password@other.example/?token=secret"
+        XCTAssertNil(store.privacyPolicyURL)
+        store.apiURL = endpoint
+        await store.login(username: "driver", password: "test-only-password")
+        XCTAssertNotNil(store.principal)
+        store.apiURL = "https://other.example"
+        XCTAssertEqual(store.privacyPolicyURL?.absoluteString, endpoint + "/privacy")
+        store.logout()
+        XCTAssertEqual(store.privacyPolicyURL?.absoluteString, "https://other.example/privacy")
+    }
+
     func testDualViewsUseOneSessionAndNeverStartShiftOrTrackingOnTheirOwn() async {
         useDualAccount()
         await store.login(username: "reviewer", password: "test-only-password")

@@ -15,6 +15,7 @@ fn rejected(env: &[(&str, &str)], expected: &str) {
         "ARRIVAU_ADDR",
         "ARRIVAU_ROUTING",
         "ARRIVAU_OSRM_DATASET",
+        "ARRIVAU_PRIVACY_NOTICE_PATH",
     ] {
         command.env_remove(key);
     }
@@ -91,6 +92,24 @@ fn binary_requires_explicit_mode_and_secure_ingress_configuration() {
             ("ARRIVAU_AUTH_CONFIG", "relative.json"),
         ],
         "absolute operator-managed",
+    );
+}
+
+#[test]
+fn privacy_notice_configuration_fails_before_database_creation_when_invalid() {
+    rejected(
+        &[
+            ("ARRIVAU_MODE", "demo"),
+            ("ARRIVAU_PRIVACY_NOTICE_PATH", "relative.html"),
+        ],
+        "ARRIVAU_PRIVACY_NOTICE_PATH must be an absolute path",
+    );
+    rejected(
+        &[
+            ("ARRIVAU_MODE", "demo"),
+            ("ARRIVAU_PRIVACY_NOTICE_PATH", "/nonexistent/arrivau-privacy.html"),
+        ],
+        "Cannot read ARRIVAU_PRIVACY_NOTICE_PATH",
     );
 }
 

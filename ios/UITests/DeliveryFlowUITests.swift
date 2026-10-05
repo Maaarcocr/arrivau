@@ -152,7 +152,7 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["switch_role"])
         tap(app.buttons["account_logout"])
         XCTAssertTrue(app.alerts["Uscire con un turno attivo?"].waitForExistence(timeout: 5))
-        tapModalButton(app.alerts.buttons["Annulla"])
+        tapModalButton(logoutAlert.buttons["Annulla"])
         XCTAssertTrue(app.buttons["account_logout"].exists)
         tap(app.buttons["close_account"])
         XCTAssertTrue(app.buttons["confirm_pickup"].waitForExistence(timeout: 5))
@@ -1031,8 +1031,8 @@ final class DeliveryFlowUITests: XCTestCase {
         tap(app.buttons["switch_role"])
         XCTAssertTrue(app.buttons["account_logout"].waitForExistence(timeout: 5))
         tap(app.buttons["account_logout"])
-        if app.alerts.buttons["Esci"].waitForExistence(timeout: 2) {
-            tapModalButton(app.alerts.buttons["Esci"], captureLogout: true)
+        if logoutAlert.buttons["Esci"].waitForExistence(timeout: 2) {
+            tapModalButton(logoutAlert.buttons["Esci"], captureLogout: true)
         }
         XCTAssertTrue(app.buttons["login_dispatcher"].waitForExistence(timeout: 5))
     }
@@ -1048,21 +1048,18 @@ final class DeliveryFlowUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
-    /// Modal transitions can expose an element before it is hittable. Never scroll a
-    /// confirmation dialog into view: a swipe can dismiss it before its only tap.
+    private var logoutAlert: XCUIElement {
+        app.alerts.matching(NSPredicate(
+            format: "label == %@ OR label == %@", "Uscire con un turno attivo?", "Uscire dall’account?"
+        )).firstMatch
+    }
+
+    /// Native alerts have their own hit-testing surface above Account. Use XCTest’s
+    /// direct alert tap, as in the HTTP-error tests; scrolling or pre-gating it with
+    /// a nested-sheet hittability snapshot can prevent the actual action altogether.
     private func tapModalButton(_ button: XCUIElement, captureLogout: Bool = false) {
-        let ready = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true AND hittable == true AND enabled == true"),
-            object: button
-        )
-        let outcome = XCTWaiter.wait(for: [ready], timeout: 10)
-        if outcome != .completed {
-            let screenshot = XCTAttachment(screenshot: app.screenshot())
-            screenshot.name = "ux-logout-presentation"
-            screenshot.lifetime = .keepAlways
-            add(screenshot)
-        }
-        XCTAssertEqual(outcome, .completed, "Logout confirmation must become actionable without scrolling")
+        XCTAssertTrue(button.waitForExistence(timeout: 10))
+        print("Logout alert button: enabled=\(button.isEnabled), hittable=\(button.isHittable), frame=\(button.frame)")
         if captureLogout {
             let screenshot = XCTAttachment(screenshot: app.screenshot())
             screenshot.name = "ux-active-logout"
@@ -1070,6 +1067,17 @@ final class DeliveryFlowUITests: XCTestCase {
             add(screenshot)
         }
         button.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !self.app.alerts.firstMatch.exists
+        }, object: nil)
+        let outcome = XCTWaiter.wait(for: [dismissed], timeout: 10)
+        if outcome != .completed {
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "ux-logout-presentation"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+        XCTAssertEqual(outcome, .completed, "One alert-button tap must dismiss the logout confirmation")
     }
 
     private func tap(_ element: XCUIElement, timeout: TimeInterval = 10) {

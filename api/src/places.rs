@@ -487,7 +487,17 @@ mod tests {
     fn failed_deletion_rolls_back_cache_invalidation() {
         let mut db = Connection::open_in_memory().unwrap();
         initialize(&db).unwrap();
-        save(&db, "team", "ChIJfixture", Coordinate { lat: 36.7, lng: 15.1 }, 1000).unwrap();
+        save(
+            &db,
+            "team",
+            "ChIJfixture",
+            Coordinate {
+                lat: 36.7,
+                lng: 15.1,
+            },
+            1000,
+        )
+        .unwrap();
         {
             let tx = db.transaction().unwrap();
             clear_team(&tx, "team").unwrap();
@@ -498,5 +508,4 @@ mod tests {
         assert_eq!(generation(&db, "team").unwrap(), 0);
         assert!(cached(&db, "team", "ChIJfixture").unwrap().is_some());
     }
-
 }

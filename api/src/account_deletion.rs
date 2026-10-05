@@ -780,29 +780,41 @@ mod tests {
     async fn deletion_clears_only_its_teams_transient_places_and_keeps_restaurants() {
         let (state, session, _dir, _) = setup();
         job(&state, true);
-        let coordinate = Coordinate { lat: 36.7, lng: 15.1 };
+        let coordinate = Coordinate {
+            lat: 36.7,
+            lng: 15.1,
+        };
         {
             let db = state.db().unwrap();
             crate::places::save(&db, TEAM, "ChIJhome", coordinate, 1000).unwrap();
             crate::places::failed(&db, TEAM, "ChIJfailed", 1000).unwrap();
             crate::places::save(&db, "other-team", "ChIJhome", coordinate, 1000).unwrap();
             crate::places::failed(&db, "other-team", "ChIJfailed", 1000).unwrap();
-            db::save_restaurant(&db, TEAM, &Restaurant {
-                id: "retained-restaurant".into(),
-                name: "User-owned restaurant name".into(),
-                address: "User-owned address".into(),
-                coordinate: Some(coordinate),
-                created_at: 1000,
-                google_place_id: Some("ChIJhome".into()),
-                coordinate_fetched_at: Some(1000),
-            }).unwrap();
+            db::save_restaurant(
+                &db,
+                TEAM,
+                &Restaurant {
+                    id: "retained-restaurant".into(),
+                    name: "User-owned restaurant name".into(),
+                    address: "User-owned address".into(),
+                    coordinate: Some(coordinate),
+                    created_at: 1000,
+                    google_place_id: Some("ChIJhome".into()),
+                    coordinate_fetched_at: Some(1000),
+                },
+            )
+            .unwrap();
         }
         let token = confirmation(&state, &session).await;
         remove(state.clone(), session, token).await.unwrap();
         let db = state.db().unwrap();
-        assert!(crate::places::cached(&db, TEAM, "ChIJhome").unwrap().is_none());
+        assert!(crate::places::cached(&db, TEAM, "ChIJhome")
+            .unwrap()
+            .is_none());
         assert!(!crate::places::retry_blocked(&db, TEAM, "ChIJfailed").unwrap());
-        assert!(crate::places::cached(&db, "other-team", "ChIJhome").unwrap().is_some());
+        assert!(crate::places::cached(&db, "other-team", "ChIJhome")
+            .unwrap()
+            .is_some());
         assert!(crate::places::retry_blocked(&db, "other-team", "ChIJfailed").unwrap());
         assert_eq!(crate::places::generation(&db, TEAM).unwrap(), 1);
         assert_eq!(crate::places::generation(&db, "other-team").unwrap(), 0);
@@ -828,7 +840,10 @@ mod tests {
                 if self.fail {
                     Err("synthetic provider outage".into())
                 } else {
-                    Ok(Coordinate { lat: 36.7, lng: 15.1 })
+                    Ok(Coordinate {
+                        lat: 36.7,
+                        lng: 15.1,
+                    })
                 }
             })
         }
@@ -844,13 +859,17 @@ mod tests {
                 release: tokio::sync::Semaphore::new(0),
                 fail,
             });
-            let state = state.with_places(crate::places::PlacesService::with_resolver(resolver.clone()));
+            let state = state.with_places(crate::places::PlacesService::with_resolver(
+                resolver.clone(),
+            ));
             let base = job(&state, true);
             {
                 let db = state.db().unwrap();
                 for index in 0..3 {
                     let mut job = base.clone();
-                    if index > 0 { job.id = format!("linked-{index}"); }
+                    if index > 0 {
+                        job.id = format!("linked-{index}");
+                    }
                     job.pickup_google_place_id = Some(format!("ChIJpickup{index}"));
                     job.dropoff_google_place_id = Some(format!("ChIJdropoff{index}"));
                     db::save_delivery(&db, TEAM, &job).unwrap();
@@ -860,11 +879,17 @@ mod tests {
             let task = {
                 let state = state.clone();
                 tokio::spawn(async move {
-                    state.refresh_places(TEAM, None, Some("invited-fixture")).await
+                    state
+                        .refresh_places(TEAM, None, Some("invited-fixture"))
+                        .await
                 })
             };
-            tokio::time::timeout(std::time::Duration::from_secs(5), resolver.started.notified())
-                .await.unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                resolver.started.notified(),
+            )
+            .await
+            .unwrap();
             remove(state.clone(), session, token).await.unwrap();
             resolver.release.add_permits(4);
             task.await.unwrap().unwrap();
@@ -873,13 +898,15 @@ mod tests {
             assert_eq!(resolver.calls.load(Ordering::SeqCst), 4);
             let db = state.db().unwrap();
             for table in ["google_place_cache", "google_place_failures"] {
-                let count: i64 = db.query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE team_id=?1"),
-                    [TEAM], |row| row.get(0),
-                ).unwrap();
+                let count: i64 = db
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE team_id=?1"),
+                        [TEAM],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
                 assert_eq!(count, 0, "late provider result restored {table}");
             }
         }
     }
-
 }

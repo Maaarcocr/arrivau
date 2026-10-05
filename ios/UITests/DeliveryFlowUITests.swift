@@ -952,7 +952,14 @@ final class DeliveryFlowUITests: XCTestCase {
     private func waitUntilAbsent(_ element: XCUIElement) {
         if !element.exists { return }
         let absent = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
-        XCTAssertEqual(XCTWaiter.wait(for: [absent], timeout: 10), .completed)
+        let outcome = XCTWaiter.wait(for: [absent], timeout: 10)
+        var details = "Element did not disappear"
+        if outcome != .completed, element.identifier == "address_search" {
+            let error = app.staticTexts["address_error"]
+            let result = app.buttons["address_result_0"]
+            details = "Address picker stayed open: busy=\(self.element("address_searching").exists), error=\(error.exists ? error.label : "none"), result exists=\(result.exists), result enabled=\(result.exists ? result.isEnabled : false)"
+        }
+        XCTAssertEqual(outcome, .completed, details)
     }
 
     private func assertSwitch(_ element: XCUIElement, value: String) {

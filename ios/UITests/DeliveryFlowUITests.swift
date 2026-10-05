@@ -897,15 +897,20 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func interruptAndResume() {
-        XCUIDevice.shared.press(.home)
-        // State updates are asynchronous. Observe either valid background state
-        // throughout the wait, rather than sampling suspended only at the end.
+        // CI has left Arrivau foreground after a Home-button event in this flow.
+        // Explicitly activating another installed app is synchronous and models
+        // the same real interruption without terminating Arrivau or changing settings.
+        let settings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settings.activate()
+        XCTAssertTrue(settings.wait(for: .runningForeground, timeout: 10))
+        // State updates are asynchronous; require a real background transition
+        // before resuming. Never treat the foreground state as a passing fallback.
         let background = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
             guard let application = object as? XCUIApplication else { return false }
             return application.state == .runningBackground || application.state == .runningBackgroundSuspended
         }, object: app)
         XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 5), .completed,
-                       "Home did not reach a background state; actual app state=\(app.state.rawValue)")
+                       "App switch did not reach a background state; Arrivau=\(app.state.rawValue), Settings=\(settings.state.rawValue)")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
     }

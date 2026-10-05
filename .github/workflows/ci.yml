@@ -54,14 +54,9 @@ jobs:
           xcrun simctl list devices available
       - name: Inspect manual TestFlight CLI compatibility (no credentials)
         run: ./scripts/check-testflight-tools.sh
-      - name: Build Release for a real iOS device (unsigned)
+      - name: Verify app-only signing settings and archive Release (unsigned)
         id: release-build
-        run: |
-          (cd ios && xcodegen generate)
-          xcodebuild build -project ios/Arrivau.xcodeproj -scheme Arrivau \
-            -configuration Release -destination 'generic/platform=iOS' \
-            -derivedDataPath ios/DerivedData-Release CODE_SIGNING_ALLOWED=NO
-          python3 scripts/verify-ios-bundle.py ios/DerivedData-Release/Build/Products/Release-iphoneos/Arrivau.app
+        run: ./scripts/test-archive-scoping.sh
       - name: Run native unit and UI tests with real server
         id: native-tests
         run: ./scripts/test-ios.sh
@@ -85,7 +80,7 @@ jobs:
           esac
           {
             printf '## iOS verification\n\n'
-            printf -- '- Unsigned Release build: %s\n' "$RELEASE_RESULT"
+            printf -- '- Unsigned Release archive and app-only settings: %s\n' "$RELEASE_RESULT"
             printf -- '- Native unit and UI tests: %s\n' "$TEST_RESULT"
             printf '\nRaw Xcode result bundles and simulator diagnostics are intentionally not uploaded.\n'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -96,4 +91,5 @@ jobs:
           name: arrivau-ios-screenshots
           path: ios/build/screenshots
           if-no-files-found: warn
+
 

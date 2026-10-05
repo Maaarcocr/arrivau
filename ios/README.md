@@ -8,6 +8,8 @@ For simulator development, launch the Debug app with `--demo`. `--uitesting` imp
 
 The icon and privacy manifest live in `Resources/`. Recheck privacy declarations against the deployed service and App Store Connect disclosures. The operator must verify a signed build on physical devices; neither an unsigned Release build nor simulator UI tests establish background GPS or TestFlight readiness.
 
+Both app Info.plists declare `ITSAppUsesNonExemptEncryption` as Boolean `false`: the current iOS app uses only Apple's system-provided HTTPS (`URLSession`) and Keychain, with no bundled third-party or custom cryptography. Following [Apple's export-compliance guidance](https://developer.apple.com/help/app-store-connect/manage-app-information/overview-of-export-compliance/), this carries the declaration into future builds so the same encryption questions do not need answering for each submission. Reassess it if the app's cryptography or dependencies change. `verify-ios-bundle.py` requires the Boolean value in the actual Release bundle, including the unsigned CI build, signed archive and exported IPA; already uploaded builds are unchanged.
+
 ## Invite-only corriere signup
 
 **Invited-account deletion:** invite-created drivers have an in-app deletion action with a current-password check, a server-provided linked/active-delivery preview and a final irreversible confirmation. The account, sessions, location and linked deliveries are removed together. Shared teams/restaurants remain. Operator-configured accounts do not expose self-deletion because their protected external auth file cannot be erased by this API. See [exact scope, retries and backup limits](../docs/invites.md#account-deletion).

@@ -58,12 +58,22 @@ account, key, permission grant, paid service or upload. An authorized owner must
    **ARRIVAU_GOOGLE_PLACES_SERVER_KEY** on the API server. Do not assume an inbound
    host IP is the outbound IP. Never use the iOS key on the server or embed the
    server key in the app. The server uses HTTPS only with redirects disabled.
-4. Deploy the matching API and build the matching iOS app, then freshly select
-   old Apple-derived restaurant/destination locations using original customer
-   records. Existing saved restaurants remain visible but require reselection;
-   legacy coordinate-only API records never receive Google IDs automatically.
-   Schema version 6 prevents an old server from reopening the migrated database.
-   Back up before upgrade and use the matching version for rollback planning.
+4. Use a coordinated maintenance window. Finish outstanding legacy deliveries,
+   stop new restaurant/order creation and restrict API access, then take a
+   consistent database/configuration backup using the pilot runbook. Deploy the
+   new API first while access remains restricted, install the matching new iOS
+   build on **every** pilot phone, configure both Google keys, and verify the
+   complete flow with synthetic work. Only then reopen access and resume work.
+   Freshly select legacy locations using original customer records; old saved
+   restaurants remain visible but cannot silently become Google places.
+   **Mixed versions are unsupported:** the old server rejects the new IDs and
+   omitted coordinates; the old iOS model cannot decode null Google coordinates
+   from the new server. This release has no minimum-client-version enforcement,
+   so the operator must verify all pilot devices before resuming. Existing legacy
+   reads/completion are not a promise that new creation works across versions.
+   Schema version 6 blocks binary downgrade. Restore the verified pre-upgrade
+   backup only before new writes resume; restoring it afterward would lose work
+   and requires an explicit data-recovery plan.
 5. Complete the actual signed-iPhone checks below, privacy disclosures and
    release classification review before distributing. The scripts do not upload
    or deploy automatically; a PR merge is not a live rollout.
@@ -99,32 +109,31 @@ preserving version, bundle ID and API-origin substitutions. It never echoes the
 key and rejects unsafe characters. Blank input generates a blank key; no-key CI
 does not need private configuration.
 
-For a local app build, pass only the generated **file path**:
+Do not pass `INFOPLIST_FILE`, the app bundle ID or provisioning settings globally
+to `xcodebuild`: they also affect Google SDK resource targets.
 
-```sh
-xcodebuild build -project ios/Arrivau.xcodeproj -scheme Arrivau \
-  -configuration Debug -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO \
-  INFOPLIST_FILE="$PWD/ios/Config/Navigation.local/Info-Debug.plist"
-```
-
-For Xcode Run, select the **Arrivau application target**, Build Settings →
+For a local Debug build or Xcode Run, select the **Arrivau application target**, Build Settings →
 Packaging → Info.plist File, and set the Debug value to
 `Config/Navigation.local/Info-Debug.plist`. This changes only the ignored
 generated project; XcodeGen regeneration resets it. Do not apply the override to
-test targets. Regenerate private configuration after tracked template changes.
+test or SDK resource targets. Build the resulting project normally without a
+global plist override. Regenerate private configuration after tracked template changes.
 Delete it when no longer needed; build products also contain the key.
 
 `scripts/archive-ios.sh` reads the optional environment variable, generates a
-temporary Release Info.plist, removes the key from Xcode's environment and passes
-only the plist path. An exit/signal trap deletes the temporary configuration.
+temporary Release Info.plist, removes the key from Xcode's environment and
+generates a private XcodeGen overlay containing **Arrivau-target-only** Release
+settings. Signing and plist overrides never apply to SDK or test targets. An
+exit/signal trap deletes the temporary configuration and generated project.
 It still validates the owner's pilot settings and **does not upload**. The
 resulting archive remains on the owner's machine.
 
 Manual TestFlight does the same inside its private temporary directory; existing
-cleanup removes configuration, signing files and build products. An unset secret
-produces a build with navigation unavailable. No push or PR triggers that
-workflow. Its main-only signing opt-in and separately selected upload action
+cleanup removes configuration, signing files and build products. Archive mode
+allows an unset key and produces a build with navigation unavailable; **upload
+mode requires a configured iOS key**. The fixed configured/missing status checks
+presence only, not API restrictions, billing, key validity or the server key.
+No push or PR triggers that workflow. Its main-only signing opt-in and separately selected upload action
 remain required. Adding a key neither authorizes publication nor satisfies the
 following release gates.
 
@@ -180,9 +189,13 @@ Before distributing a Google-enabled pilot or App Store build:
   and [Google Privacy Policy](https://policies.google.com/privacy). Preserve all
   attribution, SDK first-use terms/driver-awareness flow and access to SDK
   open-source licenses. Do not obscure navigation UI or required disclaimers.
-- Google supplies SDK privacy manifests. Generate and inspect Xcode's
-  **aggregate privacy report for the actual archive**, including all three SDKs.
-  Reconcile the app manifest, public privacy policy and App Store Connect answers
+- Google supplies SDK privacy manifests. The manual workflow validates the
+  actual signed archive and exported IPA against the reviewed 11.2.0 declarations
+  and retains only a sanitized JSON summary with manifest hashes and declared
+  categories/reasons. Missing, changed or inconsistent manifests block upload.
+  This is a declaration audit, not Apple's aggregate report or a runtime/privacy
+  certification. Where Xcode Organizer is available, also generate and inspect
+  its **Privacy Report** for the actual archive. Reconcile the app manifest, public privacy policy and App Store Connect answers
   with actual behavior; pre-SDK declarations are not proof no update is needed.
 - Re-evaluate Apple's export-compliance answers for the new binaries. This
   integration does not establish an encryption exemption for SDK 11.2.0. Its
@@ -212,8 +225,11 @@ python3 -m unittest discover -s scripts -p 'test_testflight_ci.py'
 ```
 
 The TestFlight tests use synthetic files and fake Apple tools. They verify
-private injection, absence of keys from arguments/output, empty-key support and
-cleanup, not real signing, Google authorization or paid routing.
+private injection, app-target scoping, absence of keys from arguments/output,
+archive-only empty-key support, missing-key upload rejection, manifest audit
+gates and cleanup. They do not validate real signing, Google authorization or
+paid routing. CI additionally archives the real app with synthetic configuration
+and verifies that Google resources contain none of the app's private settings.
 
 Run the full native unit/UI suite and unsigned Release build on macOS for the
 final commit. Then use a physical iPhone and a permitted test destination, with a

@@ -27,6 +27,12 @@ for tool in python3 xcodegen xcodebuild xcrun security codesign openssl ditto gr
   command -v "$tool" >/dev/null || fail "Missing required tool: $tool"
 done
 python3 "$HELPER" preflight "$ACTION" "$BUILD_NUMBER"
+if [[ -n "${ARRIVAU_GOOGLE_MAPS_API_KEY:-}" ]]; then
+  printf 'Google iOS key presence: configured (presence only, not API validation).\n'
+else
+  printf 'Google iOS key presence: missing.\n'
+  [[ "$ACTION" != upload ]] || fail 'Upload requires the owner-configured Google iOS key; archive mode remains available without it.'
+fi
 [[ "$(xcodebuild -version | head -n 1)" == 'Xcode 26.6' ]] || fail 'This workflow requires the pinned Xcode 26.6.'
 [[ "$(xcrun --sdk iphoneos --show-sdk-version)" == 26.* ]] || fail 'This workflow requires an iOS 26 SDK.'
 
@@ -94,17 +100,26 @@ IDENTITY="$(python3 "$HELPER" identity "$WORK/profile.plist" "$WORK/identities.t
 quiet security list-keychains -d user -s "$KEYCHAIN" "${ORIGINAL_KEYCHAINS[@]}"
 python3 "$HELPER" install-profile "$WORK" "$PROFILE_UUID"
 
+STAGE='preparing app-target-only archive settings'
+ARRIVAU_ARCHIVE_PROFILE_UUID="$PROFILE_UUID" ARRIVAU_ARCHIVE_IDENTITY="$IDENTITY" \
+  ARRIVAU_ARCHIVE_KEYCHAIN="$KEYCHAIN" python3 "$ROOT/scripts/archive-config.py" \
+  --manual-signing --build-number "$BUILD_NUMBER" --info-plist "$WORK/Info-Navigation.plist" \
+  --output "$WORK/project.json"
+quiet xcodegen generate --no-env --spec "$WORK/project.json" --project-root "$ROOT/ios" --project "$WORK"
+
 STAGE='archiving the manually signed Release app'
-(cd "$ROOT/ios" && quiet xcodegen generate)
-quiet xcodebuild archive \
-  -project "$ROOT/ios/Arrivau.xcodeproj" -scheme Arrivau -configuration Release \
+# Do not pass app settings globally: Swift Package resource targets cannot use
+# the app provisioning profile or Info.plist. SDK signing defaults stay intact.
+if xcodebuild archive \
+  -project "$WORK/Arrivau.xcodeproj" -scheme Arrivau -configuration Release \
   -destination 'generic/platform=iOS' -archivePath "$ARCHIVE" -derivedDataPath "$WORK/DerivedData" \
-  CODE_SIGN_STYLE=Manual CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES \
-  DEVELOPMENT_TEAM="$ARRIVAU_TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$ARRIVAU_BUNDLE_ID" \
-  PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" CODE_SIGN_IDENTITY="$IDENTITY" \
-  OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN" \
-  CURRENT_PROJECT_VERSION="$BUILD_NUMBER" ARRIVAU_API_URL="$ARRIVAU_API_URL" \
-  INFOPLIST_FILE="$WORK/Info-Navigation.plist"
+  > "$WORK/private-archive.log" 2>&1; then
+  :
+else
+  status=$?
+  python3 "$ROOT/scripts/archive-diagnostics.py" "$WORK/private-archive.log"
+  exit "$status"
+fi
 
 verify_app() {
   local app="$1" label="$2" actual_profile_uuid
@@ -145,6 +160,16 @@ quiet ditto -x -k "${IPAS[0]}" "$WORK/unpacked"
 APPS=("$WORK/unpacked/Payload/"*.app)
 [[ ${#APPS[@]} == 1 ]] || fail 'Expected exactly one application in the exported IPA.'
 verify_app "${APPS[0]}" export
+
+STAGE='auditing privacy manifests in the verified archive and IPA'
+# Only a validated allowlisted declaration summary survives private-work cleanup.
+# Raw manifests, profiles, identities, logs, IPAs and API keys are never retained.
+PRIVACY_AUDIT="$RUNNER_TEMP/arrivau-privacy-audit.$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT.json"
+python3 "$ROOT/scripts/audit-privacy-manifests.py" \
+  --archive-app "$ARCHIVE/Products/Applications/Arrivau.app" --ipa "${IPAS[0]}" \
+  --output "$PRIVACY_AUDIT" --commit-sha "$GITHUB_SHA" \
+  --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --build-number "$BUILD_NUMBER"
+printf 'ARRIVAU_TESTFLIGHT_PRIVACY_AUDIT=%s\n' "$PRIVACY_AUDIT" >> "$GITHUB_ENV"
 
 if [[ "$ACTION" == upload ]]; then
   STAGE='checking the installed App Store upload CLI'

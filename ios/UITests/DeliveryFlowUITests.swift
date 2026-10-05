@@ -834,9 +834,19 @@ final class DeliveryFlowUITests: XCTestCase {
     }
 
     private func selectAccountView(_ title: String) {
-        tap(app.segmentedControls["role_picker"].buttons[title])
+        let picker = app.segmentedControls["role_picker"]
+        // The containing SwiftUI Picker is disabled during mutations; wait for it
+        // as well as its native segment before sending the single user tap.
+        waitUntilEnabled(picker)
+        let segment = picker.buttons[title]
+        print("Role switch to \(title): app state=\(app.state.rawValue), picker enabled=\(picker.isEnabled), target selected=\(segment.isSelected), driver screen=\(element("driver_screen").exists), shift settings=\(app.buttons["shift_settings"].exists), create delivery=\(app.buttons["create_delivery"].exists)")
+        tap(segment)
         let destination = title == "Centrale" ? app.buttons["create_delivery"] : app.buttons["shift_settings"]
-        XCTAssertTrue(destination.waitForExistence(timeout: 15))
+        let arrived = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            segment.exists && segment.isSelected && destination.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [arrived], timeout: 15), .completed,
+                       "Role switch to \(title) failed; target selected=\(segment.exists && segment.isSelected), destination=\(destination.exists), driver screen=\(element("driver_screen").exists), picker enabled=\(picker.exists && picker.isEnabled), app state=\(app.state.rawValue)")
         assertDualAccountView(title)
     }
 
@@ -868,7 +878,14 @@ final class DeliveryFlowUITests: XCTestCase {
 
     private func interruptAndResume() {
         XCUIDevice.shared.press(.home)
-        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5) || app.state == .runningBackgroundSuspended)
+        // State updates are asynchronous. Observe either valid background state
+        // throughout the wait, rather than sampling suspended only at the end.
+        let background = XCTNSPredicateExpectation(predicate: NSPredicate { object, _ in
+            guard let application = object as? XCUIApplication else { return false }
+            return application.state == .runningBackground || application.state == .runningBackgroundSuspended
+        }, object: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [background], timeout: 5), .completed,
+                       "Home did not reach a background state; actual app state=\(app.state.rawValue)")
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
     }

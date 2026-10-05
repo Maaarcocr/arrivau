@@ -106,6 +106,7 @@ def make_app(app):
         "CFBundleIdentifier": os.environ["ARRIVAU_BUNDLE_ID"],
         "CFBundleVersion": os.environ["FAKE_BUILD_NUMBER"],
         "CFBundleShortVersionString": "0.2.0",
+        "ITSAppUsesNonExemptEncryption": False,
         "ARRIVAU_API_URL": os.environ["ARRIVAU_API_URL"],
         "CFBundleSupportedPlatforms": ["iPhoneOS"],
     }

@@ -1,0 +1,33 @@
+name: Resolve Google Places build inputs
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load pinned toolchain
+        run: rustup show
+      - name: Resolve HTTPS dependency while preserving the existing lock
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("api/Cargo.toml")
+          content = path.read_text()
+          old = 'reqwest = { version = "0.12", default-features = false, features = ["json"] }'
+          if old in content:
+              content = content.replace(old + "\n", "")
+              content = content.replace("[dependencies]\n", '[dependencies]\nreqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }\n')
+              path.write_text(content)
+          PY
+          cargo fetch --manifest-path api/Cargo.toml
+      - name: Export only the lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-places-cargo-lock
+          path: api/Cargo.lock
+          if-no-files-found: error

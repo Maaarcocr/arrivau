@@ -1,4 +1,4 @@
-//! Operator-managed accounts and invite-only drivers share team-bound session checks.
+//! Operator-managed and invite-created accounts share team-bound session checks.
 //! The configuration is authoritative on startup; account changes invalidate sessions.
 use crate::{
     error::{ApiError, ApiResult},
@@ -94,7 +94,7 @@ impl ProductionConfig {
                 || account
                     .roles
                     .as_ref()
-                    .is_some_and(|r| r.len() != roles.len())
+                    .is_some_and(|r| r.iter().collect::<HashSet<_>>().len() != r.len())
                 || (!account.role.is_empty() && !roles.contains(&account.role))
             {
                 return Err("Accounts need one or both unique driver/dispatcher capabilities; role must belong to roles".into());
@@ -410,12 +410,13 @@ pub(crate) fn configured_team(config: &ProductionConfig, team: &str) -> bool {
 }
 
 fn invited_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
+    let role: String = row.get(5)?;
     Ok(Account {
         id: row.get(0)?,
         username: row.get(1)?,
         name: row.get(2)?,
-        role: "driver".into(),
-        roles: Some(vec!["driver".into()]),
+        role: role.clone(),
+        roles: Some(vec![role]),
         team_id: Some(row.get(4)?),
         password_hash: row.get(3)?,
     })
@@ -429,7 +430,7 @@ pub(crate) fn account_by_id(
     if let Some(account) = config.accounts.iter().find(|a| a.id == id) {
         return Ok(Some(account.clone()));
     }
-    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.id=?1 AND i.disabled=0", [id], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
+    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id,i.role FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.id=?1 AND i.disabled=0 AND i.role IN ('driver','dispatcher')", [id], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
 }
 
 pub(crate) fn account_by_username(
@@ -440,7 +441,7 @@ pub(crate) fn account_by_username(
     if let Some(account) = config.accounts.iter().find(|a| a.username == username) {
         return Ok(Some(account.clone()));
     }
-    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.username=?1 AND i.disabled=0", [username], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
+    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id,i.role FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.username=?1 AND i.disabled=0 AND i.role IN ('driver','dispatcher')", [username], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
 }
 
 pub(crate) fn random_token() -> ApiResult<String> {

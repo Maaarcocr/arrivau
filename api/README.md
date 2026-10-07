@@ -82,7 +82,8 @@ Create a private, operator-managed JSON file outside the repository:
 ```
 
 The old configuration above remains supported: `fleet_id` is both the stable
-deployment ID and default/legacy team ID, and `role` grants one capability. To add
+deployment ID and default/legacy team ID. `driver` grants driver access;
+`dispatcher` includes both dispatcher and driver access. To add
 an isolated team, supply `teams: [{"id":"...","name":"..."}]` (including the
 original fleet ID) and `team_id` on its accounts. Accounts can use
 `roles: ["dispatcher", "driver"]` for both capabilities. An optional `role` must
@@ -110,7 +111,7 @@ Configure 1–100 accounts, including a dispatcher. IDs/usernames contain 1–64
 letters, digits, dot, underscore or hyphen, starting with a letter or digit;
 usernames must be lowercase. Session
 TTL must be 300–86400 seconds. Teams and capabilities come exclusively from this configuration.
-There is no open signup, role/team-selection endpoint, or password-reset endpoint. A configured account with dispatcher capability may issue one-use driver-only invitations for its own team; invited accounts are persisted in SQLite and must not be copied into this configuration. See [invitation operation and account deletion](../docs/invites.md).
+There is no open signup, role/team-selection endpoint, or password-reset endpoint. Trusted operators provision single-use invitations with an explicit configured team and driver/dispatcher role outside the HTTP API. Invited roles are persisted in SQLite and must not be copied into this configuration. See [invitation operation and account deletion](../docs/invites.md).
 
 ## Production-mode configuration
 
@@ -242,7 +243,7 @@ acceptance checklist; a passing Rust test suite does not establish those outcome
 
 ## Restaurants and automatic readiness dispatch
 
-New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version 5 also protects invite-account state and prevents unsafe older-backend rollback; take a verified backup before upgrading. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.
+New orders have unknown readiness and no driver selection. Save/select a restaurant, then report ready-now or ready-in-minutes later. The server assigns ready work immediately or from its bounded five-second timer, including least-bad timing fallbacks with visible warnings. See [readiness, resource bounds, compatibility and rollout](../docs/readiness-and-dispatch.md). Schema version 7 persists invited roles, preserves unused role-aware invitations and prevents unsafe older-backend rollback; take a verified backup before upgrading. Legacy role-less accounts default to driver without inferred dispatcher privileges; older issuer-bound invites are retained in an inert archive for separate operator review. The default remains approximate; configure the separately tested [embedded routing feature](../docs/embedded-routing.md) to use regional road times.
 
 
 ## Google Places server configuration

@@ -332,6 +332,19 @@ async fn login_limits_are_persistent_and_cover_unknown_accounts() {
 }
 
 #[test]
+fn explicit_dispatcher_role_list_accepts_implicit_driver_but_rejects_duplicates() {
+    let mut value = config();
+    value.accounts[0].roles = Some(vec!["dispatcher".into()]);
+    assert!(value.validate().is_ok());
+    value.accounts[0].roles = Some(vec!["dispatcher".into(), "dispatcher".into()]);
+    assert!(value.validate().is_err());
+    value.accounts[0].roles = Some(vec![]);
+    assert!(value.validate().is_err());
+    value.accounts[0].roles = Some(vec!["dispatcher".into(), "admin".into()]);
+    assert!(value.validate().is_err());
+}
+
+#[test]
 fn production_configuration_and_database_modes_fail_closed() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("pilot.db");
@@ -533,20 +546,26 @@ impl Server {
         self.issue_for_team(_dispatcher, name, "test-fleet").await
     }
     async fn issue_for_team(&self, _dispatcher: &str, name: &str, team: &str) -> Value {
+        self.issue_with_role(name, team, "driver")
+    }
+    fn issue_with_role(&self, name: &str, team: &str, role: &str) -> Value {
         let token: String = {
             use rand_core::RngCore;
             let mut bytes = [0u8; 32];
             rand_core::OsRng.fill_bytes(&mut bytes);
             bytes.iter().map(|b| format!("{:02x}", b)).collect()
         };
-        let hash = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()));
+        let hash = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes())
+        );
         let id = uuid::Uuid::new_v4().to_string();
         let db = rusqlite::Connection::open(&self.db_path).unwrap();
         db.execute(
             "INSERT INTO invites(id, token_hash, name, team_id, role, expires_at) VALUES (?1,?2,?3,?4,?5,?6)",
-            rusqlite::params![id, hash, name.trim(), team, "driver", NOW + 86400],
+            rusqlite::params![id, hash, name.trim(), team, role, NOW + 86400],
         ).unwrap();
-        serde_json::json!({"token": token, "role": "driver", "name": name.trim(), "expires_at": NOW + 86400})
+        serde_json::json!({"token": token, "role": role, "name": name.trim(), "expires_at": NOW + 86400})
     }
     async fn redeem(&self, token: &str, username: &str) -> reqwest::Response {
         self.client
@@ -633,8 +652,6 @@ async fn invite_signup_is_driver_only_atomic_private_and_survives_restart() {
         StatusCode::CREATED
     );
 }
-
-
 
 #[tokio::test]
 async fn concurrent_redemption_creates_exactly_one_identity_and_session() {
@@ -944,7 +961,6 @@ async fn expiry_between_admission_and_hashed_redemption_creates_nothing() {
     assert_eq!(sessions, 0);
 }
 
-
 #[tokio::test]
 async fn isolated_demo_cannot_issue_or_redeem_invites() {
     let dir = TempDir::new().unwrap();
@@ -996,7 +1012,6 @@ fn team_config() -> ProductionConfig {
     value.accounts.push(reviewer);
     value
 }
-
 
 #[tokio::test]
 async fn configured_team_removal_disables_dynamic_membership_without_moving_history() {
@@ -1065,3 +1080,363 @@ async fn configured_team_removal_disables_dynamic_membership_without_moving_hist
     assert_eq!(login["user"]["team_id"], "review");
 }
 
+#[tokio::test]
+async fn dispatcher_invite_preserves_capabilities_on_first_request_login_and_restart() {
+    for team in ["test-fleet", "review"] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("dispatcher.db");
+        let clock = clock();
+        let mut server = Server::start(&path, clock.clone(), team_config()).await;
+        let invite = server.issue_with_role("New dispatcher", team, "dispatcher");
+        let secret = invite["token"].as_str().unwrap();
+        let response = server.redeem(secret, "new.dispatcher").await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created: Value = response.json().await.unwrap();
+        let user = &created["user"];
+        assert_eq!(user["role"], "dispatcher");
+        assert_eq!(user["roles"], json!(["dispatcher", "driver"]));
+        assert_eq!(user["team_id"], team);
+        let token = created["token"].as_str().unwrap();
+        // This first authenticated request previously failed the fingerprint check.
+        let response = server.get("/v1/session", token).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap()["user"], *user);
+        let response = server.get("/v1/drivers", token).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let drivers: Vec<Value> = response.json().await.unwrap();
+        assert!(drivers
+            .iter()
+            .any(|d| d["id"] == user["id"] && d["active"] == false));
+        let foreign_driver = if team == "review" {
+            "driver-bob"
+        } else {
+            "review-dual"
+        };
+        assert!(drivers.iter().all(|d| d["id"] != foreign_driver));
+        assert_eq!(
+            server
+                .get(&format!("/v1/drivers/{foreign_driver}/route"), token)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        let response = server.login("new.dispatcher", PASSWORD).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let login: Value = response.json().await.unwrap();
+        assert_eq!(login["user"], *user);
+        server.close().await;
+        let server = Server::start(&path, clock, team_config()).await;
+        for bearer in [token, login["token"].as_str().unwrap()] {
+            let response = server.get("/v1/me", bearer).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.json::<Value>().await.unwrap(), *user);
+            assert_eq!(
+                server.get("/v1/drivers", bearer).await.status(),
+                StatusCode::OK
+            );
+        }
+        let login: Value = server
+            .login("new.dispatcher", PASSWORD)
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(login["user"], *user);
+        assert_eq!(
+            server.redeem(secret, "replayed").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[tokio::test]
+async fn unused_role_aware_invites_survive_upgrade_and_repeated_restarts() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("pending.db");
+    let clock = clock();
+    let mut server = Server::start(&path, clock.clone(), config()).await;
+    let invites = [
+        server.issue_with_role("Driver", "test-fleet", "driver"),
+        server.issue_with_role("Dispatcher", "test-fleet", "dispatcher"),
+    ];
+    server.close().await;
+    let db = rusqlite::Connection::open(&path).unwrap();
+    // Main's first role-aware invite schema still had role-less accounts at v6.
+    db.execute_batch("ALTER TABLE invited_accounts DROP COLUMN role; PRAGMA user_version=6;")
+        .unwrap();
+    let snapshot = || -> Vec<(String, String, String, String, String, i64)> {
+        db.prepare("SELECT id,token_hash,name,team_id,role,expires_at FROM invites ORDER BY id")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let before = snapshot();
+    for _ in 0..2 {
+        let mut server = Server::start(&path, clock.clone(), config()).await;
+        assert_eq!(snapshot(), before);
+        server.close().await;
+    }
+    let mut server = Server::start(&path, clock.clone(), config()).await;
+    for invite in invites {
+        let role = invite["role"].as_str().unwrap();
+        let response = server.redeem(invite["token"].as_str().unwrap(), role).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created: Value = response.json().await.unwrap();
+        assert_eq!(created["user"]["role"], role);
+        assert_eq!(
+            server
+                .get("/v1/me", created["token"].as_str().unwrap())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+    server.close().await;
+    let _server = Server::start(&path, clock, config()).await;
+    assert!(
+        snapshot().is_empty(),
+        "consumed invitations must not reappear"
+    );
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        7,
+        "v6 binaries must reject the upgraded database"
+    );
+}
+
+#[tokio::test]
+async fn legacy_roleless_accounts_default_to_driver_without_inferred_privileges() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("legacy-accounts.db");
+    let clock = clock();
+    let mut server = Server::start(&path, clock.clone(), config()).await;
+    let mut sessions = Vec::new();
+    for role in ["driver", "dispatcher"] {
+        let invite = server.issue_with_role("Dispatcher-looking legacy name", "test-fleet", role);
+        let response = server.redeem(invite["token"].as_str().unwrap(), role).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        sessions.push(response.json::<Value>().await.unwrap());
+    }
+    server.close().await;
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("ALTER TABLE invited_accounts DROP COLUMN role; PRAGMA user_version=6;")
+        .unwrap();
+    let server = Server::start(&path, clock, config()).await;
+    assert_eq!(
+        server
+            .get("/v1/me", sessions[0]["token"].as_str().unwrap())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .get("/v1/me", sessions[1]["token"].as_str().unwrap())
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for (username, old) in ["driver", "dispatcher"].into_iter().zip(sessions) {
+        let response = server.login(username, PASSWORD).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let login: Value = response.json().await.unwrap();
+        assert_eq!(login["user"]["id"], old["user"]["id"]);
+        assert_eq!(login["user"]["role"], "driver");
+        assert_eq!(login["user"]["roles"], json!(["driver"]));
+        assert_eq!(
+            server
+                .get("/v1/drivers", login["token"].as_str().unwrap())
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM invited_accounts WHERE role='driver'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn legacy_issuer_bound_invites_are_archived_without_becoming_redeemable() {
+    for version in [4, 5, 6] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy-invites.db");
+        let clock = clock();
+        let mut server = Server::start(&path, clock.clone(), config()).await;
+        server.close().await;
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("ALTER TABLE invited_accounts DROP COLUMN role;
+            DROP TABLE invites;
+            CREATE TABLE invites (
+                id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                issuer_id TEXT NOT NULL REFERENCES account_teams(account_id), issuer_fingerprint TEXT NOT NULL,
+                team_id TEXT NOT NULL, expires_at INTEGER NOT NULL
+            ); CREATE INDEX invites_team ON invites(team_id,expires_at);").unwrap();
+        db.execute_batch(&format!("PRAGMA user_version={version};"))
+            .unwrap();
+        let secret = "c".repeat(64);
+        let hash = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(secret.as_bytes())
+        );
+        db.execute("INSERT INTO invites VALUES ('legacy',?1,'Legacy recipient','dispatcher-alice','old-issuer-fingerprint','test-fleet',?2)", rusqlite::params![hash, NOW + 86400]).unwrap();
+        let mut server = Server::start(&path, clock.clone(), config()).await;
+        assert_eq!(
+            server.redeem(&secret, "legacy").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM invites", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let archived: (String, String, String, String, String, String, i64) = db
+            .query_row("SELECT * FROM legacy_invites_v7", [], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            archived,
+            (
+                "legacy".into(),
+                hash,
+                "Legacy recipient".into(),
+                "dispatcher-alice".into(),
+                "old-issuer-fingerprint".into(),
+                "test-fleet".into(),
+                NOW + 86400
+            )
+        );
+        let new_invite = server.issue_with_role("Replacement", "test-fleet", "driver");
+        server.close().await;
+        let server = Server::start(&path, clock, config()).await;
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM legacy_invites_v7", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            server.redeem(&secret, "legacy").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            server
+                .redeem(new_invite["token"].as_str().unwrap(), "replacement")
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+    }
+}
+
+#[tokio::test]
+async fn unknown_team_and_client_supplied_privileges_cannot_create_accounts() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("invalid-invites.db");
+    let server = Server::start(&path, clock(), config()).await;
+    let unknown = server.issue_with_role("Unconfigured", "unconfigured", "dispatcher");
+    assert_eq!(
+        server
+            .redeem(unknown["token"].as_str().unwrap(), "unknown")
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let invite = server.issue_with_role("Driver", "test-fleet", "driver");
+    let secret = invite["token"].as_str().unwrap();
+    for extra in [
+        json!({"role":"dispatcher"}),
+        json!({"roles":["driver","dispatcher"]}),
+        json!({"team_id":"review"}),
+    ] {
+        let mut input = json!({"token":secret,"username":"driver","password":PASSWORD});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert_eq!(
+            server
+                .client
+                .post(format!("{}/v1/invites/redeem", server.base))
+                .json(&input)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM invited_accounts", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM invites", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    let created: Value = server.redeem(secret, "driver").await.json().await.unwrap();
+    assert_eq!(created["user"]["role"], "driver");
+    assert_eq!(created["user"]["team_id"], "test-fleet");
+}
+
+#[tokio::test]
+async fn current_schema_missing_role_or_invite_metadata_fails_closed() {
+    for damage in [
+        "ALTER TABLE invited_accounts DROP COLUMN role;",
+        "DROP TABLE invites;",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("damaged.db");
+        let mut server = Server::start(&path, clock(), config()).await;
+        server.close().await;
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch(damage).unwrap();
+        let schema = || -> Vec<String> {
+            db.prepare("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before = schema();
+        assert!(AppState::open_production(&path, config()).is_err());
+        assert_eq!(schema(), before);
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+    }
+}

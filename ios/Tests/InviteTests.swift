@@ -464,6 +464,8 @@ final class InviteTests: XCTestCase {
         let first = await store.redeemInvite(username: "mario", password: password)
         XCTAssertFalse(first)
         XCTAssertTrue(store.inviteOutcomeUncertain)
+        XCTAssertNotNil(store.pendingInvite)
+        XCTAssertNotNil(store.inviteErrorMessage)
         backend.withState { $0.redemptionStatus = 201 }
         let repeated = await store.redeemInvite(username: "mario", password: password)
         XCTAssertFalse(repeated)
@@ -477,6 +479,9 @@ final class InviteTests: XCTestCase {
         backend.withState { $0.redemptionStatus = 409 }
         let conflict = await store.redeemInvite(username: "taken", password: password)
         XCTAssertFalse(conflict)
+        assertSignedOut(store)
+        XCTAssertNotNil(store.pendingInvite)
+        XCTAssertNil(storage.savedSession)
         XCTAssertFalse(store.inviteOutcomeUncertain)
         XCTAssertNotNil(store.inviteErrorMessage)
         XCTAssertEqual(redemptions().count, 1)
@@ -681,15 +686,15 @@ final class InviteTests: XCTestCase {
     }
 
     func testInvalidReturnedSessionNeverGrantsAuthority() async {
-        for invalidCase in 0..<4 {
+        for invalidCase in 0..<2 {
             let candidateStorage = InviteTestStorage()
             let candidate = makeStore(storage: candidateStorage)
             backend.withState {
                 $0.user = Principal(id: "invited-driver", name: "Corriere invitato",
-                                    role: invalidCase == 0 ? "admin" : (invalidCase == 3 ? "dispatcher" : "driver"),
+                                    role: "driver",
                                     teamId: InviteTestBackend.teamID, teamName: InviteTestBackend.teamName)
-                $0.emptyRedemptionToken = invalidCase == 1
-                $0.expiresAt = Int(Date().timeIntervalSince1970) + (invalidCase == 2 ? -1 : 3600)
+                $0.emptyRedemptionToken = invalidCase == 0
+                $0.expiresAt = Int(Date().timeIntervalSince1970) + (invalidCase == 1 ? -1 : 3600)
             }
             receiveInvite(in: candidate)
             let success = await candidate.redeemInvite(username: "mario", password: password)
@@ -731,37 +736,38 @@ final class InviteTests: XCTestCase {
         XCTAssertTrue(requests.allSatisfy { $0.authorization == "Bearer login-session" })
     }
 
-    func testRedemptionRejectsRoleEscalationEvenWhenServerRoleResolvesToDriver() async {
+    func testSuccessfulRedemptionTrustsServerRolesAndDismissesInvite() async throws {
         let returnedRoles: [(String, [String])] = [
-            ("driver", ["driver", "dispatcher"]),
-            ("dispatcher", ["driver"]),
-            ("admin", ["driver"]),
-            ("driver", ["driver", "driver"]),
-            ("driver", ["driver", "admin"]),
-            ("driver", [])
+            ("driver", ["driver"]),
+            ("dispatcher", ["dispatcher"]),
+            ("dispatcher", ["dispatcher", "driver"]),
+            ("operator", ["driver"])
         ]
         for (primary, capabilities) in returnedRoles {
             let candidateStorage = InviteTestStorage()
             let candidate = makeStore(storage: candidateStorage)
-            let user = Principal(id: "invited-driver", name: "Corriere invitato", role: primary, roles: capabilities,
+            let user = Principal(id: "invited-account", name: "Account invitato", role: primary, roles: capabilities,
                                  teamId: InviteTestBackend.teamID, teamName: InviteTestBackend.teamName)
-            if !capabilities.isEmpty { XCTAssertEqual(user.serverRole, .driver) }
             backend.withState { $0.user = user }
             receiveInvite(in: candidate)
             let redeemed = await candidate.redeemInvite(username: "mario", password: password)
-            XCTAssertFalse(redeemed, "Accepted primary role \(primary) with capabilities \(capabilities)")
-            XCTAssertNil(candidate.principal)
-            XCTAssertNil(candidate.role)
-            XCTAssertNil(candidateStorage.savedSession)
-            XCTAssertTrue(candidateStorage.sessionWrites.isEmpty)
-            XCTAssertTrue(candidateStorage.creationLoads.isEmpty)
-            XCTAssertTrue(candidateStorage.restaurantLoads.isEmpty)
+            XCTAssertTrue(redeemed, "Rejected server role \(primary) with capabilities \(capabilities)")
+            XCTAssertEqual(candidate.principal, user)
+            XCTAssertEqual(candidate.role, user.serverRole)
+            XCTAssertEqual(candidate.availableRoles, user.availableRoles)
+            XCTAssertNil(candidate.pendingInvite)
+            XCTAssertNil(candidate.inviteErrorMessage)
+            XCTAssertNil(candidate.errorMessage)
+            XCTAssertFalse(candidate.inviteOutcomeUncertain)
+            XCTAssertFalse(candidate.isRedeemingInvite)
+            XCTAssertFalse(candidate.isMutating)
             XCTAssertFalse(candidate.locationSharing)
-            XCTAssertNotNil(candidate.inviteErrorMessage)
+            let saved = try XCTUnwrap(candidateStorage.savedSession)
+            XCTAssertEqual(saved.token, "redeemed-session-\(redemptions().count)")
+            XCTAssertEqual(candidateStorage.sessionWrites.count, 1)
         }
         XCTAssertEqual(redemptions().count, returnedRoles.count)
-        XCTAssertEqual(backend.withState { $0.revokedTokens.count }, returnedRoles.count)
-        XCTAssertFalse(backend.withState { $0.requests.contains { $0.method == "GET" } })
+        XCTAssertTrue(backend.withState { $0.revokedTokens.isEmpty })
     }
 
     func testRedemptionRejectsMissingOrMalformedTeamDespiteDriverOnlyAuthority() async {

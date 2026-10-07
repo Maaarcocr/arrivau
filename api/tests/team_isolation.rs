@@ -486,7 +486,7 @@ async fn principals_expose_authoritative_team_and_capabilities_without_role_sele
             RED,
             "Red delivery team",
             "dispatcher",
-            vec!["dispatcher"],
+            vec!["dispatcher", "driver"],
         ),
         (
             "red-driver",
@@ -588,11 +588,11 @@ async fn team_reads_and_foreign_id_mutations_are_isolated_in_both_directions() {
 
     assert_ids(
         &server.get_json("/v1/drivers", &red_dispatch).await,
-        &["red-driver", "red-peer", "red-dual"],
+        &["red-dispatch", "red-driver", "red-peer", "red-dual"],
     );
     assert_ids(
         &server.get_json("/v1/drivers", &blue_dispatch).await,
-        &["blue-driver"],
+        &["blue-dispatch", "blue-driver"],
     );
     assert_ids(
         &server.get_json("/v1/deliveries", &red_dispatch).await,
@@ -626,7 +626,7 @@ async fn team_reads_and_foreign_id_mutations_are_isolated_in_both_directions() {
         &server
             .get_json("/v1/drivers?team_id=red-team", &blue_dispatch)
             .await,
-        &["blue-driver"],
+        &["blue-dispatch", "blue-driver"],
     );
 
     for (dispatch, driver, own_id, foreign_id, own, pending, foreign) in [
@@ -751,11 +751,11 @@ async fn team_reads_and_foreign_id_mutations_are_isolated_in_both_directions() {
         StatusCode::FORBIDDEN,
     )
     .await;
-    error(
-        server.get("/v1/route", &red_dispatch).await,
-        StatusCode::FORBIDDEN,
-    )
-    .await;
+    assert_route_jobs(
+        &server.get_json("/v1/route", &red_dispatch).await,
+        "red-dispatch",
+        &[],
+    );
     error(
         server
             .post("/v1/deliveries", &red_driver, job_input("Forbidden"), None)
@@ -1254,7 +1254,7 @@ async fn idempotency_is_team_and_account_scoped_and_durable_after_new_login() {
 }
 
 #[tokio::test]
-async fn removing_accounts_and_changing_capabilities_revokes_only_affected_sessions() {
+async fn removing_accounts_revokes_sessions_and_preserves_work_for_reassignment() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("teams.db");
     let mut server = Server::start(&path, config_json()).await;
@@ -1283,12 +1283,7 @@ async fn removing_accounts_and_changing_capabilities_revokes_only_affected_sessi
     server.close().await;
     let mut changed = config_json();
     let accounts = changed["accounts"].as_array_mut().unwrap();
-    accounts.retain(|account| account["id"] != "red-driver");
-    let downgraded = accounts
-        .iter_mut()
-        .find(|account| account["id"] == "red-dual")
-        .unwrap();
-    downgraded["roles"] = json!(["dispatcher"]);
+    accounts.retain(|account| account["id"] != "red-driver" && account["id"] != "red-dual");
     let server = Server::start(&path, changed).await;
     for token in [&red, &blue] {
         json_response(server.get("/v1/me", token).await, StatusCode::OK).await;
@@ -1302,34 +1297,9 @@ async fn removing_accounts_and_changing_capabilities_revokes_only_affected_sessi
         .await;
     }
     error(server.login("red-driver").await, StatusCode::UNAUTHORIZED).await;
-    let new_dual = server.token("red-dual").await;
-    let user = server.get_json("/v1/me", &new_dual).await;
-    assert_role_set(&user, &["dispatcher", "driver"]); // dispatcher implies driver
-    assert_eq!(user["team_id"], RED);
-    error(
-        server.get("/v1/shift", &new_dual).await,
-        StatusCode::FORBIDDEN,
-    )
-    .await;
-    error(
-        server.get("/v1/route", &new_dual).await,
-        StatusCode::FORBIDDEN,
-    )
-    .await;
-    error(
-        server.post("/v1/location", &new_dual, point(), None).await,
-        StatusCode::FORBIDDEN,
-    )
-    .await;
-    error(
-        server
-            .status(&new_dual, &dual_work, "picked_up", None)
-            .await,
-        StatusCode::FORBIDDEN,
-    )
-    .await;
+    error(server.login("red-dual").await, StatusCode::UNAUTHORIZED).await;
     let pending = server
-        .create(&new_dual, job_input("Dispatcher capability retained"), None)
+        .create(&red, job_input("Dispatcher capability retained"), None)
         .await;
     for driver_id in ["red-driver", "red-dual"] {
         let drivers = server.get_json("/v1/drivers", &red).await;
@@ -1547,7 +1517,7 @@ async fn legacy_single_team_config_defaults_and_sessions_survive_unchanged_resta
     assert_eq!(server.get_json("/v1/me", &driver).await, before);
     assert_ids(
         &server.get_json("/v1/drivers", &dispatcher).await,
-        &["red-driver"],
+        &["red-dispatch", "red-driver"],
     );
 }
 

@@ -16,6 +16,7 @@ use tempfile::TempDir;
 
 const NOW: i64 = 1_790_874_000;
 const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const DRIVER_TOKEN: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 const EXPIRED: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 struct TestClock;
 impl Clock for TestClock {
@@ -97,6 +98,18 @@ fn legacy(path: &Path) {
         )
         .unwrap();
     }
+    let driver_fingerprint =
+        digest(&serde_json::to_string(&("driver", "driver", "Driver", "driver", hash())).unwrap());
+    db.execute(
+        "INSERT INTO sessions VALUES (?1,'driver',?2,?3,?4)",
+        params![
+            digest(DRIVER_TOKEN),
+            driver_fingerprint,
+            NOW + 200,
+            NOW - 100
+        ],
+    )
+    .unwrap();
     db.execute("INSERT INTO sessions VALUES ('historical-only','removed-dispatcher','old-fingerprint',?1,?2)", params![NOW+200,NOW-100]).unwrap();
     let request: arrivau_api::model::NewDelivery =
         serde_json::from_value(create_request()).unwrap();
@@ -177,27 +190,61 @@ async fn serve(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
-async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_restarts() {
+async fn upgrade_preserves_driver_sessions_and_work_but_refreshes_expanded_dispatcher_access() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("upgrade.db");
     legacy(&path);
     let mut cfg = config_value();
     add_review(&mut cfg);
     let client = Client::new();
+    let mut dispatcher_token = None;
     for _ in 0..2 {
         let state =
             AppState::open_production_with_clock(&path, config(cfg.clone()), Arc::new(TestClock))
                 .unwrap();
         let (base, task) = serve(state).await;
+        // Dispatcher now includes driver access. Do not silently expand an old
+        // session; unchanged driver credentials remain valid across migration.
+        for (bearer, status) in [
+            (TOKEN, StatusCode::UNAUTHORIZED),
+            (DRIVER_TOKEN, StatusCode::OK),
+        ] {
+            assert_eq!(
+                client
+                    .get(format!("{base}/v1/me"))
+                    .bearer_auth(bearer)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                status
+            );
+        }
+        if dispatcher_token.is_none() {
+            let response = client
+                .post(format!("{base}/v1/session"))
+                .json(&json!({"username":"dispatch","password":"migration-only-fixture-password"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            dispatcher_token = Some(
+                response.json::<Value>().await.unwrap()["token"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        let token = dispatcher_token.as_ref().unwrap();
         let session = client
             .get(format!("{base}/v1/session"))
-            .bearer_auth(TOKEN)
+            .bearer_auth(token)
             .send()
             .await
             .unwrap();
         assert_eq!(session.status(), StatusCode::OK);
         let identity: Value = session.json().await.unwrap();
-        assert_eq!(identity["user"]["roles"], json!(["dispatcher"]));
+        assert_eq!(identity["user"]["roles"], json!(["dispatcher", "driver"]));
         assert_eq!(identity["user"]["team_id"], "pilot");
         for token in [EXPIRED, &"c".repeat(64)] {
             assert_eq!(
@@ -213,7 +260,7 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
         }
         let jobs: Value = client
             .get(format!("{base}/v1/deliveries"))
-            .bearer_auth(TOKEN)
+            .bearer_auth(token)
             .send()
             .await
             .unwrap()
@@ -229,7 +276,7 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
         );
         let route: Value = client
             .get(format!("{base}/v1/drivers/driver/route"))
-            .bearer_auth(TOKEN)
+            .bearer_auth(token)
             .send()
             .await
             .unwrap()
@@ -240,7 +287,7 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
         assert_eq!(route["stops"][0]["delivery_id"], "legacy-job");
         let replay = client
             .post(format!("{base}/v1/deliveries"))
-            .bearer_auth(TOKEN)
+            .bearer_auth(token)
             .header("Idempotency-Key", "legacy-create-key")
             .json(&create_request())
             .send()
@@ -302,7 +349,7 @@ async fn additive_upgrade_preserves_old_sessions_work_routes_and_retries_across_
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        6
+        7
     );
     for table in ["deliveries", "route_stops", "idempotency"] {
         assert_eq!(
@@ -446,13 +493,22 @@ fn database_constraints_reject_cross_team_links_and_team_relabelling() {
     add_review(&mut cfg);
     drop(AppState::open_production_with_clock(&path, config(cfg), Arc::new(TestClock)).unwrap());
     let db = Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE account_id='driver'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
     for sql in [
         "UPDATE deliveries SET driver_id='apple' WHERE id='legacy-job'",
         "UPDATE drivers SET team_id='review' WHERE id='driver'",
         "UPDATE deliveries SET team_id='review' WHERE id='legacy-job'",
         "UPDATE route_stops SET driver_id='apple' WHERE driver_id='driver'",
         "UPDATE route_stops SET team_id='review' WHERE driver_id='driver'",
-        "UPDATE sessions SET team_id='review' WHERE account_id='dispatch'",
+        "UPDATE sessions SET team_id='review' WHERE account_id='driver'",
         "UPDATE idempotency SET team_id='review' WHERE principal_id='dispatch'",
         "UPDATE account_teams SET team_id='review' WHERE account_id='dispatch'",
         "INSERT INTO route_stops(driver_id,position,delivery_id,kind,team_id) VALUES ('apple',0,'legacy-job','pickup','review')",

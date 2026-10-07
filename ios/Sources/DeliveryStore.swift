@@ -358,7 +358,7 @@ final class DeliveryStore: ObservableObject {
                 if !result.token.isEmpty { try? await api.revokeSession() }
                 return false
             }
-            guard !result.token.isEmpty, result.user.role == "driver", result.user.roles == ["driver"],
+            guard !result.token.isEmpty,
                   InviteTeamIdentity.isValid(id: result.user.teamId, name: result.user.teamName),
                   result.expiresAt > Int(Date().timeIntervalSince1970) else {
                 if !result.token.isEmpty { try? await api.revokeSession() }

@@ -27,11 +27,21 @@ fn invalid_invite() -> ApiError {
 
 fn valid_invite(
     db: &Connection,
+    config: &auth::ProductionConfig,
     hash: &str,
     now: i64,
 ) -> ApiResult<(String, String, String)> {
-    let row: Option<(String, String, String)> = db.query_row("SELECT name,team_id,role FROM invites WHERE token_hash=?1 AND expires_at>?2", params![hash,now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    row.ok_or_else(invalid_invite)
+    let row: Option<(String, String, String)> = db
+        .query_row(
+            "SELECT name,team_id,role FROM invites WHERE token_hash=?1 AND expires_at>?2",
+            params![hash, now],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    row.filter(|(_, team, role)| {
+        auth::configured_team(config, team) && matches!(role.as_str(), "driver" | "dispatcher")
+    })
+    .ok_or_else(invalid_invite)
 }
 fn username_available(
     db: &Connection,
@@ -80,7 +90,7 @@ pub(crate) async fn redeem(
         {
             return Err(invalid_invite());
         }
-        valid_invite(&db, &hash, now)?;
+        valid_invite(&db, config, &hash, now)?;
         if !auth::valid_identifier(&username) || input.username.len() > 64 {
             return Err(ApiError::bad_request("Username must be 1–64 ASCII letters, digits, dots, underscores or hyphens, starting with a letter or digit"));
         }
@@ -113,7 +123,7 @@ pub(crate) async fn redeem(
     let tx = db.transaction()?;
     // Recheck everything after expensive hashing, under the same transaction as consumption.
     let now = state.clock.now();
-    let (name, team, role) = valid_invite(&tx, &hash, now)?;
+    let (name, team, role) = valid_invite(&tx, config, &hash, now)?;
     username_available(&tx, config, &username)?;
     let count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM invited_accounts WHERE team_id=?1",
@@ -149,7 +159,7 @@ pub(crate) async fn redeem(
         "INSERT INTO account_teams(account_id,team_id) VALUES (?1,?2)",
         params![account.id, team],
     )?;
-    tx.execute("INSERT INTO invited_accounts(id,username,name,password_hash,team_id) VALUES (?1,?2,?3,?4,?5)", params![account.id,account.username,account.name,account.password_hash,team])?;
+    tx.execute("INSERT INTO invited_accounts(id,username,name,password_hash,team_id,role) VALUES (?1,?2,?3,?4,?5,?6)", params![account.id,account.username,account.name,account.password_hash,team,account.role])?;
     let driver = crate::model::Driver {
         id: account.id.clone(),
         name: account.name.clone(),

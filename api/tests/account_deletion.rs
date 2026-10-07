@@ -193,13 +193,18 @@ impl Fixture {
             rand_core::OsRng.fill_bytes(&mut bytes);
             bytes.iter().map(|b| format!("{:02x}", b)).collect()
         };
-        let hash = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()));
+        let hash = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes())
+        );
         let id = uuid::Uuid::new_v4().to_string();
         self.db.execute(
             "INSERT INTO invites(id, token_hash, name, team_id, role, expires_at) VALUES (?1,?2,?3,?4,?5,?6)",
             params![id, hash, format!("{username} fixture"), TEAM, "driver", 1790874000i64 + 86400],
         ).unwrap();
-        let response = self.server.client
+        let response = self
+            .server
+            .client
             .post(format!("{}/v1/invites/redeem", self.server.base))
             .json(&json!({"token":token,"username":username,"password":PASSWORD}))
             .send()
@@ -1171,7 +1176,7 @@ async fn invite_only_v4_upgrade_preserves_membership_and_sessions_before_hard_de
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 6,
+        version, 7,
         "older invite-only binaries must fail their >4 startup guard"
     );
     assert_eq!(

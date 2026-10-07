@@ -654,8 +654,6 @@ pub fn app(state: AppState) -> Router {
         .route("/account/deletion-preview", get(account_deletion::preview))
         .route("/account", axum::routing::delete(account_deletion::delete))
         .route("/drivers", get(list_drivers))
-        .route("/invites", post(invites::issue))
-        .route("/invites/{id}", axum::routing::delete(invites::revoke))
         .route(
             "/restaurants",
             get(list_restaurants).post(create_restaurant),

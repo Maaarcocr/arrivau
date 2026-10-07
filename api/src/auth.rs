@@ -168,6 +168,9 @@ impl Account {
             .roles
             .clone()
             .unwrap_or_else(|| vec![self.role.clone()]);
+        if roles.iter().any(|r| r == "dispatcher") && !roles.iter().any(|r| r == "driver") {
+            roles.push("driver".into());
+        }
         roles.sort();
         roles.dedup();
         roles
@@ -323,21 +326,6 @@ pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiR
             .is_some_and(|a| a.team_id(config) == team && a.fingerprint(config) == fingerprint)
         {
             tx.execute("DELETE FROM sessions WHERE token_hash=?1", [token])?;
-        }
-    }
-    // Removal/capability changes revoke pending secrets permanently, even if config is restored.
-    let invitations: Vec<(String, String, String, String)> = {
-        let mut stmt = tx.prepare("SELECT id,issuer_id,issuer_fingerprint,team_id FROM invites")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-        rows.collect::<Result<_, _>>()?
-    };
-    for (id, issuer, fingerprint, team) in invitations {
-        if !account_by_id(&tx, config, &issuer)?.is_some_and(|a| {
-            a.has_role("dispatcher")
-                && a.team_id(config) == team
-                && a.fingerprint(config) == fingerprint
-        }) {
-            tx.execute("DELETE FROM invites WHERE id=?1", [id])?;
         }
     }
     tx.commit()?;

@@ -114,27 +114,6 @@ impl Server {
             .unwrap()
             .to_owned()
     }
-    async fn invited(&self, dispatcher: &str, username: &str) -> Value {
-        let response = self
-            .client
-            .post(format!("{}/v1/invites", self.base))
-            .bearer_auth(dispatcher)
-            .json(&json!({"name":format!("{username} fixture")}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let invite: Value = response.json().await.unwrap();
-        let response = self
-            .client
-            .post(format!("{}/v1/invites/redeem", self.base))
-            .json(&json!({"token":invite["token"],"username":username,"password":PASSWORD}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        response.json().await.unwrap()
-    }
     async fn preview(&self, token: &str) -> Value {
         let response = self.get("/v1/account/deletion-preview", token).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -208,8 +187,26 @@ impl Fixture {
         }
     }
     async fn invited(&self, username: &str) -> Value {
-        let dispatcher = self.server.token("dispatcher").await;
-        self.server.invited(&dispatcher, username).await
+        let token: String = {
+            use rand_core::RngCore;
+            let mut bytes = [0u8; 32];
+            rand_core::OsRng.fill_bytes(&mut bytes);
+            bytes.iter().map(|b| format!("{:02x}", b)).collect()
+        };
+        let hash = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(token.as_bytes()));
+        let id = uuid::Uuid::new_v4().to_string();
+        self.db.execute(
+            "INSERT INTO invites(id, token_hash, name, team_id, role, expires_at) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id, hash, format!("{username} fixture"), TEAM, "driver", 1790874000i64 + 86400],
+        ).unwrap();
+        let response = self.server.client
+            .post(format!("{}/v1/invites/redeem", self.server.base))
+            .json(&json!({"token":token,"username":username,"password":PASSWORD}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        response.json().await.unwrap()
     }
     // For throttle tests, avoid repeatedly running signup's independent limiter.
     // Authentication itself still runs through the real HTTP/password path.

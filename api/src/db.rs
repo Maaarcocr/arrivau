@@ -157,14 +157,13 @@ pub fn open(
         name TEXT NOT NULL, password_hash TEXT NOT NULL, team_id TEXT NOT NULL,
         disabled INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0,1))
     ); CREATE INDEX IF NOT EXISTS invited_accounts_team ON invited_accounts(team_id,id);
-    CREATE TABLE IF NOT EXISTS invites (
+    DROP TABLE IF EXISTS invites;
+    CREATE TABLE invites (
         id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
-        issuer_id TEXT NOT NULL REFERENCES account_teams(account_id), issuer_fingerprint TEXT NOT NULL,
-        team_id TEXT NOT NULL, expires_at INTEGER NOT NULL
+        team_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('driver','dispatcher')),
+        expires_at INTEGER NOT NULL
     ); CREATE INDEX IF NOT EXISTS invites_team ON invites(team_id,expires_at);")?;
-    let inconsistent_invites: i64 = tx.query_row("SELECT
-        (SELECT COUNT(*) FROM invited_accounts i LEFT JOIN account_teams a ON a.account_id=i.id WHERE a.account_id IS NULL OR i.team_id<>a.team_id)
-        +(SELECT COUNT(*) FROM invites i LEFT JOIN account_teams a ON a.account_id=i.issuer_id WHERE a.account_id IS NULL OR i.team_id<>a.team_id)", [], |r| r.get(0))?;
+    let inconsistent_invites: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM invited_accounts i LEFT JOIN account_teams a ON a.account_id=i.id WHERE a.account_id IS NULL OR i.team_id<>a.team_id)", [], |r| r.get(0))?;
     if inconsistent_invites != 0 {
         return Err(ApiError::bad_request(
             "Persisted invitation team ownership is inconsistent",
@@ -201,7 +200,6 @@ pub fn open(
     // Defense in depth: even an unscoped future write cannot cross a persisted team boundary.
     for (table, guard) in [
         ("invited_accounts", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.id AND team_id=NEW.team_id)"),
-        ("invites", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.issuer_id AND team_id=NEW.team_id)"),
         ("drivers", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.id AND team_id=NEW.team_id)"),
         ("deliveries", "NEW.driver_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM drivers WHERE id=NEW.driver_id AND team_id=NEW.team_id)"),
         ("route_stops", "NOT EXISTS (SELECT 1 FROM drivers WHERE id=NEW.driver_id AND team_id=NEW.team_id) OR NOT EXISTS (SELECT 1 FROM deliveries WHERE id=NEW.delivery_id AND team_id=NEW.team_id)"),

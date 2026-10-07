@@ -227,10 +227,6 @@ fn erase(
     crate::places::clear_team(db, team)?;
     db.execute("DELETE FROM sessions WHERE account_id=?1", [&account.id])?;
     db.execute(
-        "DELETE FROM invites WHERE team_id=?1 AND issuer_id=?2",
-        params![team, account.id],
-    )?;
-    db.execute(
         "DELETE FROM drivers WHERE team_id=?1 AND id=?2",
         params![team, account.id],
     )?;
@@ -254,7 +250,6 @@ fn erase(
         AND NOT EXISTS(SELECT 1 FROM route_stops WHERE driver_id=?1)
         AND NOT EXISTS(SELECT 1 FROM invited_accounts WHERE id=?1)
         AND NOT EXISTS(SELECT 1 FROM sessions WHERE account_id=?1)
-        AND NOT EXISTS(SELECT 1 FROM invites WHERE issuer_id=?1)
         AND NOT EXISTS(SELECT 1 FROM idempotency WHERE principal_id=?1)",
         params![account.id, team],
     )?;

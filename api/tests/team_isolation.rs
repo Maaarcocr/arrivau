@@ -1304,7 +1304,7 @@ async fn removing_accounts_and_changing_capabilities_revokes_only_affected_sessi
     error(server.login("red-driver").await, StatusCode::UNAUTHORIZED).await;
     let new_dual = server.token("red-dual").await;
     let user = server.get_json("/v1/me", &new_dual).await;
-    assert_role_set(&user, &["dispatcher"]);
+    assert_role_set(&user, &["dispatcher", "driver"]); // dispatcher implies driver
     assert_eq!(user["team_id"], RED);
     error(
         server.get("/v1/shift", &new_dual).await,

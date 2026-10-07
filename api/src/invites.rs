@@ -1,98 +1,14 @@
-//! Invitation secrets are returned once, hashed at rest, and never placed in HTTP URLs.
-//! Only driver membership can be delegated; dispatchers remain operator-provisioned.
-use crate::{auth, json_body, path_id, ApiError, ApiResult, AppState, Authentication, Principal};
+//! Invitation secrets are hashed at rest. Invites are minted by operator script,
+//! never via the API; redemption creates the account with the invite's role.
+use crate::{auth, json_body, ApiError, ApiResult, AppState, Authentication};
 use axum::{
-    extract::{
-        rejection::{JsonRejection, PathRejection},
-        Path, State,
-    },
+    extract::{rejection::JsonRejection, State},
     http::StatusCode,
-    Extension, Json,
+    Json,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
-
-const INVITE_TTL: i64 = 24 * 60 * 60;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct IssueInput {
-    name: String,
-}
-
-pub(crate) async fn issue(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    body: Result<Json<IssueInput>, JsonRejection>,
-) -> ApiResult<(StatusCode, Json<Value>)> {
-    principal.require("dispatcher")?;
-    let Authentication::Production(config) = state.authentication.as_ref() else {
-        return Err(unavailable());
-    };
-    let input = json_body(body)?;
-    let name = input.name.trim();
-    if name.is_empty() || name.len() > 240 || name.chars().any(char::is_control) {
-        return Err(ApiError::bad_request(
-            "Invite name must contain 1–240 UTF-8 bytes without control characters",
-        ));
-    }
-    let token = auth::random_token()?;
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = state.clock.now();
-    let expires_at = now + INVITE_TTL;
-    let mut db = state.db()?;
-    auth::reserve_attempt(
-        &db,
-        &format!("invite-issue:{}", principal.id),
-        20,
-        3600,
-        now,
-    )?;
-    let tx = db.transaction()?;
-    let issuer = auth::account_by_id(&tx, config, &principal.id)?.ok_or_else(auth::unauthorized)?;
-    issuer.principal(config).require("dispatcher")?;
-    if issuer.team_id(config) != principal.team_id {
-        return Err(auth::unauthorized());
-    }
-    tx.execute("DELETE FROM invites WHERE expires_at<=?1", [now])?;
-    let pending: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM invites WHERE team_id=?1",
-        [&principal.team_id],
-        |r| r.get(0),
-    )?;
-    if pending >= 100 {
-        return Err(ApiError::conflict(
-            "Too many pending invites; revoke one or wait for expiry",
-        ));
-    }
-    tx.execute("INSERT INTO invites(id,token_hash,name,issuer_id,issuer_fingerprint,expires_at,team_id) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![id,auth::digest(&token),name,issuer.id,issuer.fingerprint(config),expires_at,principal.team_id])?;
-    tx.commit()?;
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            json!({"id":id,"token":token,"expires_at":expires_at,"name":name,"role":"driver","team_id":principal.team_id,"team_name":principal.team_name}),
-        ),
-    ))
-}
-
-pub(crate) async fn revoke(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    path: Result<Path<String>, PathRejection>,
-) -> ApiResult<StatusCode> {
-    principal.require("dispatcher")?;
-    if !matches!(state.authentication.as_ref(), Authentication::Production(_)) {
-        return Err(unavailable());
-    }
-    let id = path_id(path)?;
-    // Idempotent and secret-free; another team's dispatcher cannot revoke this invite.
-    state.db()?.execute(
-        "DELETE FROM invites WHERE id=?1 AND team_id=?2",
-        params![id, principal.team_id],
-    )?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -111,21 +27,11 @@ fn invalid_invite() -> ApiError {
 
 fn valid_invite(
     db: &Connection,
-    config: &auth::ProductionConfig,
     hash: &str,
     now: i64,
-) -> ApiResult<(String, String)> {
-    let row: Option<(String,String,String,String)> = db.query_row("SELECT name,issuer_id,issuer_fingerprint,team_id FROM invites WHERE token_hash=?1 AND expires_at>?2", params![hash,now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
-    let (name, issuer_id, fingerprint, team) = row.ok_or_else(invalid_invite)?;
-    let valid = auth::account_by_id(db, config, &issuer_id)?.is_some_and(|a| {
-        a.has_role("dispatcher")
-            && a.fingerprint(config) == fingerprint
-            && a.team_id(config) == team
-    });
-    if !valid {
-        return Err(invalid_invite());
-    }
-    Ok((name, team))
+) -> ApiResult<(String, String, String)> {
+    let row: Option<(String, String, String)> = db.query_row("SELECT name,team_id,role FROM invites WHERE token_hash=?1 AND expires_at>?2", params![hash,now], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    row.ok_or_else(invalid_invite)
 }
 fn username_available(
     db: &Connection,
@@ -174,7 +80,7 @@ pub(crate) async fn redeem(
         {
             return Err(invalid_invite());
         }
-        valid_invite(&db, config, &hash, now)?;
+        valid_invite(&db, &hash, now)?;
         if !auth::valid_identifier(&username) || input.username.len() > 64 {
             return Err(ApiError::bad_request("Username must be 1–64 ASCII letters, digits, dots, underscores or hyphens, starting with a letter or digit"));
         }
@@ -207,7 +113,7 @@ pub(crate) async fn redeem(
     let tx = db.transaction()?;
     // Recheck everything after expensive hashing, under the same transaction as consumption.
     let now = state.clock.now();
-    let (name, team) = valid_invite(&tx, config, &hash, now)?;
+    let (name, team, role) = valid_invite(&tx, &hash, now)?;
     username_available(&tx, config, &username)?;
     let count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM invited_accounts WHERE team_id=?1",
@@ -223,8 +129,8 @@ pub(crate) async fn redeem(
         id: format!("invited-{}", uuid::Uuid::new_v4()),
         username,
         name,
-        role: "driver".into(),
-        roles: Some(vec!["driver".into()]),
+        role: role.clone(),
+        roles: Some(vec![role.clone()]),
         team_id: Some(team.clone()),
         password_hash,
     };

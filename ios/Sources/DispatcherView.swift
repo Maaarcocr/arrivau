@@ -593,7 +593,6 @@ private struct NewRestaurantView: View {
                 Button { searching = true } label: {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(place?.address ?? "Scegli l’indirizzo del ristorante")
-                        if let place { Text(place.name).font(.caption).foregroundStyle(.secondary) }
                     }
                 }.disabled(store.pendingRestaurant != nil).accessibilityIdentifier("restaurant_address")
                 TextField("Nome del ristorante", text: $name)
@@ -623,7 +622,9 @@ private struct NewRestaurantView: View {
             }
             .sheet(isPresented: $searching) {
                 PlaceSearchView(title: "Ristorante", isUITesting: store.isUITesting) { selected in
-                    place = selected; name = selected.name
+                    // The picker carries address-search text, not the restaurant's name.
+                    // Keep the independently entered name when selecting or changing an address.
+                    place = selected
                 }
             }
         }.interactiveDismissDisabled(submitting || store.isMutating)

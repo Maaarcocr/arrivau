@@ -1,8 +1,8 @@
 import XCTest
 
 /// Two short native checks for ordinary CI. Run against a fresh, disposable demo API.
-/// Login, shift, logout and next-stop actions use the real UI and HTTP backend;
-/// fixture HTTP calls replace the longer restaurant/address/readiness form journey.
+/// Login, restaurant naming, shift, logout and next-stop actions use the real UI
+/// and HTTP backend; fixture HTTP calls replace the longer delivery/readiness journey.
 final class PilotSmokeUITests: XCTestCase {
     private var app: XCUIApplication!
     private var apiURL: URL!
@@ -85,6 +85,7 @@ final class PilotSmokeUITests: XCTestCase {
 
         launch("--uitesting", endpoint: apiURL.absoluteString)
         loginDualAccount()
+        let restaurant = try createRestaurantPreservingName()
         selectRole("driver")
         waitForLabel(app.buttons["shift_settings"], containing: "Fuori turno")
         XCTAssertEqual(app.buttons["toggle_shift"].label, "Avvia turno e condividi posizione")
@@ -106,7 +107,7 @@ final class PilotSmokeUITests: XCTestCase {
         waitUntilAbsent(app.buttons["close_shift_settings"])
         capture("ux-driver-waiting", showing: app.staticTexts["empty_route"])
 
-        let delivery = try seedAssignedDelivery()
+        let delivery = try seedAssignedDelivery(restaurant: restaurant)
         selectRole("dispatcher")
         waitForLabel(app.buttons["delivery_\(delivery.id)"], containing: "Assegnata")
         XCTAssertTrue(element("account_location_sharing").exists,
@@ -188,6 +189,70 @@ final class PilotSmokeUITests: XCTestCase {
         XCTAssertFalse(ended.active)
         let finalIdentity: Principal = try read("v1/me")
         XCTAssertEqual(finalIdentity, identity)
+    }
+
+    private func createRestaurantPreservingName() throws -> Restaurant {
+        tap(app.buttons["create_delivery"])
+        tap(app.buttons["choose_pickup"])
+        tap(app.buttons["add_restaurant"])
+        let name = app.textFields["restaurant_name"]
+        tap(name)
+        name.typeText("Nome iniziale")
+        chooseRestaurantAddress(query: "Garibaldi", expected: "Via Garibaldi 8")
+        XCTAssertEqual(name.value as? String, "Nome iniziale",
+                       "Selecting the first address must preserve an already entered name")
+
+        tap(name)
+        name.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Nome iniziale".count) + shopName)
+        chooseRestaurantAddress(query: "Pizzeria", expected: "Pizzeria Pachino Demo")
+        XCTAssertEqual(name.value as? String, shopName,
+                       "Changing address must preserve the latest manually edited name")
+        let address = app.buttons["restaurant_address"].label
+        XCTAssertTrue(address.contains("Via Roma 1, Pachino"))
+        tap(app.buttons["restaurant_address"])
+        tap(app.buttons["cancel_address"])
+        waitUntilAbsent(app.textFields["address_search"])
+        XCTAssertEqual(name.value as? String, shopName)
+        XCTAssertEqual(app.buttons["restaurant_address"].label, address)
+
+        tap(app.buttons["save_restaurant"])
+        waitUntilAbsent(app.buttons["cancel_restaurant_picker"])
+        waitForLabel(app.buttons["choose_pickup"], containing: shopName)
+        let saved: [Restaurant] = try read("v1/restaurants")
+        XCTAssertEqual(saved.count, 1)
+        let restaurant = try XCTUnwrap(saved.first)
+        XCTAssertEqual(restaurant.name, shopName)
+        XCTAssertEqual(restaurant.address, "Via Roma 1, Pachino")
+        XCTAssertEqual(restaurant.googlePlaceId, pickupPlaceID)
+        tap(app.buttons["cancel_delivery"])
+
+        // A fresh app session must load the same independent name/address from
+        // the real API, not merely display the form's local state after saving.
+        app.terminate()
+        launch("--uitesting", endpoint: apiURL.absoluteString)
+        loginDualAccount()
+        tap(app.buttons["create_delivery"])
+        tap(app.buttons["choose_pickup"])
+        let row = app.buttons["restaurant_\(restaurant.id)"]
+        waitForLabel(row, containing: shopName)
+        XCTAssertTrue(row.label.contains(restaurant.address))
+        XCTAssertEqual(app.buttons.matching(identifier: "restaurant_\(restaurant.id)").count, 1)
+        tap(row)
+        waitUntilAbsent(app.buttons["cancel_restaurant_picker"])
+        waitForLabel(app.buttons["choose_pickup"], containing: shopName)
+        tap(app.buttons["cancel_delivery"])
+        return restaurant
+    }
+
+    private func chooseRestaurantAddress(query: String, expected: String) {
+        tap(app.buttons["restaurant_address"])
+        let search = app.textFields["address_search"]
+        tap(search)
+        search.typeText(query)
+        let result = app.buttons["address_result_0"]
+        waitForLabel(result, containing: expected)
+        tap(result)
+        waitUntilAbsent(search)
     }
 
     private func launch(_ mode: String, endpoint: String) {
@@ -291,6 +356,8 @@ final class PilotSmokeUITests: XCTestCase {
     }
     private struct Delivery: Decodable {
         let id: String
+        let shopName: String
+        let pickupAddress: String
         let status: String
         let driverId: String?
         let readinessState: String
@@ -299,6 +366,7 @@ final class PilotSmokeUITests: XCTestCase {
         let dropoffGooglePlaceId: String
     }
     private struct NewDelivery: Encodable {
+        let restaurantId: String
         let shopName: String
         let pickupAddress: String
         let pickupGooglePlaceId: String
@@ -309,23 +377,31 @@ final class PilotSmokeUITests: XCTestCase {
         let maxRideSeconds = 1800
     }
     private struct Readiness: Encodable { let readyInMinutes = 0; let expectedRevision: Int }
+    private struct Restaurant: Decodable {
+        let id: String
+        let name: String
+        let address: String
+        let googlePlaceId: String
+    }
     private struct Route: Decodable {
         struct Stop: Decodable { let deliveryId: String; let kind: String; let googlePlaceId: String }
         let driverId: String
         let stops: [Stop]
     }
 
-    private func seedAssignedDelivery() throws -> Delivery {
+    private func seedAssignedDelivery(restaurant: Restaurant) throws -> Delivery {
         // Existing demo-only Place IDs match the UI address-search fixtures. The
         // API resolves them locally without Google calls (api/src/places.rs).
         // Omitting ready_at is the supported new-client contract: unknown until ready.
-        let body = NewDelivery(shopName: shopName,
-            pickupAddress: "Via Roma 1, Pachino (fixture)", pickupGooglePlaceId: pickupPlaceID,
+        let body = NewDelivery(restaurantId: restaurant.id, shopName: restaurant.name,
+            pickupAddress: restaurant.address, pickupGooglePlaceId: pickupPlaceID,
             dropoffAddress: "Via Garibaldi 8, Pachino (fixture)", dropoffGooglePlaceId: dropoffPlaceID,
             deadlineAt: Int(Date().timeIntervalSince1970) + 3600)
         let created: Delivery = try post("v1/deliveries", body: body, expectedStatus: 201)
         XCTAssertEqual(created.status, "pending")
         XCTAssertEqual(created.readinessState, "unknown")
+        XCTAssertEqual(created.shopName, shopName)
+        XCTAssertEqual(created.pickupAddress, restaurant.address)
         XCTAssertEqual(created.pickupGooglePlaceId, pickupPlaceID)
         XCTAssertEqual(created.dropoffGooglePlaceId, dropoffPlaceID)
         let assigned: Delivery = try post("v1/deliveries/\(created.id)/readiness",

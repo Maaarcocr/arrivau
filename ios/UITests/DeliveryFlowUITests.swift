@@ -721,7 +721,9 @@ final class DeliveryFlowUITests: XCTestCase {
             waitForLabelContaining(app.buttons["address_result_0"], expected)
             tap(app.buttons["address_result_0"])
             waitUntilAbsent(app.textFields["address_search"])
-            XCTAssertEqual(app.textFields["restaurant_name"].value as? String, expected)
+            XCTAssertFalse(app.buttons["save_restaurant"].isEnabled,
+                           "Selecting an address first must still require an explicit restaurant name")
+            replace(app.textFields["restaurant_name"], with: expected)
             let save = app.buttons["save_restaurant"]
             reveal(save)
             save.doubleTap()

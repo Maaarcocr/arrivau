@@ -1560,3 +1560,66 @@ fn invalid_team_references_and_capabilities_fail_closed() {
         }
     }
 }
+
+#[tokio::test]
+async fn delivery_deletion_is_dispatcher_only_and_never_crosses_teams() {
+    let dir = TempDir::new().unwrap();
+    let server = Server::start(&dir.path().join("delete-team.db"), config_json()).await;
+    let red = server.token("red-dispatch").await;
+    let blue = server.token("blue-dispatch").await;
+    let driver = server.token("red-driver").await;
+    let dual = server.token("red-dual").await;
+    let job = server
+        .create(&red, job_input("Delete fixture"), Some("delete-team-key"))
+        .await;
+    let endpoint = format!("/v1/deliveries/{}", job["id"].as_str().unwrap());
+    error(
+        server
+            .request(Method::DELETE, &endpoint, Some(&driver), None, None)
+            .await,
+        StatusCode::FORBIDDEN,
+    )
+    .await;
+    // Absence and another team's ID produce the same response, with no mutation.
+    assert_eq!(
+        server
+            .request(Method::DELETE, &endpoint, Some(&blue), None, None)
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        server
+            .get_json("/v1/deliveries", &red)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        server
+            .request(Method::DELETE, &endpoint, Some(&dual), None, None)
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(server
+        .get_json("/v1/deliveries", &red)
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
+    error(
+        server
+            .post(
+                "/v1/deliveries",
+                &red,
+                job_input("Delete fixture"),
+                Some("delete-team-key"),
+            )
+            .await,
+        StatusCode::CONFLICT,
+    )
+    .await;
+}

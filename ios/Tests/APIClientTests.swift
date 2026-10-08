@@ -18,6 +18,25 @@ final class APIClientTests: XCTestCase {
     private var client: APIClient {
         APIClient(baseURL: URL(string: "http://localhost:8080")!, token: "demo-driver-1", session: session)
     }
+    func testDeleteDeliveryRequiresNoContentAndUsesDelete() async throws {
+        StubURLProtocol.handler = { request in
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.url?.path, "/v1/deliveries/delivery-1")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer demo-driver-1")
+            XCTAssertNil(request.httpBody)
+            return (204, Data())
+        }
+        try await client.deleteDelivery(deliveryId: "delivery-1")
+    }
+    func testDeleteDeliveryDoesNotTreatUnexpectedSuccessAsConfirmation() async throws {
+        StubURLProtocol.handler = { _ in (200, Data()) }
+        do {
+            try await client.deleteDelivery(deliveryId: "delivery-1")
+            XCTFail("Unexpected HTTP status must not confirm deletion")
+        } catch let error as APIError {
+            XCTAssertTrue(error.mutationOutcomeUncertain)
+        }
+    }
     func testReadsOwnShiftWithBearerToken() async throws {
         StubURLProtocol.handler = { request in
             XCTAssertEqual(request.url?.path, "/v1/shift")

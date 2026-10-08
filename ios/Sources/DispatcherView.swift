@@ -248,7 +248,7 @@ struct DeliveryDetailView: View {
         }
         .navigationTitle("Consegna")
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog("Eliminare definitivamente questa consegna?", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+        .alert("Eliminare definitivamente questa consegna?", isPresented: $showingDeleteConfirmation) {
             Button("Elimina definitivamente", role: .destructive) {
                 Task {
                     if await store.deleteDelivery(deliveryId: deliveryId) { dismiss() }

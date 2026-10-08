@@ -45,7 +45,7 @@ fn valid_invite(
 }
 fn username_available(
     db: &Connection,
-    config: &auth::ProductionConfig,
+    _config: &auth::ProductionConfig,
     username: &str,
 ) -> ApiResult<()> {
     let used: bool = db.query_row(
@@ -160,7 +160,7 @@ pub(crate) async fn redeem(
         "INSERT INTO account_teams(account_id,team_id) VALUES (?1,?2)",
         params![account.id, team],
     )?;
-    tx.execute("INSERT INTO accounts(id,username,name,password_hash,team_id,role,deletable,roles) VALUES (?1,?2,?3,?4,?5,?6,1,?7)", params![account.id,account.username,account.name,account.password_hash,team,account.role,serde_json::to_string(&[account.role.clone()]).map_err(ApiError::internal)?])?;
+    tx.execute("INSERT INTO accounts(id,username,name,password_hash,team_id,role,deletable,roles) VALUES (?1,?2,?3,?4,?5,?6,1,?7)", params![account.id,account.username,account.name,account.password_hash,team,account.role,serde_json::to_string(std::slice::from_ref(&account.role)).map_err(ApiError::internal)?])?;
     let driver = crate::model::Driver {
         id: account.id.clone(),
         name: account.name.clone(),

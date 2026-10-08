@@ -9,7 +9,7 @@ fn rejected(env: &[(&str, &str)], expected: &str) {
         "ARRIVAU_MODE",
         "ARRIVAU_DEMO",
         "ARRIVAU_DB_PATH",
-        "ARRIVAU_AUTH_CONFIG",
+        "ARRIVAU_APP_CONFIG",
         "ARRIVAU_TLS_PROXY",
         "ARRIVAU_ALLOW_NON_LOOPBACK",
         "ARRIVAU_ADDR",
@@ -50,10 +50,7 @@ fn binary_requires_explicit_mode_and_secure_ingress_configuration() {
         "Non-loopback requires production",
     );
     rejected(
-        &[
-            ("ARRIVAU_MODE", "demo"),
-            ("ARRIVAU_AUTH_CONFIG", "/missing"),
-        ],
+        &[("ARRIVAU_MODE", "demo"), ("ARRIVAU_APP_CONFIG", "/missing")],
         "Demo mode cannot load production",
     );
     rejected(
@@ -82,14 +79,14 @@ fn binary_requires_explicit_mode_and_secure_ingress_configuration() {
             ("ARRIVAU_TLS_PROXY", "1"),
             ("ARRIVAU_DB_PATH", "/tmp/unused.db"),
         ],
-        "requires ARRIVAU_AUTH_CONFIG",
+        "requires ARRIVAU_APP_CONFIG",
     );
     rejected(
         &[
             ("ARRIVAU_MODE", "production"),
             ("ARRIVAU_TLS_PROXY", "1"),
             ("ARRIVAU_DB_PATH", "/tmp/unused.db"),
-            ("ARRIVAU_AUTH_CONFIG", "relative.json"),
+            ("ARRIVAU_APP_CONFIG", "relative.json"),
         ],
         "absolute operator-managed",
     );

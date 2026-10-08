@@ -118,7 +118,7 @@ There is no open signup, role/team-selection endpoint, or password-reset endpoin
 ```sh
 ARRIVAU_MODE=production \
 ARRIVAU_DB_PATH=/absolute/persistent/fleet.sqlite3 \
-ARRIVAU_AUTH_CONFIG=/absolute/private/accounts.json \
+ARRIVAU_APP_CONFIG=/absolute/private/app.json \
 ARRIVAU_ADDR=127.0.0.1:8080 \
 ARRIVAU_TLS_PROXY=1 \
 ./api/target/release/arrivau-api

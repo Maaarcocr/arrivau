@@ -40,6 +40,7 @@ fn config() -> ProductionConfig {
                 roles: None,
                 team_id: None,
                 password_hash: hash.clone(),
+                deletable: false,
             },
             Account {
                 id: "driver-bob".into(),
@@ -49,6 +50,7 @@ fn config() -> ProductionConfig {
                 roles: None,
                 team_id: None,
                 password_hash: hash.clone(),
+                deletable: false,
             },
             Account {
                 id: "driver-carol".into(),
@@ -58,6 +60,7 @@ fn config() -> ProductionConfig {
                 roles: None,
                 team_id: None,
                 password_hash: hash.clone(),
+                deletable: false,
             },
         ],
     }
@@ -615,9 +618,7 @@ async fn invite_signup_is_driver_only_atomic_private_and_survives_restart() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let stored: String = db
-        .query_row("SELECT password_hash FROM invited_accounts", [], |r| {
-            r.get(0)
-        })
+        .query_row("SELECT password_hash FROM accounts", [], |r| r.get(0))
         .unwrap();
     assert!(stored.starts_with("$argon2id$v=19$"));
     assert!(!stored.contains(PASSWORD));
@@ -670,7 +671,11 @@ async fn concurrent_redemption_creates_exactly_one_identity_and_session() {
     assert_eq!(statuses, [201, 400]);
     let db = rusqlite::Connection::open(&path).unwrap();
     let count: i64 = db
-        .query_row("SELECT COUNT(*) FROM invited_accounts", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM accounts WHERE id LIKE 'invited-%'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(count, 1);
     let session_count: i64 = db
@@ -683,7 +688,11 @@ async fn concurrent_redemption_creates_exactly_one_identity_and_session() {
     assert_eq!(session_count, 1);
     // A second distinct invitation cannot claim the already-created username, even after restart.
     let username: String = db
-        .query_row("SELECT username FROM invited_accounts", [], |r| r.get(0))
+        .query_row(
+            "SELECT username FROM accounts WHERE id LIKE 'invited-%'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     let second = server.issue(&alice, "Distinct").await;
     assert_eq!(
@@ -710,7 +719,7 @@ async fn invite_limits_persist_and_disabled_accounts_stay_disabled() {
         .await
         .unwrap();
     let token = created["token"].as_str().unwrap();
-    arrivau_api::auth::disable_invited_account(&path, "disabled").unwrap();
+    arrivau_api::auth::disable_account(&path, "disabled").unwrap();
     assert_eq!(
         server.get("/v1/me", token).await.status(),
         StatusCode::UNAUTHORIZED
@@ -774,7 +783,7 @@ async fn existing_pilot_database_additive_upgrade_preserves_driver_and_session()
     server.close().await;
     // Simulate the exact pre-invite schema, keeping existing pilot data in place.
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("DROP TABLE invites; DROP TABLE invited_accounts; DROP TABLE idempotency_retired; PRAGMA user_version=3;")
+    db.execute_batch("DROP TABLE invites; DROP TABLE accounts; DROP TABLE idempotency_retired; PRAGMA user_version=3;")
         .unwrap();
     drop(db);
     let server = Server::start(&path, clock, config()).await;
@@ -832,7 +841,7 @@ async fn delayed_authenticated_shift_cannot_reactivate_disabled_invited_driver()
         response
     });
     ready_rx.await.unwrap();
-    arrivau_api::auth::disable_invited_account(&path, "delayed").unwrap();
+    arrivau_api::auth::disable_account(&path, "delayed").unwrap();
     release_tx.send(()).unwrap();
     let response = request.await.unwrap();
     assert!(response.starts_with("HTTP/1.1 401"), "{response}");
@@ -862,7 +871,11 @@ async fn invite_creation_rolls_back_if_session_insert_fails() {
         StatusCode::INTERNAL_SERVER_ERROR
     );
     let count: i64 = db
-        .query_row("SELECT COUNT(*) FROM invited_accounts", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM accounts WHERE id LIKE 'invited-%'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(count, 0);
     let drivers: i64 = db
@@ -948,7 +961,11 @@ async fn expiry_between_admission_and_hashed_redemption_creates_nothing() {
     );
     let db = rusqlite::Connection::open(&path).unwrap();
     let accounts: i64 = db
-        .query_row("SELECT COUNT(*) FROM invited_accounts", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM accounts WHERE id LIKE 'invited-%'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(accounts, 0);
     let sessions: i64 = db
@@ -1162,7 +1179,7 @@ async fn unused_role_aware_invites_survive_upgrade_and_repeated_restarts() {
     server.close().await;
     let db = rusqlite::Connection::open(&path).unwrap();
     // Main's first role-aware invite schema still had role-less accounts at v6.
-    db.execute_batch("ALTER TABLE invited_accounts DROP COLUMN role; PRAGMA user_version=6;")
+    db.execute_batch("ALTER TABLE accounts RENAME TO invited_accounts; ALTER TABLE invited_accounts DROP COLUMN role; ALTER TABLE invited_accounts DROP COLUMN roles; PRAGMA user_version=6;")
         .unwrap();
     let snapshot = || -> Vec<(String, String, String, String, String, i64)> {
         db.prepare("SELECT id,token_hash,name,team_id,role,expires_at FROM invites ORDER BY id")
@@ -1211,7 +1228,7 @@ async fn unused_role_aware_invites_survive_upgrade_and_repeated_restarts() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        7,
+        8,
         "v6 binaries must reject the upgraded database"
     );
 }
@@ -1231,7 +1248,7 @@ async fn legacy_roleless_accounts_default_to_driver_without_inferred_privileges(
     }
     server.close().await;
     let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch("ALTER TABLE invited_accounts DROP COLUMN role; PRAGMA user_version=6;")
+    db.execute_batch("ALTER TABLE accounts RENAME TO invited_accounts; ALTER TABLE invited_accounts DROP COLUMN role; ALTER TABLE invited_accounts DROP COLUMN roles; PRAGMA user_version=6;")
         .unwrap();
     let server = Server::start(&path, clock, config()).await;
     assert_eq!(
@@ -1265,7 +1282,7 @@ async fn legacy_roleless_accounts_default_to_driver_without_inferred_privileges(
     }
     assert_eq!(
         db.query_row(
-            "SELECT COUNT(*) FROM invited_accounts WHERE role='driver'",
+            "SELECT COUNT(*) FROM accounts WHERE role='driver' AND id LIKE 'invited-%'",
             [],
             |r| r.get::<_, i64>(0)
         )
@@ -1283,7 +1300,7 @@ async fn legacy_issuer_bound_invites_are_archived_without_becoming_redeemable() 
         let mut server = Server::start(&path, clock.clone(), config()).await;
         server.close().await;
         let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch("ALTER TABLE invited_accounts DROP COLUMN role;
+        db.execute_batch("ALTER TABLE accounts RENAME TO invited_accounts; ALTER TABLE invited_accounts DROP COLUMN role;
             DROP TABLE invites;
             CREATE TABLE invites (
                 id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
@@ -1395,9 +1412,12 @@ async fn unknown_team_and_client_supplied_privileges_cannot_create_accounts() {
     }
     let db = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(
-        db.query_row("SELECT COUNT(*) FROM invited_accounts", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
+        db.query_row(
+            "SELECT COUNT(*) FROM accounts WHERE id LIKE 'invited-%'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
         0
     );
     assert_eq!(
@@ -1413,7 +1433,7 @@ async fn unknown_team_and_client_supplied_privileges_cannot_create_accounts() {
 #[tokio::test]
 async fn current_schema_missing_role_or_invite_metadata_fails_closed() {
     for damage in [
-        "ALTER TABLE invited_accounts DROP COLUMN role;",
+        "ALTER TABLE accounts DROP COLUMN role;",
         "DROP TABLE invites;",
     ] {
         let dir = TempDir::new().unwrap();
@@ -1436,7 +1456,7 @@ async fn current_schema_missing_role_or_invite_metadata_fails_closed() {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
     }
 }

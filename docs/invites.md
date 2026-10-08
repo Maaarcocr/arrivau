@@ -59,10 +59,10 @@ After a consistent backup, preferably stop the API briefly and run as the same d
 
 ```sh
 cargo run --release --locked --manifest-path api/Cargo.toml \
-  --bin arrivau-disable-invited-account -- /absolute/private/pilot.sqlite3 lowercase-username
+  --bin arrivau-disable-account -- /absolute/private/pilot.sqlite3 lowercase-username
 ```
 
-The container image also includes `/usr/local/bin/arrivau-disable-invited-account`. It opens an existing production database only, uses the exact lowercase username, and never handles a password. Repeating disabling is safe. Configured users remain managed in the auth file; this tool rejects those names. Restart the API when finished. Disabled usernames remain reserved; there is no self-service reset/reactivation or credential migration in this small flow. For a replacement identity, choose a new username and preserve old work records.
+The container image also includes `/usr/local/bin/arrivau-disable-account`. It opens an existing production database only, uses the exact lowercase username, and never handles a password. Repeating disabling is safe. Operator-managed accounts cannot be disabled with this tool. No restart needed; the change takes effect immediately. Disabled usernames remain reserved; there is no self-service reset/reactivation or credential migration in this small flow. For a replacement identity, choose a new username and preserve old work records.
 
 ## Verification before real invitations
 

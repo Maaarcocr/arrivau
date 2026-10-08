@@ -1,5 +1,6 @@
 //! Operator-managed and invite-created accounts share team-bound session checks.
-//! The configuration is authoritative on startup; account changes invalidate sessions.
+//! Teams and accounts live in the database; the JSON file keeps only app-level
+//! settings (fleet id, session TTL). Account changes invalidate sessions.
 use crate::{
     error::{ApiError, ApiResult},
     Principal,
@@ -27,6 +28,8 @@ pub struct Account {
     #[serde(default)]
     pub team_id: Option<String>,
     pub password_hash: String,
+    #[serde(default)]
+    pub deletable: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -136,7 +139,56 @@ impl ProductionConfig {
     }
 }
 
-pub(crate) fn valid_identifier(value: &str) -> bool {
+/// App-level settings from the operator-managed JSON file. Teams and
+/// accounts live in the database.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppConfig {
+    pub fleet_id: String,
+    pub session_ttl_seconds: i64,
+}
+
+/// Build the in-memory production config: app settings from the JSON file,
+/// teams and enabled accounts from the database.
+pub(crate) fn load_production_config(
+    db: &Connection,
+    app: &AppConfig,
+) -> ApiResult<ProductionConfig> {
+    if !valid_identifier(&app.fleet_id) || !(300..=86400).contains(&app.session_ttl_seconds) {
+        return Err(ApiError::bad_request(
+            "fleet_id must be a stable identifier; session_ttl_seconds must be 300-86400",
+        ));
+    }
+    let teams: Vec<Team> = {
+        let mut stmt = db.prepare("SELECT id, name FROM teams ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Team {
+                id: r.get(0)?,
+                name: r.get(1)?,
+            })
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let accounts: Vec<Account> = {
+        let mut stmt = db.prepare(
+            "SELECT id, username, name, password_hash, team_id, role, deletable, roles FROM accounts WHERE disabled=0 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], account_row)?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let config = ProductionConfig {
+        fleet_id: app.fleet_id.clone(),
+        session_ttl_seconds: app.session_ttl_seconds,
+        teams,
+        accounts,
+    };
+    config
+        .validate()
+        .map_err(|e| ApiError::bad_request(e.as_str()))?;
+    Ok(config)
+}
+
+pub fn valid_identifier(value: &str) -> bool {
     value
         .as_bytes()
         .first()
@@ -204,7 +256,7 @@ impl Account {
                 .find(|t| t.id == team_id)
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| team_id.into()),
-            can_delete_account: (!config.accounts.iter().any(|a| a.id == self.id)).then_some(true),
+            can_delete_account: self.deletable.then_some(true),
         }
     }
     pub(crate) fn fingerprint(&self, config: &ProductionConfig) -> String {
@@ -240,16 +292,103 @@ impl Account {
 
 pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiResult<()> {
     let tx = db.transaction()?;
-    // Neither identity source may silently replace the other, even when disabled.
+    // Seed configured accounts into the unified accounts table. Team
+    // membership is immutable: an existing account id keeps its stored team,
+    // and a stored id must keep its username. Anything else fails closed.
     for account in &config.accounts {
-        let collision: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM invited_accounts WHERE id=?1 OR username=?2)",
-            params![account.id, account.username],
-            |r| r.get(0),
-        )?;
-        if collision {
-            return Err(ApiError::conflict("Configured and invited account identities collide; keep the existing identities distinct"));
+        let team = account.team_id(config);
+        let bound: Option<String> = tx
+            .query_row(
+                "SELECT team_id FROM account_teams WHERE account_id=?1",
+                [&account.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if bound.as_deref().is_some_and(|t| t != team) {
+            return Err(ApiError::bad_request(
+                "An existing account ID cannot move teams; provision a new unique ID",
+            ));
         }
+        tx.execute(
+            "INSERT OR IGNORE INTO account_teams(account_id,team_id) VALUES (?1,?2)",
+            params![account.id, team],
+        )?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT username FROM accounts WHERE id=?1",
+                [&account.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match existing {
+            None => {
+                let clash: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM accounts WHERE username=?1)",
+                    [&account.username],
+                    |r| r.get(0),
+                )?;
+                if clash {
+                    return Err(ApiError::conflict("Configured and stored account identities collide; keep the existing identities distinct"));
+                }
+                tx.execute(
+                    "INSERT INTO accounts(id,username,name,password_hash,team_id,role,deletable,roles) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    params![
+                        account.id,
+                        account.username,
+                        account.name,
+                        account.password_hash,
+                        team,
+                        account.primary_role(),
+                        account.deletable as i64,
+                        account
+                            .roles
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(ApiError::internal)?,
+                    ],
+                )?;
+            }
+            Some(username) if username == account.username => {
+                tx.execute(
+                    "UPDATE accounts SET name=?1, password_hash=?2, role=?3, deletable=?4, roles=?5 WHERE id=?6",
+                    params![
+                        account.name,
+                        account.password_hash,
+                        account.primary_role(),
+                        account.deletable as i64,
+                        account
+                            .roles
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(ApiError::internal)?,
+                        account.id,
+                    ],
+                )?;
+            }
+            _ => {
+                return Err(ApiError::conflict("Configured and stored account identities collide; keep the existing identities distinct"));
+            }
+        }
+    }
+    // Operator-managed accounts removed from the configuration are revoked:
+    // their sessions die on restart, while driver and delivery history is kept.
+    // Invited accounts are never touched here; the operator disables them.
+    if !config.accounts.is_empty() {
+        let placeholders = config
+            .accounts
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let ids: Vec<&str> = config.accounts.iter().map(|a| a.id.as_str()).collect();
+        tx.execute(
+            &format!(
+                "DELETE FROM accounts WHERE disabled=0 AND deletable=0 AND id NOT IN ({placeholders})"
+            ),
+            rusqlite::params_from_iter(ids),
+        )?;
     }
     // Permanent bindings prevent removed/re-added accounts and driver IDs from moving history.
     // Validate ALL identities before modifying profiles or revoking sessions.
@@ -269,12 +408,6 @@ pub(crate) fn initialize(db: &mut Connection, config: &ProductionConfig) -> ApiR
                 "An existing account ID cannot move teams; provision a new unique ID",
             ));
         }
-    }
-    for account in &config.accounts {
-        tx.execute(
-            "INSERT OR IGNORE INTO account_teams(account_id,team_id) VALUES (?1,?2)",
-            params![account.id, account.team_id(config)],
-        )?;
     }
     let driver_rows: Vec<(String, String)> = {
         let mut stmt = tx.prepare("SELECT team_id,body FROM drivers")?;
@@ -409,16 +542,23 @@ pub(crate) fn configured_team(config: &ProductionConfig, team: &str) -> bool {
     team == config.fleet_id || config.teams.iter().any(|t| t.id == team)
 }
 
-fn invited_account(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
+fn account_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Account> {
     let role: String = row.get(5)?;
+    let roles: Option<Vec<String>> = match row.get::<_, Option<String>>(7)? {
+        Some(json) => Some(serde_json::from_str(&json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+        })?),
+        None => None,
+    };
     Ok(Account {
         id: row.get(0)?,
         username: row.get(1)?,
         name: row.get(2)?,
         role: role.clone(),
-        roles: Some(vec![role]),
+        roles: roles.or_else(|| Some(vec![role])),
         team_id: Some(row.get(4)?),
         password_hash: row.get(3)?,
+        deletable: row.get(6)?,
     })
 }
 
@@ -427,10 +567,7 @@ pub(crate) fn account_by_id(
     config: &ProductionConfig,
     id: &str,
 ) -> ApiResult<Option<Account>> {
-    if let Some(account) = config.accounts.iter().find(|a| a.id == id) {
-        return Ok(Some(account.clone()));
-    }
-    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id,i.role FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.id=?1 AND i.disabled=0 AND i.role IN ('driver','dispatcher')", [id], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
+    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id,i.role,i.deletable,i.roles FROM accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.id=?1 AND i.disabled=0 AND i.role IN ('driver','dispatcher')", [id], account_row).optional()?.filter(|a| configured_team(config,a.team_id(config))))
 }
 
 pub(crate) fn account_by_username(
@@ -438,10 +575,7 @@ pub(crate) fn account_by_username(
     config: &ProductionConfig,
     username: &str,
 ) -> ApiResult<Option<Account>> {
-    if let Some(account) = config.accounts.iter().find(|a| a.username == username) {
-        return Ok(Some(account.clone()));
-    }
-    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id,i.role FROM invited_accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.username=?1 AND i.disabled=0 AND i.role IN ('driver','dispatcher')", [username], invited_account).optional()?.filter(|a| configured_team(config,a.team_id(config))))
+    Ok(db.query_row("SELECT i.id,i.username,i.name,i.password_hash,i.team_id,i.role,i.deletable,i.roles FROM accounts i JOIN account_teams a ON a.account_id=i.id AND a.team_id=i.team_id WHERE i.username=?1 AND i.disabled=0 AND i.role IN ('driver','dispatcher')", [username], account_row).optional()?.filter(|a| configured_team(config,a.team_id(config))))
 }
 
 pub(crate) fn random_token() -> ApiResult<String> {
@@ -492,7 +626,7 @@ pub(crate) fn reserve_attempt(
 
 /// Offline operator recovery: disable an invited driver without deleting delivery history.
 /// Opens only an existing production DB; never accepts passwords or creates credentials.
-pub fn disable_invited_account(path: &std::path::Path, username: &str) -> Result<(), String> {
+pub fn disable_account(path: &std::path::Path, username: &str) -> Result<(), String> {
     if !path.is_absolute()
         || !valid_identifier(username)
         || username != username.to_ascii_lowercase()
@@ -511,8 +645,19 @@ pub fn disable_invited_account(path: &std::path::Path, username: &str) -> Result
         if !mode.starts_with("production:") {
             return Err(ApiError::bad_request("Use the production database"));
         }
-        let (id, team): (String,String) = tx.query_row("SELECT id,team_id FROM invited_accounts WHERE username=?1", [username], |r| Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(|| ApiError::not_found("Invited account not found; configured accounts are managed in the auth configuration"))?;
-        tx.execute("UPDATE invited_accounts SET disabled=1 WHERE id=?1", [&id])?;
+        let (id, team): (String, String) = tx
+            .query_row(
+                "SELECT id,team_id FROM accounts WHERE username=?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                ApiError::not_found(
+                    "Account not found; operator-managed accounts cannot be disabled here",
+                )
+            })?;
+        tx.execute("UPDATE accounts SET disabled=1 WHERE id=?1", [&id])?;
         tx.execute("DELETE FROM sessions WHERE account_id=?1", [&id])?;
         let mut driver = crate::db::driver(&tx, &team, &id)?;
         driver.active = false;

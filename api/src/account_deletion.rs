@@ -1,4 +1,4 @@
-//! Password-confirmed, snapshot-bound hard deletion for durable invited accounts.
+//! Password-confirmed, snapshot-bound hard deletion for deletable accounts.
 use crate::{
     auth,
     error::{ApiError, ApiResult},
@@ -27,7 +27,7 @@ pub(crate) struct DeleteInput {
 }
 
 fn unsupported() -> ApiError {
-    ApiError::new(StatusCode::FORBIDDEN, "Self-service deletion is available only for invited driver accounts; configured accounts must be managed by the operator")
+    ApiError::new(StatusCode::FORBIDDEN, "Self-service deletion is available only for deletable driver accounts; operator-managed accounts must be managed by the operator")
 }
 
 // Middleware authentication happens before body extraction or Argon2 work. Recheck the
@@ -49,7 +49,7 @@ fn current_account(
                 && fingerprint.as_deref() == Some(a.fingerprint(config).as_str())
         })
         .ok_or_else(auth::unauthorized)?;
-    if config.accounts.iter().any(|a| a.id == account.id) || !account.has_role("driver") {
+    if !account.deletable || !account.has_role("driver") {
         return Err(unsupported());
     }
     Ok(account)
@@ -231,7 +231,7 @@ fn erase(
         params![team, account.id],
     )?;
     db.execute(
-        "DELETE FROM invited_accounts WHERE team_id=?1 AND id=?2",
+        "DELETE FROM accounts WHERE team_id=?1 AND id=?2",
         params![team, account.id],
     )?;
     for key in [
@@ -248,7 +248,7 @@ fn erase(
         AND NOT EXISTS(SELECT 1 FROM drivers WHERE id=?1)
         AND NOT EXISTS(SELECT 1 FROM deliveries WHERE driver_id=?1)
         AND NOT EXISTS(SELECT 1 FROM route_stops WHERE driver_id=?1)
-        AND NOT EXISTS(SELECT 1 FROM invited_accounts WHERE id=?1)
+        AND NOT EXISTS(SELECT 1 FROM accounts WHERE id=?1)
         AND NOT EXISTS(SELECT 1 FROM sessions WHERE account_id=?1)
         AND NOT EXISTS(SELECT 1 FROM idempotency WHERE principal_id=?1)",
         params![account.id, team],
@@ -291,6 +291,7 @@ mod tests {
                 roles: None,
                 team_id: None,
                 password_hash: hash.clone(),
+                deletable: false,
             }],
         };
         let dir = tempfile::tempdir().unwrap();
@@ -309,6 +310,7 @@ mod tests {
             roles: Some(vec!["driver".into()]),
             team_id: Some(TEAM.into()),
             password_hash: hash,
+            deletable: true,
         };
         let session = {
             let db = state.db().unwrap();
@@ -317,7 +319,7 @@ mod tests {
                 params![account.id, TEAM],
             )
             .unwrap();
-            db.execute("INSERT INTO invited_accounts(id,username,name,password_hash,team_id) VALUES (?1,?2,?3,?4,?5)", params![account.id, account.username, account.name, account.password_hash, TEAM]).unwrap();
+            db.execute("INSERT INTO accounts(id,username,name,password_hash,team_id) VALUES (?1,?2,?3,?4,?5)", params![account.id, account.username, account.name, account.password_hash, TEAM]).unwrap();
             let driver = Driver {
                 id: account.id.clone(),
                 name: account.name.clone(),
@@ -422,7 +424,7 @@ mod tests {
             .db()
             .unwrap()
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM invited_accounts WHERE id='invited-fixture')",
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE id='invited-fixture')",
                 [],
                 |r| r.get(0),
             )
@@ -487,14 +489,14 @@ mod tests {
                         state
                             .db()
                             .unwrap()
-                            .execute("UPDATE invited_accounts SET password_hash='changed'", [])
+                            .execute("UPDATE accounts SET password_hash='changed'", [])
                             .unwrap();
                     }
                     "disable" => {
                         state
                             .db()
                             .unwrap()
-                            .execute("UPDATE invited_accounts SET disabled=1", [])
+                            .execute("UPDATE accounts SET disabled=1", [])
                             .unwrap();
                     }
                     _ => unreachable!(),

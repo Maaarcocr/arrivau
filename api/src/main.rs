@@ -1,4 +1,4 @@
-use arrivau_api::{app, auth::ProductionConfig, AppState};
+use arrivau_api::{app, auth::AppConfig, AppState};
 use std::{env, error::Error, net::SocketAddr, path::PathBuf};
 use tracing_subscriber::EnvFilter;
 
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         arrivau_api::routing::RoutingService::from_env().map_err(std::io::Error::other)?;
     let state = match mode.as_str() {
         "demo" => {
-            if env::var_os("ARRIVAU_AUTH_CONFIG").is_some() { return Err("Demo mode cannot load production account configuration".into()); }
+            if env::var_os("ARRIVAU_APP_CONFIG").is_some() { return Err("Demo mode cannot load production app configuration".into()); }
             let path = env::var("ARRIVAU_DB_PATH").unwrap_or_else(|_| "arrivau-demo.sqlite3".into());
             tracing::warn!(%address,"ISOLATED DEMO: public fixture tokens; never proxy, expose, or use customer data");
             AppState::open(path,true)
@@ -45,12 +45,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if legacy_demo { return Err("ARRIVAU_DEMO=1 conflicts with production mode".into()); }
             if env::var("ARRIVAU_TLS_PROXY").as_deref() != Ok("1") { return Err("Production requires ARRIVAU_TLS_PROXY=1 and configured trusted HTTPS reverse-proxy ingress".into()); }
             let path = PathBuf::from(env::var("ARRIVAU_DB_PATH").map_err(|_| "Production requires ARRIVAU_DB_PATH")?);
-            let config_path = PathBuf::from(env::var("ARRIVAU_AUTH_CONFIG").map_err(|_| "Production requires ARRIVAU_AUTH_CONFIG")?);
-            if !config_path.is_absolute() { return Err("ARRIVAU_AUTH_CONFIG must be an absolute operator-managed file path".into()); }
+            let config_path = PathBuf::from(env::var("ARRIVAU_APP_CONFIG").map_err(|_| "Production requires ARRIVAU_APP_CONFIG")?);
+            if !config_path.is_absolute() { return Err("ARRIVAU_APP_CONFIG must be an absolute operator-managed file path".into()); }
             let contents = std::fs::read_to_string(config_path)?;
-            let config: ProductionConfig = serde_json::from_str(&contents)?;
+            let app_config: AppConfig = serde_json::from_str(&contents)?;
             tracing::info!(%address,"Configured team-isolated pilot; HTTPS termination and access control required at proxy");
-            AppState::open_production(path,config)
+            AppState::open_production_app_config(path,&app_config)
         }
         _ => return Err("Set ARRIVAU_MODE=production with account/HTTPS configuration, or explicitly choose ARRIVAU_MODE=demo for loopback fixtures".into()),
     }.map_err(std::io::Error::other)?.with_routing(routing).with_places(places).with_privacy_notice(privacy_notice);

@@ -7,8 +7,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
-    arrivau_api::auth::disable_invited_account(std::path::Path::new(&args[0]), &args[1])
+    arrivau_api::auth::disable_account(std::path::Path::new(&args[0]), &args[1])
         .map_err(std::io::Error::other)?;
-    println!("Invited account disabled; sessions revoked and delivery history preserved.");
+    println!("Account disabled; sessions revoked and delivery history preserved.");
     Ok(())
 }

@@ -64,6 +64,7 @@ fn config() -> ProductionConfig {
             roles: None,
             team_id: Some(team.into()),
             password_hash: password_hash().into(),
+            deletable: false,
         })
         .collect(),
     }
@@ -222,7 +223,7 @@ impl Fixture {
                 params![id, team],
             )
             .unwrap();
-        self.db.execute("INSERT INTO invited_accounts(id,username,name,password_hash,team_id) VALUES (?1,?1,?1,?2,?3)", params![id,password_hash(),team]).unwrap();
+        self.db.execute("INSERT INTO accounts(id,username,name,password_hash,team_id) VALUES (?1,?1,?1,?2,?3)", params![id,password_hash(),team]).unwrap();
         let driver = json!({"id":id,"name":id,"active":true,"capacity":2,"location":{"lat":36.7,"lng":15.1},"location_updated_at":NOW});
         self.db
             .execute(
@@ -288,7 +289,7 @@ async fn error(response: Response, status: StatusCode, message: &str) {
 }
 
 #[tokio::test]
-async fn only_durable_invited_accounts_advertise_and_allow_account_deletion() {
+async fn only_durable_accounts_advertise_and_allow_account_deletion() {
     let fixture = Fixture::new().await;
     let created = fixture.invited("new-driver").await;
     let token = created["token"].as_str().unwrap();
@@ -429,7 +430,7 @@ async fn hard_delete_cleans_all_linked_work_and_sessions_preserving_every_other_
     let response = fixture.server.delete(token, PASSWORD, &preview).await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(response.bytes().await.unwrap().is_empty());
-    for table in ["invited_accounts", "drivers"] {
+    for table in ["accounts", "drivers"] {
         assert_eq!(
             count(
                 &fixture.db,
@@ -499,7 +500,7 @@ async fn hard_delete_cleans_all_linked_work_and_sessions_preserving_every_other_
     assert_eq!(
         count(
             &fixture.db,
-            "SELECT COUNT(*) FROM invited_accounts WHERE id=?1",
+            "SELECT COUNT(*) FROM accounts WHERE id=?1",
             "keep-invited"
         ),
         1
@@ -579,7 +580,7 @@ async fn preview_ignores_unrelated_writes_but_rechecks_readiness_pickup_and_assi
         let after = fixture.server.preview(&token).await;
         assert_ne!(before["confirmation"],after["confirmation"]);
         error(fixture.server.delete(&token,PASSWORD,&before).await,StatusCode::CONFLICT,"Deletion preview changed; review again").await;
-        assert_eq!(count(&fixture.db,"SELECT COUNT(*) FROM invited_accounts WHERE id=?1","preview-driver"),1);
+        assert_eq!(count(&fixture.db,"SELECT COUNT(*) FROM accounts WHERE id=?1","preview-driver"),1);
     }
     let final_preview = fixture.server.preview(&token).await;
     assert_eq!(final_preview["delivery_count"], 0);
@@ -624,7 +625,7 @@ async fn missing_malformed_or_unknown_delete_fields_are_rejected_without_changes
     assert_eq!(
         count(
             &fixture.db,
-            "SELECT COUNT(*) FROM invited_accounts WHERE id=?1",
+            "SELECT COUNT(*) FROM accounts WHERE id=?1",
             "validation-driver"
         ),
         1
@@ -747,7 +748,7 @@ async fn deletion_requires_a_current_nonrevoked_session() {
     assert_eq!(
         count(
             &fixture.db,
-            "SELECT COUNT(*) FROM invited_accounts WHERE id=?1",
+            "SELECT COUNT(*) FROM accounts WHERE id=?1",
             "auth-driver"
         ),
         1
@@ -799,7 +800,7 @@ async fn storage_failure_rolls_back_every_part_of_hard_deletion() {
         StatusCode::INTERNAL_SERVER_ERROR
     );
     for (table, column, value) in [
-        ("invited_accounts", "id", "rollback-driver"),
+        ("accounts", "id", "rollback-driver"),
         ("drivers", "id", "rollback-driver"),
         ("sessions", "account_id", "rollback-driver"),
         ("account_teams", "account_id", "rollback-driver"),
@@ -1176,7 +1177,7 @@ async fn invite_only_v4_upgrade_preserves_membership_and_sessions_before_hard_de
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        version, 7,
+        version, 8,
         "older invite-only binaries must fail their >4 startup guard"
     );
     assert_eq!(
@@ -1186,7 +1187,7 @@ async fn invite_only_v4_upgrade_preserves_membership_and_sessions_before_hard_de
     assert_eq!(
         count(
             &fixture.db,
-            "SELECT COUNT(*) FROM invited_accounts WHERE id=?1",
+            "SELECT COUNT(*) FROM accounts WHERE id=?1",
             "upgrade-driver"
         ),
         1
@@ -1239,7 +1240,7 @@ async fn deletion_schema_missing_retry_metadata_fails_closed_without_recreating_
     assert_eq!(
         count(
             &fixture.db,
-            "SELECT COUNT(*) FROM invited_accounts WHERE id=?1",
+            "SELECT COUNT(*) FROM accounts WHERE id=?1",
             "guard-driver"
         ),
         1

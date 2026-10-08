@@ -1,6 +1,6 @@
 mod account_deletion;
 pub mod auth;
-mod db;
+pub mod db;
 mod delivery_deletion;
 mod error;
 mod invites;
@@ -114,7 +114,7 @@ impl AppState {
         if !path.as_ref().is_absolute() {
             return Err("Production requires an absolute persistent database path".into());
         }
-        let mut db = db::open(
+        let db = db::open(
             path,
             &format!("production:{}", config.fleet_id),
             &config.fleet_id,
@@ -125,6 +125,42 @@ impl AppState {
                 .collect::<Vec<_>>(),
         )
         .map_err(|e| e.message)?;
+        Self::from_production_parts(db, config, clock)
+    }
+
+    /// Production entry point for DB-backed auth: teams and accounts are
+    /// loaded from the database; the JSON file carries only app-level settings.
+    pub fn open_production_with_app_config(
+        path: impl AsRef<FsPath>,
+        app: &auth::AppConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, String> {
+        if !path.as_ref().is_absolute() {
+            return Err("Production requires an absolute persistent database path".into());
+        }
+        let db = db::open(
+            path,
+            &format!("production:{}", app.fleet_id),
+            &app.fleet_id,
+            &[],
+        )
+        .map_err(|e| e.message)?;
+        let config = auth::load_production_config(&db, app).map_err(|e| e.message)?;
+        Self::from_production_parts(db, config, clock)
+    }
+
+    pub fn open_production_app_config(
+        path: impl AsRef<FsPath>,
+        app: &auth::AppConfig,
+    ) -> Result<Self, String> {
+        Self::open_production_with_app_config(path, app, Arc::new(SystemClock))
+    }
+
+    fn from_production_parts(
+        mut db: Connection,
+        config: auth::ProductionConfig,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, String> {
         auth::initialize(&mut db, &config).map_err(|e| e.message)?;
         Ok(Self {
             privacy_notice: privacy::PrivacyNotice::default(),

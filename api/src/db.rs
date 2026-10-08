@@ -5,7 +5,7 @@ use crate::{
     error::{ApiError, ApiResult},
     model::*,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::{path::Path, time::Duration};
 
 pub fn open(
@@ -18,7 +18,7 @@ pub fn open(
     db.busy_timeout(Duration::from_secs(5))?;
     db.execute_batch("PRAGMA foreign_keys=ON;")?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 7 {
+    if version > 8 {
         return Err(ApiError::bad_request(
             "Database schema is newer than this server",
         ));
@@ -152,8 +152,8 @@ pub fn open(
          CREATE INDEX IF NOT EXISTS idempotency_team ON idempotency(team_id,principal_id,key);
          CREATE INDEX IF NOT EXISTS sessions_team ON sessions(team_id,account_id);"
     )?;
-    initialize_invites(&tx, version)?;
-    let inconsistent_invites: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM invited_accounts i LEFT JOIN account_teams a ON a.account_id=i.id WHERE a.account_id IS NULL OR i.team_id<>a.team_id)", [], |r| r.get(0))?;
+    initialize_accounts(&tx, version)?;
+    let inconsistent_invites: i64 = tx.query_row("SELECT (SELECT COUNT(*) FROM accounts i LEFT JOIN account_teams a ON a.account_id=i.id WHERE a.account_id IS NULL OR i.team_id<>a.team_id)", [], |r| r.get(0))?;
     if inconsistent_invites != 0 {
         return Err(ApiError::bad_request(
             "Persisted invitation team ownership is inconsistent",
@@ -189,7 +189,7 @@ pub fn open(
     }
     // Defense in depth: even an unscoped future write cannot cross a persisted team boundary.
     for (table, guard) in [
-        ("invited_accounts", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.id AND team_id=NEW.team_id)"),
+        ("accounts", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.id AND team_id=NEW.team_id)"),
         ("drivers", "NOT EXISTS (SELECT 1 FROM account_teams WHERE account_id=NEW.id AND team_id=NEW.team_id)"),
         ("deliveries", "NEW.driver_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM drivers WHERE id=NEW.driver_id AND team_id=NEW.team_id)"),
         ("route_stops", "NOT EXISTS (SELECT 1 FROM drivers WHERE id=NEW.driver_id AND team_id=NEW.team_id) OR NOT EXISTS (SELECT 1 FROM deliveries WHERE id=NEW.delivery_id AND team_id=NEW.team_id)"),
@@ -233,7 +233,7 @@ pub fn open(
     // Older servers reload every invited account as a driver and discard unused
     // invitations. Reject downgrade before they can rewrite role-aware state.
     // This also retains v6's protection for short-lived Google coordinates.
-    tx.execute_batch("PRAGMA user_version=7;")?;
+    tx.execute_batch("PRAGMA user_version=8;")?;
     tx.commit()?;
     db.execute_batch("PRAGMA journal_mode=WAL;")?;
     crate::places::initialize(&db)?;
@@ -246,38 +246,80 @@ fn table_columns(db: &Connection, table: &str) -> ApiResult<Vec<String>> {
     rows.collect::<Result<_, _>>().map_err(Into::into)
 }
 
-fn initialize_invites(db: &Connection, version: i64) -> ApiResult<()> {
-    let account_columns = table_columns(db, "invited_accounts")?;
-    if version >= 7 && !account_columns.iter().any(|c| c == "role") {
-        return Err(ApiError::bad_request(
-            "Invited account role metadata is missing; restore a verified backup",
-        ));
-    }
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS invited_accounts (
-        id TEXT PRIMARY KEY REFERENCES account_teams(account_id), username TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL, password_hash TEXT NOT NULL, team_id TEXT NOT NULL,
-        disabled INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0,1)),
-        role TEXT NOT NULL DEFAULT 'driver' CHECK(role IN ('driver','dispatcher'))
-    ); CREATE INDEX IF NOT EXISTS invited_accounts_team ON invited_accounts(team_id,id);",
+fn initialize_accounts(tx: &Transaction, version: i64) -> ApiResult<()> {
+    // v8: teams live in the database, and invited_accounts becomes the single
+    // accounts table for every user. The JSON config keeps only app-level
+    // settings (fleet id, session TTL).
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, name TEXT NOT NULL);",
     )?;
-    if !account_columns.is_empty() && !account_columns.iter().any(|c| c == "role") {
-        // Pre-v7 accounts did not retain their invitation role. Driver is the
-        // only safe default, even if a name or old session suggests dispatcher.
-        db.execute_batch("ALTER TABLE invited_accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'driver' CHECK(role IN ('driver','dispatcher'));")?;
-    }
-    let invalid_roles: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM invited_accounts WHERE role IS NULL OR role NOT IN ('driver','dispatcher'))",
+    let has_invited: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='invited_accounts')",
         [],
         |r| r.get(0),
     )?;
-    if invalid_roles {
+    let has_accounts: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts')",
+        [],
+        |r| r.get(0),
+    )?;
+    if version >= 8 && !has_accounts {
         return Err(ApiError::bad_request(
-            "Persisted invited account role is invalid; restore a verified backup",
+            "Accounts table is missing; restore a verified backup",
+        ));
+    }
+    if has_invited && !has_accounts {
+        tx.execute_batch("ALTER TABLE invited_accounts RENAME TO accounts;")?;
+    }
+    // Stale triggers follow the rename; drop them so only accounts_* remain.
+    for trigger in [
+        "invited_accounts_team_insert",
+        "invited_accounts_team_update",
+        "invited_accounts_team_immutable",
+    ] {
+        tx.execute_batch(&format!("DROP TRIGGER IF EXISTS {trigger};"))?;
+    }
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS accounts (
+        id TEXT PRIMARY KEY REFERENCES account_teams(account_id), username TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL, password_hash TEXT NOT NULL, team_id TEXT NOT NULL,
+        disabled INTEGER NOT NULL DEFAULT 0 CHECK(disabled IN (0,1)),
+        role TEXT NOT NULL DEFAULT 'driver' CHECK(role IN ('driver','dispatcher')),
+        deletable INTEGER NOT NULL DEFAULT 1 CHECK(deletable IN (0,1)),
+        roles TEXT CHECK(roles IS NULL OR json_valid(roles))
+    ); CREATE INDEX IF NOT EXISTS accounts_team ON accounts(team_id,id);",
+    )?;
+    let account_columns = table_columns(tx, "accounts")?;
+    if version >= 7 && !account_columns.iter().any(|c| c == "role") {
+        return Err(ApiError::bad_request(
+            "Persisted account role is invalid; restore a verified backup",
+        ));
+    }
+    if !account_columns.is_empty() && !account_columns.iter().any(|c| c == "role") {
+        // Pre-v7 accounts did not retain their invitation role. Driver is the
+        // only safe default, even if a name or old session suggests dispatcher.
+        tx.execute_batch("ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'driver' CHECK(role IN ('driver','dispatcher'));")?;
+    }
+    if !account_columns.is_empty() && !account_columns.iter().any(|c| c == "deletable") {
+        tx.execute_batch("ALTER TABLE accounts ADD COLUMN deletable INTEGER NOT NULL DEFAULT 1 CHECK(deletable IN (0,1));")?;
+    }
+    if !account_columns.is_empty() && !account_columns.iter().any(|c| c == "roles") {
+        tx.execute_batch(
+            "ALTER TABLE accounts ADD COLUMN roles TEXT CHECK(roles IS NULL OR json_valid(roles));",
+        )?;
+    }
+    let invalid: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE role IS NULL OR role NOT IN ('driver','dispatcher') OR deletable IS NULL OR deletable NOT IN (0,1))",
+        [],
+        |r| r.get(0),
+    )?;
+    if invalid {
+        return Err(ApiError::bad_request(
+            "Persisted account role is invalid; restore a verified backup",
         ));
     }
 
-    let columns = table_columns(db, "invites")?;
+    let columns = table_columns(tx, "invites")?;
     let current = ["id", "token_hash", "name", "team_id", "role", "expires_at"];
     let legacy = [
         "id",
@@ -301,13 +343,13 @@ fn initialize_invites(db: &Connection, version: i64) -> ApiResult<()> {
             // Old tokens depended on a live issuer fingerprint. Preserve the
             // complete rows for operator review, without making them redeemable
             // under the new issuer-independent model or retaining live FKs.
-            db.execute_batch(
+            tx.execute_batch(
                 "CREATE TABLE legacy_invites_v7 AS SELECT * FROM invites;
                 DROP TABLE invites;",
             )?;
         }
     }
-    db.execute_batch(
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS invites (
         id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
         team_id TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('driver','dispatcher')),
@@ -316,7 +358,6 @@ fn initialize_invites(db: &Connection, version: i64) -> ApiResult<()> {
     )?;
     Ok(())
 }
-
 pub fn restaurants(db: &Connection, team_id: &str) -> ApiResult<Vec<Restaurant>> {
     let mut stmt = db.prepare("SELECT body FROM restaurants WHERE team_id=?1 ORDER BY rowid")?;
     let rows = stmt.query_map([team_id], |row| row.get::<_, String>(0))?;

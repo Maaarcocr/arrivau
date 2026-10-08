@@ -349,7 +349,7 @@ async fn upgrade_preserves_driver_sessions_and_work_but_refreshes_expanded_dispa
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        7
+        8
     );
     for table in ["deliveries", "route_stops", "idempotency"] {
         assert_eq!(

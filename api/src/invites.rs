@@ -49,11 +49,11 @@ fn username_available(
     username: &str,
 ) -> ApiResult<()> {
     let used: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM invited_accounts WHERE username=?1)",
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE username=?1)",
         [username],
         |r| r.get(0),
     )?;
-    if used || config.accounts.iter().any(|a| a.username == username) {
+    if used {
         return Err(ApiError::conflict("Username is unavailable"));
     }
     Ok(())
@@ -126,7 +126,7 @@ pub(crate) async fn redeem(
     let (name, team, role) = valid_invite(&tx, config, &hash, now)?;
     username_available(&tx, config, &username)?;
     let count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM invited_accounts WHERE team_id=?1",
+        "SELECT COUNT(*) FROM accounts WHERE team_id=?1",
         [&team],
         |r| r.get(0),
     )?;
@@ -143,6 +143,7 @@ pub(crate) async fn redeem(
         roles: Some(vec![role.clone()]),
         team_id: Some(team.clone()),
         password_hash,
+        deletable: true,
     };
     // Reserve generated ids against configured and historic domain identities too.
     let used: bool = tx.query_row(
@@ -150,7 +151,7 @@ pub(crate) async fn redeem(
         [&account.id],
         |r| r.get(0),
     )?;
-    if used || config.accounts.iter().any(|a| a.id == account.id) {
+    if used {
         return Err(ApiError::conflict(
             "Could not allocate account identity; retry",
         ));
@@ -159,7 +160,7 @@ pub(crate) async fn redeem(
         "INSERT INTO account_teams(account_id,team_id) VALUES (?1,?2)",
         params![account.id, team],
     )?;
-    tx.execute("INSERT INTO invited_accounts(id,username,name,password_hash,team_id,role) VALUES (?1,?2,?3,?4,?5,?6)", params![account.id,account.username,account.name,account.password_hash,team,account.role])?;
+    tx.execute("INSERT INTO accounts(id,username,name,password_hash,team_id,role,deletable,roles) VALUES (?1,?2,?3,?4,?5,?6,1,?7)", params![account.id,account.username,account.name,account.password_hash,team,account.role,serde_json::to_string(&[account.role.clone()]).map_err(ApiError::internal)?])?;
     let driver = crate::model::Driver {
         id: account.id.clone(),
         name: account.name.clone(),

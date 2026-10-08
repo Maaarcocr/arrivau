@@ -1337,7 +1337,10 @@ async fn dispatcher_can_delete_every_delivery_state_and_retry_without_resurrecti
         let job: Delivery = response.json().await.unwrap();
         if target != "pending" {
             server.driver_online(DRIVER_1, 3).await;
-            assert_eq!(server.assign(&job, "driver-1").await.status(), StatusCode::OK);
+            assert_eq!(
+                server.assign(&job, "driver-1").await.status(),
+                StatusCode::OK
+            );
         }
         if target == "picked_up" || target == "delivered" {
             assert_eq!(
@@ -1426,7 +1429,10 @@ async fn deleting_assigned_work_keeps_remaining_route_order_and_execution() {
         StatusCode::OK
     );
     let kept = server.create(new_job()).await;
-    assert_eq!(server.assign(&kept, "driver-1").await.status(), StatusCode::OK);
+    assert_eq!(
+        server.assign(&kept, "driver-1").await.status(),
+        StatusCode::OK
+    );
     let before = server.route(DRIVER_1).await;
     assert_eq!(
         server

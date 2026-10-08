@@ -1,6 +1,7 @@
 mod account_deletion;
 pub mod auth;
 mod db;
+mod delivery_deletion;
 mod error;
 mod invites;
 pub mod model;
@@ -661,6 +662,10 @@ pub fn app(state: AppState) -> Router {
         .route("/shift", get(get_shift).post(shift))
         .route("/location", post(location))
         .route("/deliveries", get(list_deliveries).post(create_delivery))
+        .route(
+            "/deliveries/{id}",
+            axum::routing::delete(delivery_deletion::delete),
+        )
         .route("/deliveries/{id}/assign", post(assign))
         .route("/deliveries/{id}/readiness", post(readiness))
         .route("/deliveries/{id}/status", post(status))

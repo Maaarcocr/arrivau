@@ -128,6 +128,9 @@ struct APIClient {
         try await post("v1/restaurants", body: restaurant, idempotencyKey: idempotencyKey)
     }
     func deliveries() async throws -> [Delivery] { try await get("v1/deliveries") }
+    func deleteDelivery(deliveryId: String) async throws {
+        _ = try await response("v1/deliveries/\(deliveryId)", method: "DELETE", body: nil, requiredStatus: 204)
+    }
     func shift() async throws -> Driver { try await get("v1/shift") }
     func route() async throws -> DriverRoute { try await get("v1/route") }
     func route(driverId: String) async throws -> DriverRoute { try await get("v1/drivers/\(driverId)/route") }

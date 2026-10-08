@@ -1315,3 +1315,151 @@ async fn idempotent_mutations_survive_restart_and_cannot_change_request_or_owner
     )
     .await;
 }
+
+#[tokio::test]
+async fn dispatcher_can_delete_every_delivery_state_and_retry_without_resurrection() {
+    for target in ["pending", "assigned", "picked_up", "delivered"] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("delete.db");
+        let clock = TestClock::new();
+        let mut server = Server::start(&path, clock.clone()).await;
+        let input = new_job();
+        let response = server
+            .client
+            .post(format!("{}/v1/deliveries", server.base))
+            .bearer_auth(DISPATCHER)
+            .header("Idempotency-Key", "delete-create-fixture")
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let job: Delivery = response.json().await.unwrap();
+        if target != "pending" {
+            server.driver_online(DRIVER_1, 3).await;
+            assert_eq!(server.assign(&job, "driver-1").await.status(), StatusCode::OK);
+        }
+        if target == "picked_up" || target == "delivered" {
+            assert_eq!(
+                server.status(&job, DRIVER_1, "picked_up").await.status(),
+                StatusCode::OK
+            );
+        }
+        if target == "delivered" {
+            assert_eq!(
+                server.status(&job, DRIVER_1, "delivered").await.status(),
+                StatusCode::OK
+            );
+        }
+        let endpoint = format!("/v1/deliveries/{}", job.id);
+        assert_eq!(
+            server
+                .request(Method::DELETE, &endpoint, None, None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            server
+                .request(Method::DELETE, &endpoint, Some(DRIVER_1), None)
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                server
+                    .request(Method::DELETE, &endpoint, Some(DISPATCHER), None)
+                    .await
+                    .status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        let jobs: Vec<Delivery> = server
+            .get("/v1/deliveries", DISPATCHER)
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(jobs.is_empty());
+        assert!(server.route(DRIVER_1).await.stops.is_empty());
+        let retry = server
+            .client
+            .post(format!("{}/v1/deliveries", server.base))
+            .bearer_auth(DISPATCHER)
+            .header("Idempotency-Key", "delete-create-fixture")
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), StatusCode::CONFLICT);
+        // Hard deletion and the retired key must survive process restart.
+        server.close().await;
+        let restarted = Server::start(&path, clock).await;
+        let jobs: Vec<Delivery> = restarted
+            .get("/v1/deliveries", DISPATCHER)
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(jobs.is_empty());
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let saved: i64 = db
+            .query_row("SELECT COUNT(*) FROM idempotency", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(saved, 0);
+        let retired: i64 = db
+            .query_row("SELECT COUNT(*) FROM idempotency_retired", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(retired, 1);
+    }
+}
+
+#[tokio::test]
+async fn deleting_assigned_work_keeps_remaining_route_order_and_execution() {
+    let dir = TempDir::new().unwrap();
+    let server = Server::start(&dir.path().join("delete-route.db"), TestClock::new()).await;
+    server.driver_online(DRIVER_1, 3).await;
+    let removed = server.create(new_job()).await;
+    assert_eq!(
+        server.assign(&removed, "driver-1").await.status(),
+        StatusCode::OK
+    );
+    let kept = server.create(new_job()).await;
+    assert_eq!(server.assign(&kept, "driver-1").await.status(), StatusCode::OK);
+    let before = server.route(DRIVER_1).await;
+    assert_eq!(
+        server
+            .request(
+                Method::DELETE,
+                &format!("/v1/deliveries/{}", removed.id),
+                Some(DISPATCHER),
+                None,
+            )
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let after = server.route(DRIVER_1).await;
+    let expected: Vec<_> = before
+        .stops
+        .iter()
+        .filter(|s| s.delivery_id != removed.id)
+        .map(|s| (&s.delivery_id, s.kind))
+        .collect();
+    let actual: Vec<_> = after
+        .stops
+        .iter()
+        .map(|s| (&s.delivery_id, s.kind))
+        .collect();
+    assert_eq!(actual, expected);
+    assert_eq!(after.stops.len(), 2);
+    assert_eq!(
+        server.status(&kept, DRIVER_1, "picked_up").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        server.status(&kept, DRIVER_1, "delivered").await.status(),
+        StatusCode::OK
+    );
+}

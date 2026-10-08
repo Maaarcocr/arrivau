@@ -26,6 +26,102 @@ final class ReadinessStoreTests: XCTestCase {
         store = nil; backend = nil
     }
 
+    func testDispatcherRouteIsLimitedToCurrentTeamAndSelectedRole() async throws {
+        let route = await store.dispatcherRoute(driverId: "dual-1")
+        XCTAssertEqual(route?.driverId, "dual-1")
+        let unknown = await store.dispatcherRoute(driverId: "other-team-driver")
+        XCTAssertNil(unknown)
+        XCTAssertTrue(store.switchRole(to: .driver))
+        let forbidden = await store.dispatcherRoute(driverId: "dual-1")
+        XCTAssertNil(forbidden)
+        XCTAssertEqual(backend.withState { $0.records.filter { $0.path.hasSuffix("/route") && $0.path.hasPrefix("/v1/drivers/") }.count }, 1)
+    }
+
+    func testFailedDispatcherRouteDoesNotReturnOldPlan() async {
+        let initial = await store.dispatcherRoute(driverId: "dual-1")
+        XCTAssertNotNil(initial)
+        backend.withState { $0.failReads = true }
+        let failed = await store.dispatcherRoute(driverId: "dual-1")
+        XCTAssertNil(failed)
+    }
+
+    func testDeleteDeliveryRemovesConfirmedWorkEvenWhenRefreshFails() async {
+        backend.withState { $0.failReadsAfterWrite = true }
+        let deleted = await store.deleteDelivery(deliveryId: "delivery-1")
+        XCTAssertTrue(deleted)
+        XCTAssertTrue(store.deliveries.isEmpty)
+        XCTAssertNotNil(store.syncErrorMessage)
+        let repeated = await store.deleteDelivery(deliveryId: "delivery-1")
+        XCTAssertFalse(repeated)
+        XCTAssertEqual(backend.withState { $0.deleteWrites }, 1)
+    }
+
+    func testDeleteDeliveryRejectsDriverViewAndUnknownDelivery() async {
+        let unknown = await store.deleteDelivery(deliveryId: "other-team-delivery")
+        XCTAssertFalse(unknown)
+        XCTAssertTrue(store.switchRole(to: .driver))
+        let forbidden = await store.deleteDelivery(deliveryId: "delivery-1")
+        XCTAssertFalse(forbidden)
+        XCTAssertEqual(backend.withState { $0.deleteWrites }, 0)
+    }
+
+    func testLostOrCancelledDeleteResponseStaysUnconfirmedAndCanRetry() async {
+        for cancelled in [false, true] {
+            backend.withState {
+                $0.deleted = false; $0.failReads = false
+                $0.failReadsAfterWrite = true
+                $0.loseDeleteResponse = !cancelled; $0.cancelDeleteResponse = cancelled
+            }
+            await store.refresh(force: true)
+            let uncertain = await store.deleteDelivery(deliveryId: "delivery-1")
+            XCTAssertFalse(uncertain)
+            XCTAssertEqual(store.deliveries.count, 1)
+            backend.withState { $0.loseDeleteResponse = false; $0.cancelDeleteResponse = false }
+            let retried = await store.deleteDelivery(deliveryId: "delivery-1")
+            XCTAssertTrue(retried)
+            XCTAssertTrue(store.deliveries.isEmpty)
+        }
+    }
+
+    func testDeleteDoubleTapAndRoleSwitchAreBlockedDuringMutation() async {
+        let started = expectation(description: "Deletion started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.gatedPath = "/v1/deliveries/delivery-1"
+            $0.gate = release; $0.onGatedRequest = { started.fulfill() }
+        }
+        let first = Task { await store.deleteDelivery(deliveryId: "delivery-1") }
+        await fulfillment(of: [started], timeout: 5)
+        let second = await store.deleteDelivery(deliveryId: "delivery-1")
+        XCTAssertFalse(second)
+        XCTAssertFalse(store.switchRole(to: .driver))
+        release.signal()
+        let deleted = await first.value
+        XCTAssertTrue(deleted)
+        XCTAssertEqual(backend.withState { $0.deleteWrites }, 1)
+    }
+
+    func testDeleteResponseFromOldSessionCannotChangeNewTeam() async {
+        let started = expectation(description: "Deletion started")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        backend.withState {
+            $0.gatedPath = "/v1/deliveries/delivery-1"
+            $0.gate = release; $0.onGatedRequest = { started.fulfill() }
+        }
+        let old = Task { await store.deleteDelivery(deliveryId: "delivery-1") }
+        await fulfillment(of: [started], timeout: 5)
+        store.logout()
+        backend.withState { $0.teamId = "new-team"; $0.deleted = false }
+        await store.login(as: .dual)
+        release.signal()
+        let deleted = await old.value
+        XCTAssertFalse(deleted)
+        XCTAssertEqual(store.principal?.teamId, "new-team")
+        XCTAssertEqual(store.deliveries.count, 1)
+    }
+
     func testUnknownDoesNotRequestSuggestionsOrPermitAssignmentOrPickup() async throws {
         let suggestions = await store.suggestions(for: "delivery-1")
         let assigned = await store.assign(deliveryId: "delivery-1", driverId: "dual-1")
@@ -354,6 +450,10 @@ private final class ReadinessBackend {
     var teamId = "review"
     var restaurants: [Restaurant] = []
     var records: [Record] = []
+    var deleted = false
+    var deleteWrites = 0
+    var loseDeleteResponse = false
+    var cancelDeleteResponse = false
     var readinessWrites = 0
     var restaurantWrites = 0
     var failReads = false
@@ -401,10 +501,10 @@ private final class ReadinessBackend {
             if method == "GET" {
                 switch path {
                 case "/v1/me": return (200, try APIClient.encoder().encode(Principal(id: "dual-1", name: "Revisione", role: "dispatcher", roles: ["dispatcher", "driver"], teamId: state.teamId)))
-                case "/v1/deliveries": return (200, try APIClient.encoder().encode([state.deliveryReadOverride ?? state.job]))
+                case "/v1/deliveries": return (200, try APIClient.encoder().encode(state.deleted ? [] : [state.deliveryReadOverride ?? state.job]))
                 case "/v1/drivers": return (200, try APIClient.encoder().encode([driver]))
                 case "/v1/shift": return (200, try APIClient.encoder().encode(driver))
-                case "/v1/route": return (200, try APIClient.encoder().encode(route))
+                case "/v1/route", "/v1/drivers/dual-1/route": return (200, try APIClient.encoder().encode(route))
                 case "/v1/restaurants": return (200, try APIClient.encoder().encode(state.restaurants))
                 case "/v1/deliveries/delivery-1/suggestions": return (200, try APIClient.encoder().encode([Suggestion(driverId: "dual-1", incrementalTravelSeconds: 0, route: route)]))
                 default: return (404, Data())
@@ -412,6 +512,13 @@ private final class ReadinessBackend {
             }
             if let key, let replay = state.replays[key] { return (200, replay) }
             if state.failReadsAfterWrite { state.failReads = true }
+            if method == "DELETE", path == "/v1/deliveries/delivery-1" {
+                state.deleted = true
+                state.deleteWrites += 1
+                if state.loseDeleteResponse { throw URLError(.networkConnectionLost) }
+                if state.cancelDeleteResponse { throw CancellationError() }
+                return (204, Data())
+            }
             if path.hasSuffix("/readiness") {
                 let update = try APIClient.decoder().decode(ReadinessUpdate.self, from: body)
                 guard state.job.readinessRevision == update.expectedRevision else {

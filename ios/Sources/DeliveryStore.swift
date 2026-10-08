@@ -1004,6 +1004,38 @@ final class DeliveryStore: ObservableObject {
             return delivery
         }
     }
+    func deleteDelivery(deliveryId: String) async -> Bool {
+        guard validateSession(), role == .dispatcher, principal?.supports(.dispatcher) == true,
+              deliveries.contains(where: { $0.id == deliveryId }), !isMutating else { return false }
+        let result: Bool? = await mutate({ api in
+            try await api.deleteDelivery(deliveryId: deliveryId)
+            return true
+        }) { _ in
+            self.availableDeliveries.removeAll { $0.id == deliveryId }
+            self.pendingActions.removeValue(forKey: deliveryId)
+            self.readinessNeedsRefresh.remove(deliveryId)
+        }
+        return result == true
+    }
+
+    /// Only a dispatcher may inspect another member of the currently loaded team.
+    func dispatcherRoute(driverId: String) async -> DriverRoute? {
+        guard validateSession(), role == .dispatcher, principal?.supports(.dispatcher) == true,
+              drivers.contains(where: { $0.id == driverId }), let api = client else { return nil }
+        let session = sessionId
+        let view = viewId
+        do {
+            let planned = try await api.route(driverId: driverId)
+            guard session == sessionId, view == viewId, !Task.isCancelled,
+                  planned.driverId == driverId, drivers.contains(where: { $0.id == driverId }) else { return nil }
+            return planned
+        } catch {
+            guard session == sessionId, view == viewId, !Task.isCancelled else { return nil }
+            _ = handleUnauthorized(error)
+            return nil
+        }
+    }
+
     func assignedRoute(for deliveryId: String) async -> DriverRoute? {
         guard validateSession(), role == .dispatcher, principal?.supports(.dispatcher) == true,
               let current = deliveries.first(where: { $0.id == deliveryId }), current.status != .delivered,

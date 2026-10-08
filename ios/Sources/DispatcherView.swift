@@ -66,24 +66,9 @@ struct DispatcherView: View {
                     }
                     .disabled(store.isMutating).accessibilityIdentifier("invite_driver")
                 }
-                ExpandableDetails("Corrieri · \(store.drivers.filter(\.active).count) in turno", identifier: "drivers_details") {
-                    ForEach(store.drivers) { driver in
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack {
-                                Label(driver.displayName, systemImage: "bicycle")
-                                Spacer()
-                                Text(driver.active ? "In turno" : "Fuori turno")
-                                    .font(.subheadline).foregroundStyle(driver.active ? .green : .secondary)
-                            }
-                            if let timestamp = driver.locationUpdatedAt {
-                                LocationAgeLabel(timestamp: timestamp, accessibilityID: "driver_location_age_\(driver.id)")
-                            } else {
-                                Text("Posizione non disponibile").font(.caption).foregroundStyle(.secondary)
-                                    .accessibilityIdentifier("driver_location_age_\(driver.id)")
-                            }
-                        }.accessibilityIdentifier("driver_\(driver.id)")
-                    }
-                }
+                NavigationLink { DispatcherDriversView() } label: {
+                    Label("Driver · \(store.drivers.filter(\.active).count) in turno", systemImage: "bicycle")
+                }.accessibilityIdentifier("dispatcher_drivers")
                 if store.deliveries.contains(where: { $0.status == .delivered }) {
                     ExpandableDetails("Completate", identifier: "completed_deliveries") {
                         ForEach(store.deliveries.filter { $0.status == .delivered }.sorted { $0.createdAt > $1.createdAt }) { delivery in
@@ -116,6 +101,8 @@ struct DispatcherView: View {
 
 struct DeliveryDetailView: View {
     @EnvironmentObject private var store: DeliveryStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var showingDeleteConfirmation = false
     let deliveryId: String
     var onAssigned: (() -> Void)? = nil
     @State private var suggestions: [Suggestion]?
@@ -236,6 +223,15 @@ struct DeliveryDetailView: View {
                             }
                         }
                     }
+                    if store.role == .dispatcher, store.principal?.supports(.dispatcher) == true {
+                        Section {
+                            Button("Elimina consegna", role: .destructive) {
+                                showingDeleteConfirmation = true
+                            }
+                            .disabled(store.isMutating)
+                            .accessibilityIdentifier("delete_delivery")
+                        }
+                    }
                     SyncFooter()
                 }
                 .task(id: assignedRouteContext) {
@@ -252,6 +248,16 @@ struct DeliveryDetailView: View {
         }
         .navigationTitle("Consegna")
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("Eliminare definitivamente questa consegna?", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
+            Button("Elimina definitivamente", role: .destructive) {
+                Task {
+                    if await store.deleteDelivery(deliveryId: deliveryId) { dismiss() }
+                }
+            }.accessibilityIdentifier("confirm_delete_delivery")
+            Button("Annulla", role: .cancel) { }.accessibilityIdentifier("cancel_delete_delivery")
+        } message: {
+            Text("\(delivery?.shopName ?? "Consegna") • \(delivery?.status.title ?? "Stato da verificare"). La consegna verrà rimossa anche dallo storico e dal percorso del corriere. L’operazione non è annullabile. Se è già assegnata o ritirata, avvisa il corriere e concorda come gestire il cibo prima di eliminarla.")
+        }
         .sheet(isPresented: $showingEstimate) {
             ReadinessEstimateView(deliveryId: deliveryId, expectedRevision: estimateRevision)
         }

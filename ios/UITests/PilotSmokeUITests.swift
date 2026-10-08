@@ -113,6 +113,7 @@ final class PilotSmokeUITests: XCTestCase {
         XCTAssertTrue(element("account_location_sharing").exists,
                       "Same-account role changes must retain the explicit sharing consent")
         capture("dual-account-centrale", showing: app.buttons["role_dispatcher"])
+        assertDispatcherDriverScreens(deliveryID: delivery.id, completed: false)
         selectRole("driver")
         waitForLabel(app.staticTexts["next_stop_title"], containing: shopName)
         XCTAssertTrue(app.buttons["confirm_pickup"].isHittable,
@@ -180,6 +181,26 @@ final class PilotSmokeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["empty_route"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["confirm_dropoff"].exists)
         try assertStatus(delivery.id, "delivered", stops: [])
+        selectRole("dispatcher")
+        assertDispatcherDriverScreens(deliveryID: delivery.id, completed: true)
+        tap(app.buttons["dispatcher_drivers"])
+        tap(app.buttons["driver_\(driverID)"])
+        tap(app.buttons["driver_deliveries"])
+        tap(app.buttons["history_delivery_\(delivery.id)"])
+        tap(app.buttons["delete_delivery"])
+        tap(app.buttons.matching(identifier: "cancel_delete_delivery").firstMatch)
+        XCTAssertTrue(app.buttons["delete_delivery"].waitForExistence(timeout: 5))
+        try assertStatus(delivery.id, "delivered", stops: [])
+        tap(app.buttons["delete_delivery"])
+        tap(app.buttons.matching(identifier: "confirm_delete_delivery").firstMatch)
+        XCTAssertTrue(element("dispatcher_driver_history").waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["history_delivery_\(delivery.id)"].exists)
+        let remaining: [Delivery] = try read("v1/deliveries")
+        XCTAssertFalse(remaining.contains { $0.id == delivery.id })
+        navigateBack(to: app.buttons["driver_deliveries"])
+        navigateBack(to: app.buttons["driver_\(driverID)"])
+        navigateBack(to: app.buttons["create_delivery"])
+        selectRole("driver")
         tap(app.buttons["shift_settings"])
         tap(app.buttons["toggle_shift"])
         waitUntilAbsent(app.buttons["close_shift_settings"])
@@ -189,6 +210,75 @@ final class PilotSmokeUITests: XCTestCase {
         XCTAssertFalse(ended.active)
         let finalIdentity: Principal = try read("v1/me")
         XCTAssertEqual(finalIdentity, identity)
+    }
+
+    private func assertDispatcherDriverScreens(deliveryID: String, completed: Bool) {
+        assertRole("dispatcher")
+        tap(app.buttons["dispatcher_drivers"])
+        tap(app.buttons["driver_\(driverID)"])
+        XCTAssertTrue(app.buttons["driver_deliveries"].waitForExistence(timeout: 5))
+        tap(app.buttons["driver_live_route"])
+        let liveRoute = element("dispatcher_driver_live_route")
+        XCTAssertTrue(liveRoute.waitForExistence(timeout: 5))
+        if completed {
+            XCTAssertTrue(element("driver_route_empty").waitForExistence(timeout: 10))
+            XCTAssertFalse(element("dispatcher_route_stop_0").exists)
+        } else {
+            XCTAssertTrue(element("route_map").waitForExistence(timeout: 10))
+            XCTAssertEqual(app.descendants(matching: .any).matching(identifier: "route_map").count, 1)
+            XCTAssertTrue(element("route_map_test_mode").waitForExistence(timeout: 5))
+            let pickup = element("dispatcher_route_stop_0")
+            reveal(pickup, in: liveRoute)
+            waitForLabel(pickup, containing: "Ritiro")
+            let dropoff = element("dispatcher_route_stop_1")
+            reveal(dropoff, in: liveRoute)
+            waitForLabel(dropoff, containing: "Consegna")
+            XCTAssertFalse(element("driver_route_empty").exists)
+        }
+        navigateBack(to: app.buttons["driver_live_route"])
+        tap(app.buttons["driver_deliveries"])
+        let history = element("dispatcher_driver_history")
+        XCTAssertTrue(history.waitForExistence(timeout: 5))
+        let section = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS[c] %@", completed ? "Completate" : "In corso"
+        )).firstMatch
+        XCTAssertTrue(section.waitForExistence(timeout: 5))
+        let row = app.buttons["history_delivery_\(deliveryID)"]
+        reveal(row, in: history)
+        waitForLabel(row, containing: shopName)
+        XCTAssertTrue(row.label.contains(completed ? "Consegnata" : "Assegnata"))
+        if completed {
+            // The completion date belongs to this delivery, not just the screen title.
+            waitForLabel(element("history_completed_at_\(deliveryID)"), containing: "Consegnata il")
+        }
+        tap(row)
+        waitForLabel(app.staticTexts["delivery_status"], containing: completed ? "Consegnata" : "Assegnata")
+        navigateBack(to: history)
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Back from details must retain the selected driver's history")
+        navigateBack(to: app.buttons["driver_deliveries"])
+        // Reopen the route after visiting history to catch stale destination state.
+        tap(app.buttons["driver_live_route"])
+        XCTAssertTrue(liveRoute.waitForExistence(timeout: 5))
+        XCTAssertTrue(element(completed ? "driver_route_empty" : "dispatcher_route_stop_0")
+            .waitForExistence(timeout: 10))
+        navigateBack(to: app.buttons["driver_live_route"])
+        navigateBack(to: app.buttons["driver_\(driverID)"])
+        navigateBack(to: app.buttons["create_delivery"])
+        assertRole("dispatcher")
+    }
+
+    private func navigateBack(to destination: XCUIElement) {
+        tap(app.navigationBars.buttons["BackButton"])
+        XCTAssertTrue(destination.waitForExistence(timeout: 5))
+    }
+
+    private func reveal(_ target: XCUIElement, in scrollView: XCUIElement) {
+        XCTAssertTrue(scrollView.waitForExistence(timeout: 5))
+        for _ in 0..<5 {
+            if target.exists && target.isHittable { return }
+            scrollView.swipeUp()
+        }
+        XCTAssertTrue(target.exists && target.isHittable, "Expected fixture row must be visible")
     }
 
     private func createRestaurantPreservingName() throws -> Restaurant {
